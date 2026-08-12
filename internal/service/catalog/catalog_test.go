@@ -3,7 +3,7 @@ package catalog
 import (
 	"testing"
 
-	"grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/domain"
 )
 
 func equal(a, b []string) bool {

@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"grove-gateway/internal/domain"
-	"grove-gateway/internal/repository/memory"
+	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/repository/memory"
 )
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"grove-gateway/internal/domain"
-	"grove-gateway/internal/repository"
+	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/repository"
 )
 
 // Report is one finished request, as the proxy saw it.

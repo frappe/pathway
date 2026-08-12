@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
-	"grove-gateway/internal/service/admission"
-	"grove-gateway/internal/service/routing"
-	"grove-gateway/internal/service/transform"
+	"github.com/phot0n/grove-gateway/internal/service/admission"
+	"github.com/phot0n/grove-gateway/internal/service/routing"
+	"github.com/phot0n/grove-gateway/internal/service/transform"
 )
 
 // State is what one request accumulates down the chain — one struct in the context rather than a

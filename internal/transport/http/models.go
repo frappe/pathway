@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"grove-gateway/internal/domain"
-	"grove-gateway/internal/transport/respond"
+	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/transport/respond"
 )
 
 // GET /v1/models — the gateway answers directly with the models THIS key may use, instead of

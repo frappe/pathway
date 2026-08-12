@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"grove-gateway/internal/domain"
-	"grove-gateway/internal/repository/memory"
+	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/repository/memory"
 )
 
 const secret = "gr_sk_test"

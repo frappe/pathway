@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"grove-gateway/internal/domain"
-	"grove-gateway/internal/repository"
-	"grove-gateway/internal/transport/respond"
+	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/repository"
+	"github.com/phot0n/grove-gateway/internal/transport/respond"
 )
 
 // The control plane's push/pull surface, token-gated on X-Grove-Admin-Token. Grove is the source of

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"net/http"
 
-	"grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/domain"
 )
 
 // Error writes the shape an OpenAI client expects to parse.

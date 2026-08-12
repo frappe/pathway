@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"grove-gateway/internal/config"
-	"grove-gateway/internal/domain"
-	"grove-gateway/internal/repository/memory"
+	"github.com/phot0n/grove-gateway/internal/config"
+	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/repository/memory"
 )
 
 // The multipart endpoints — /v1/audio/transcriptions and friends — carry their model in a form

@@ -5,9 +5,9 @@ package catalog
 import (
 	"context"
 
-	"grove-gateway/internal/domain"
-	"grove-gateway/internal/repository"
-	"grove-gateway/internal/service/admission"
+	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/repository"
+	"github.com/phot0n/grove-gateway/internal/service/admission"
 )
 
 type Service struct {

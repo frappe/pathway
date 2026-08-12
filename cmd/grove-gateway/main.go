@@ -7,25 +7,33 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
-	"grove-gateway/internal/config"
-	"grove-gateway/internal/observability"
-	redisstore "grove-gateway/internal/repository/redis"
-	"grove-gateway/internal/service/admission"
-	"grove-gateway/internal/service/catalog"
-	"grove-gateway/internal/service/metering"
-	"grove-gateway/internal/service/provisioning"
-	"grove-gateway/internal/service/routing"
-	"grove-gateway/internal/service/transform"
-	gatewayhttp "grove-gateway/internal/transport/http"
-	"grove-gateway/internal/transport/http/proxy"
+	"github.com/phot0n/grove-gateway/internal/config"
+	"github.com/phot0n/grove-gateway/internal/observability"
+	redisstore "github.com/phot0n/grove-gateway/internal/repository/redis"
+	"github.com/phot0n/grove-gateway/internal/service/admission"
+	"github.com/phot0n/grove-gateway/internal/service/catalog"
+	"github.com/phot0n/grove-gateway/internal/service/metering"
+	"github.com/phot0n/grove-gateway/internal/service/provisioning"
+	"github.com/phot0n/grove-gateway/internal/service/routing"
+	"github.com/phot0n/grove-gateway/internal/service/transform"
+	gatewayhttp "github.com/phot0n/grove-gateway/internal/transport/http"
+	"github.com/phot0n/grove-gateway/internal/transport/http/proxy"
 )
 
+// version is stamped by the release build; a local build reports dev.
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println(version)
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("grove-gateway stopped", "err", err)
 		os.Exit(1)
@@ -106,6 +114,7 @@ func run() error {
 	rebuilt.applyScalars(live.Get())
 
 	log.Process.Info("starting",
+		"version", version,
 		"plane", plane(cfg),
 		"redis", cfg.RedisAddr,
 		"config", live.Path(),

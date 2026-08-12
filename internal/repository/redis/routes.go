@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/domain"
 )
 
 // deploy:<model> — a JSON array of placements, replaced whole on each push and never expiring.

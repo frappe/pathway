@@ -811,10 +811,11 @@ fake in `dataplane_test.go`) for token counts.
 
 ## Deploying
 
-Built on the target box by `playbooks/roles/build_gateway_agent` (`go build ./cmd/grove-gateway`),
-installed to `/usr/local/bin/grove-gateway`, run under systemd with
-`Type=notify` + `NotifyAccess=all` — required, because the PID changes on an upgrade and systemd has
-to follow the child's `MAINPID`.
+Tagged versions publish a static `linux/amd64` and `linux/arm64` binary (`CGO_ENABLED=0`,
+`-trimpath`) plus a `sha256sums.txt`. A control plane downloads the checksummed asset, installs it to
+`/usr/local/bin/grove-gateway`, and runs it under systemd with `Type=notify` + `NotifyAccess=all` —
+required, because the PID changes on an upgrade and systemd has to follow the child's `MAINPID`.
+Grove drives this from its `install_gateway_agent` role.
 
 - **New binary** → copy + `systemctl reload` (SIGHUP). No dropped connections.
 - **Changed tunable** → write `config.json` + SIGUSR1. No restart.

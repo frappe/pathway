@@ -5,8 +5,8 @@ package admission
 import (
 	"context"
 
-	"grove-gateway/internal/domain"
-	"grove-gateway/internal/repository"
+	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/grove-gateway/internal/repository"
 )
 
 // Identity is everything the rest of the request path needs to know about the caller. Carried in
