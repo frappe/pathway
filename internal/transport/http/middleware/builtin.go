@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/phot0n/grove-gateway/internal/domain"
-	"github.com/phot0n/grove-gateway/internal/service/metering"
-	"github.com/phot0n/grove-gateway/internal/service/routing"
-	"github.com/phot0n/grove-gateway/internal/service/transform"
-	"github.com/phot0n/grove-gateway/internal/transport/respond"
+	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/service/metering"
+	"github.com/phot0n/pathway/internal/service/routing"
+	"github.com/phot0n/pathway/internal/service/transform"
+	"github.com/phot0n/pathway/internal/transport/respond"
 )
 
 func init() {

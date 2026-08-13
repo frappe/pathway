@@ -1,4 +1,4 @@
-# grove-gateway
+# pathway
 
 The Grove data plane. One Go binary that terminates TLS, authenticates callers, picks an engine,
 proxies the request, meters what it cost, and upgrades itself without dropping a connection.
@@ -104,14 +104,14 @@ The whole service is four rings, and **imports only ever point inward**:
                     │  repository         │  ← redis/ and memory/ implement it
                     └─────────────────────┘
 
-        cmd/grove-gateway   the only place that knows all four exist
+        cmd/pathway   the only place that knows all four exist
 ```
 
 `service` depends on the repository **interfaces**, never on an implementation — so the arrow from
 `redis/` points *up* into `repository`, not sideways into `service`. That inversion is the only
 reason the services are testable.
 
-Five invariants carry the whole thing, and **`cmd/grove-gateway/architecture_test.go` enforces
+Five invariants carry the whole thing, and **`cmd/pathway/architecture_test.go` enforces
 them** — each is one import statement away from being broken, with nothing failing and nothing
 looking wrong:
 
@@ -253,7 +253,7 @@ It is not architecture for its own sake — it bought three specific things:
 | The request pipeline | `transport/http/middleware/builtin.go` |
 | The proxy itself | `transport/http/proxy/` |
 | Shutdown, drain, binary upgrade | `transport/http/lifecycle.go` |
-| How a reload reaches running state | `cmd/grove-gateway/main.go` — `built.reload` |
+| How a reload reaches running state | `cmd/pathway/main.go` — `built.reload` |
 
 ---
 
@@ -539,7 +539,7 @@ forwarded byte-for-byte rather than re-encoded.
 
 ### Add a storage backend
 
-Implement the interface in `repository/repository.go` and wire it in `cmd/grove-gateway/main.go`.
+Implement the interface in `repository/repository.go` and wire it in `cmd/pathway/main.go`.
 Nothing in `service/` knows which one it got. For a second destination (say a local SQLite archive
 of usage), a decorator holding two `repository.Usage` values is the whole change — the primary's
 error is returned, the archive's is logged.
@@ -560,7 +560,7 @@ engine leaves rotation permanently.
 
 Split by **lifetime**, and disjoint — nothing appears in both halves.
 
-### Environment — identity, secrets, sockets, paths (`/etc/grove-gateway/agent.env`)
+### Environment — identity, secrets, sockets, paths (`/etc/pathway/agent.env`)
 
 | | |
 |---|---|
@@ -577,7 +577,7 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
 | `GROVE_NODE_EXPORTER_URL` | default `http://127.0.0.1:9100/metrics` |
 | `GROVE_ACCESS_LOG` | file for the per-request line; blank → stdout |
 | `GROVE_ERROR_LOG` | file mirroring Warn and above out of the process log; blank → stdout only |
-| `GROVE_CONFIG` | tunables path; default `/etc/grove-gateway/config.json` |
+| `GROVE_CONFIG` | tunables path; default `/etc/pathway/config.json` |
 | `GROVE_PID_FILE` | optional |
 
 ### File — tunables, re-read on **SIGUSR1**
@@ -782,7 +782,7 @@ Against a real Redis:
 redis-server --port 6399 --save '' --daemonize yes
 GROVE_ADMIN_TOKEN=tok GROVE_GATEWAY_ID=gw-dev \
 GROVE_REDIS_ADDR=127.0.0.1:6399 GROVE_LISTEN_HTTP=127.0.0.1:8080 \
-go run ./cmd/grove-gateway
+go run ./cmd/pathway
 ```
 
 Seed it the way the control plane does, then call it:
@@ -813,7 +813,7 @@ fake in `dataplane_test.go`) for token counts.
 
 Tagged versions publish a static `linux/amd64` and `linux/arm64` binary (`CGO_ENABLED=0`,
 `-trimpath`) plus a `sha256sums.txt`. A control plane downloads the checksummed asset, installs it to
-`/usr/local/bin/grove-gateway`, and runs it under systemd with `Type=notify` + `NotifyAccess=all` —
+`/usr/local/bin/pathway`, and runs it under systemd with `Type=notify` + `NotifyAccess=all` —
 required, because the PID changes on an upgrade and systemd has to follow the child's `MAINPID`.
 Grove drives this from its `install_gateway_agent` role.
 

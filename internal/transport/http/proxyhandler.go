@@ -3,8 +3,8 @@ package http
 import (
 	"net/http"
 
-	"github.com/phot0n/grove-gateway/internal/transport/http/middleware"
-	"github.com/phot0n/grove-gateway/internal/transport/respond"
+	"github.com/phot0n/pathway/internal/transport/http/middleware"
+	"github.com/phot0n/pathway/internal/transport/respond"
 )
 
 // proxyHandler is the bottom of the chain: every decision has been made above it, so all this does

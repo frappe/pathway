@@ -1,4 +1,4 @@
-// Command grove-gateway is the Grove data plane. One binary, two planes: a gateway holds tenant
+// Command pathway is the Grove data plane. One binary, two planes: a gateway holds tenant
 // state and picks a route, an ingress holds none and picks a replica inside one VPC — decided by
 // which id it is given. Signals: SIGHUP upgrades, SIGUSR1 re-reads tunables, SIGTERM drains.
 package main
@@ -13,17 +13,17 @@ import (
 	"os"
 	"time"
 
-	"github.com/phot0n/grove-gateway/internal/config"
-	"github.com/phot0n/grove-gateway/internal/observability"
-	redisstore "github.com/phot0n/grove-gateway/internal/repository/redis"
-	"github.com/phot0n/grove-gateway/internal/service/admission"
-	"github.com/phot0n/grove-gateway/internal/service/catalog"
-	"github.com/phot0n/grove-gateway/internal/service/metering"
-	"github.com/phot0n/grove-gateway/internal/service/provisioning"
-	"github.com/phot0n/grove-gateway/internal/service/routing"
-	"github.com/phot0n/grove-gateway/internal/service/transform"
-	gatewayhttp "github.com/phot0n/grove-gateway/internal/transport/http"
-	"github.com/phot0n/grove-gateway/internal/transport/http/proxy"
+	"github.com/phot0n/pathway/internal/config"
+	"github.com/phot0n/pathway/internal/observability"
+	redisstore "github.com/phot0n/pathway/internal/repository/redis"
+	"github.com/phot0n/pathway/internal/service/admission"
+	"github.com/phot0n/pathway/internal/service/catalog"
+	"github.com/phot0n/pathway/internal/service/metering"
+	"github.com/phot0n/pathway/internal/service/provisioning"
+	"github.com/phot0n/pathway/internal/service/routing"
+	"github.com/phot0n/pathway/internal/service/transform"
+	gatewayhttp "github.com/phot0n/pathway/internal/transport/http"
+	"github.com/phot0n/pathway/internal/transport/http/proxy"
 )
 
 // version is stamped by the release build; a local build reports dev.
@@ -35,7 +35,7 @@ func main() {
 		return
 	}
 	if err := run(); err != nil {
-		slog.Error("grove-gateway stopped", "err", err)
+		slog.Error("pathway stopped", "err", err)
 		os.Exit(1)
 	}
 }

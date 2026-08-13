@@ -7,16 +7,16 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/phot0n/grove-gateway/internal/config"
-	"github.com/phot0n/grove-gateway/internal/service/admission"
-	"github.com/phot0n/grove-gateway/internal/service/catalog"
-	"github.com/phot0n/grove-gateway/internal/service/metering"
-	"github.com/phot0n/grove-gateway/internal/service/provisioning"
-	"github.com/phot0n/grove-gateway/internal/service/routing"
-	"github.com/phot0n/grove-gateway/internal/service/transform"
-	"github.com/phot0n/grove-gateway/internal/transport/http/middleware"
-	"github.com/phot0n/grove-gateway/internal/transport/http/proxy"
-	"github.com/phot0n/grove-gateway/internal/transport/respond"
+	"github.com/phot0n/pathway/internal/config"
+	"github.com/phot0n/pathway/internal/service/admission"
+	"github.com/phot0n/pathway/internal/service/catalog"
+	"github.com/phot0n/pathway/internal/service/metering"
+	"github.com/phot0n/pathway/internal/service/provisioning"
+	"github.com/phot0n/pathway/internal/service/routing"
+	"github.com/phot0n/pathway/internal/service/transform"
+	"github.com/phot0n/pathway/internal/transport/http/middleware"
+	"github.com/phot0n/pathway/internal/transport/http/proxy"
+	"github.com/phot0n/pathway/internal/transport/respond"
 )
 
 // Server holds the services the handlers reach and the two secrets the transport itself checks.

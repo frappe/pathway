@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/phot0n/grove-gateway/internal/domain"
-	"github.com/phot0n/grove-gateway/internal/repository"
+	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/repository"
 )
 
 // StickyTTL is how long a caller that names its own session keeps its engine. Client-declared

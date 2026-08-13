@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/phot0n/grove-gateway/internal/domain"
-	"github.com/phot0n/grove-gateway/internal/repository"
+	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/repository"
 )
 
 // Store is every repository over one set of maps. Fail makes any call return an error, which is

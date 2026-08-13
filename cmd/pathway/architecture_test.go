@@ -77,7 +77,7 @@ func TestDomainIsPure(t *testing.T) {
 	banned := []string{"net", "net/http", "os", "database/sql", "log/slog"}
 	for file, paths := range imports(t, filepath.Join(internalDir, "domain"), nil) {
 		for _, path := range paths {
-			if strings.HasPrefix(path, "github.com/phot0n/grove-gateway/") {
+			if strings.HasPrefix(path, "github.com/phot0n/pathway/") {
 				t.Errorf("%s imports %s — domain depends on nothing in this module", file, path)
 			}
 			for _, bad := range banned {
@@ -96,10 +96,10 @@ func TestServicesDependOnInterfacesNotImplementations(t *testing.T) {
 	skipTests := func(path string) bool { return strings.HasSuffix(path, "_test.go") }
 	for file, paths := range imports(t, filepath.Join(internalDir, "service"), skipTests) {
 		for _, path := range paths {
-			if strings.HasPrefix(path, "github.com/phot0n/grove-gateway/internal/repository/") {
+			if strings.HasPrefix(path, "github.com/phot0n/pathway/internal/repository/") {
 				t.Errorf("%s imports %s — services take repository interfaces, not implementations", file, path)
 			}
-			if strings.HasPrefix(path, "github.com/phot0n/grove-gateway/internal/transport/") {
+			if strings.HasPrefix(path, "github.com/phot0n/pathway/internal/transport/") {
 				t.Errorf("%s imports %s — a service must not know how it is being called", file, path)
 			}
 		}
@@ -112,12 +112,12 @@ func TestServicesDependOnInterfacesNotImplementations(t *testing.T) {
 func TestRepositoriesDependOnlyOnDomain(t *testing.T) {
 	for file, paths := range imports(t, filepath.Join(internalDir, "repository"), nil) {
 		for _, path := range paths {
-			if !strings.HasPrefix(path, "github.com/phot0n/grove-gateway/") {
+			if !strings.HasPrefix(path, "github.com/phot0n/pathway/") {
 				continue
 			}
 			switch {
-			case path == "github.com/phot0n/grove-gateway/internal/domain",
-				path == "github.com/phot0n/grove-gateway/internal/repository":
+			case path == "github.com/phot0n/pathway/internal/domain",
+				path == "github.com/phot0n/pathway/internal/repository":
 			default:
 				t.Errorf("%s imports %s — a repository knows domain types and nothing else", file, path)
 			}

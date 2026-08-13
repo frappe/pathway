@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/phot0n/grove-gateway/internal/config"
-	"github.com/phot0n/grove-gateway/internal/domain"
-	"github.com/phot0n/grove-gateway/internal/repository/memory"
+	"github.com/phot0n/pathway/internal/config"
+	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/repository/memory"
 )
 
 // A realtime session is a WebSocket upgrade: a GET with no body, so the model cannot come from

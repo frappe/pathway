@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/phot0n/grove-gateway/internal/domain"
+	"github.com/phot0n/pathway/internal/domain"
 )
 
 // Keys holds credentials. A key's only fact of its own is whether it has been revoked.

@@ -10,10 +10,10 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/phot0n/grove-gateway/internal/service/admission"
-	"github.com/phot0n/grove-gateway/internal/service/metering"
-	"github.com/phot0n/grove-gateway/internal/service/routing"
-	"github.com/phot0n/grove-gateway/internal/service/transform"
+	"github.com/phot0n/pathway/internal/service/admission"
+	"github.com/phot0n/pathway/internal/service/metering"
+	"github.com/phot0n/pathway/internal/service/routing"
+	"github.com/phot0n/pathway/internal/service/transform"
 )
 
 // Middleware is the only shape a component must satisfy — plain net/http, so anything written

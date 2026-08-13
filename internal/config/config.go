@@ -13,7 +13,7 @@ import (
 )
 
 // DefaultPath is where the tunables live. Beside agent.env, which holds the other half.
-const DefaultPath = "/etc/grove-gateway/config.json"
+const DefaultPath = "/etc/pathway/config.json"
 
 // Config is the bootstrap half: what this box IS, and what it is allowed to talk to.
 type Config struct {

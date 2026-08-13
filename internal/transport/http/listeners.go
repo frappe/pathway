@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/phot0n/grove-gateway/internal/config"
+	"github.com/phot0n/pathway/internal/config"
 )
 
 // Host routing needs no code beyond ServeMux: a Go 1.22 pattern takes a host, so the two nginx

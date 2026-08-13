@@ -6,8 +6,8 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/phot0n/grove-gateway/internal/domain"
-	"github.com/phot0n/grove-gateway/internal/repository"
+	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/repository"
 )
 
 type Service struct {

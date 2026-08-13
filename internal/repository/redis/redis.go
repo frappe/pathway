@@ -7,7 +7,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/phot0n/grove-gateway/internal/repository"
+	"github.com/phot0n/pathway/internal/repository"
 )
 
 // Client owns the connection. The repositories are thin values over it — separate types because

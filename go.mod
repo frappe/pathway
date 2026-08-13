@@ -1,4 +1,4 @@
-module github.com/phot0n/grove-gateway
+module github.com/phot0n/pathway
 
 go 1.23
 
