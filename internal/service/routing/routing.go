@@ -5,6 +5,7 @@ package routing
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -177,6 +178,42 @@ func (s *Service) PickReplica(ctx context.Context, model, sessionKey, requestID 
 		s.log.Warn("in-flight claim failed", "engine", route.EngineURL, "err", err)
 	}
 	return route, nil
+}
+
+// What CanServe reports instead of a bare open socket. Fixed strings: they reach a public health
+// check, so they name no model, engine or count.
+var (
+	ErrStoreUnreachable = errors.New("store unreachable")
+	ErrNoEngine         = errors.New("no reachable engine")
+)
+
+// CanServe reports whether a pick would succeed for anything at all — what a health check in front
+// of this box actually needs to know. An unreadable store authenticates nobody and routes nothing;
+// a table whose every target has been ejected serves nobody.
+//
+// A fleet with no models pushed is nil, not ErrNoEngine: nothing is deployed, which is not a broken
+// box, and taking every gateway out of DNS for it would be worse than the 503 a caller gets anyway.
+// In-flight counts are deliberately left at zero — a gateway turning traffic away at capacity is
+// working, so capacity must not read as unhealthy.
+func (s *Service) CanServe(ctx context.Context) error {
+	models, err := s.routes.Models(ctx)
+	if err != nil {
+		return ErrStoreUnreachable
+	}
+	for _, model := range models {
+		table, err := s.routes.Get(ctx, model)
+		if err != nil || len(table) == 0 {
+			continue
+		}
+		s.markUnhealthy(ctx, table)
+		if _, status := domain.PickRoute(table, "", s.region); status == 200 {
+			return nil
+		}
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	return ErrNoEngine
 }
 
 // Release crosses a finished request off its engine.

@@ -143,12 +143,23 @@ func (s *Server) AdminHandler() http.Handler {
 	return mux
 }
 
-// Health answers the liveness check every tier in front of this box asks. It reports 503 the moment
-// a drain starts, which is what pulls the box out of rotation BEFORE its socket goes anywhere.
-func (s *Server) Health(w http.ResponseWriter, _ *http.Request) {
+// Health answers the check every tier in front of this box asks, and answers it with "can I serve",
+// not "is my socket open" — a DNS tier that drops this box from its answers has to be told about a
+// gateway that is up and useless. 503 the moment a drain starts, which pulls the box out of rotation
+// BEFORE its socket goes anywhere, and 503 when a pick would fail for every model it holds.
+//
+// The body is a fixed word either way: this is reachable from the internet unauthenticated, so it
+// names nothing.
+func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
 	if s.drain != nil && s.drain.Draining() {
 		respond.Error(w, http.StatusServiceUnavailable, "draining")
 		return
+	}
+	if s.routing != nil {
+		if err := s.routing.CanServe(r.Context()); err != nil {
+			respond.Error(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 	}
 	_, _ = w.Write([]byte("ok\n"))
 }

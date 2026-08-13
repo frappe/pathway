@@ -191,6 +191,52 @@ func TestPickRefusals(t *testing.T) {
 	}
 }
 
+// CanServe is what the DNS tier in front of this box reads. It has to distinguish three states an
+// open socket cannot: this box is broken, this box is fine, and nothing is deployed anywhere.
+func TestCanServe(t *testing.T) {
+	ejected := twoEngines()
+	ejected.Failures["https://a"] = domain.EjectAfter
+	ejected.Failures["https://b"] = domain.EjectAfter
+
+	unhealthy := memory.New()
+	unhealthy.Routes["qwen3-4b"] = []domain.Route{{EngineURL: "https://a"}}
+
+	// Capacity is not health: a box turning traffic away is working, and pulling it out of DNS would
+	// move that load to a region that has to serve it over a long hop.
+	full := engine("https://full")
+	full.Capacity = 1
+	atCapacity := memory.New()
+	atCapacity.Routes["qwen3-4b"] = []domain.Route{full}
+	atCapacity.InFlight["https://full"] = map[string]bool{"someone": true}
+
+	oneGood := twoEngines()
+	oneGood.Failures["https://a"] = domain.EjectAfter
+
+	broken := twoEngines()
+	broken.Fail["routes"] = true
+
+	for _, c := range []struct {
+		name  string
+		store *memory.Store
+		want  error
+	}{
+		{"an engine to serve", twoEngines(), nil},
+		{"one of two ejected", oneGood, nil},
+		{"at capacity but healthy", atCapacity, nil},
+		{"nothing deployed at all", memory.New(), nil},
+		{"every target ejected", ejected, ErrNoEngine},
+		{"every placement unhealthy", unhealthy, ErrNoEngine},
+		{"the store is unreadable", broken, ErrStoreUnreachable},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := serviceOver(c.store, Options{GatewayID: "gw"}).CanServe(context.Background())
+			if !errors.Is(got, c.want) {
+				t.Errorf("CanServe = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // A caller-chosen session can name the tenant. Only its hash crosses to the infra plane, and only
 // for a route that actually hands off.
 func TestOnlyAnIngressRouteCarriesASessionKey(t *testing.T) {
