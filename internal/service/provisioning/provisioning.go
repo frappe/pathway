@@ -106,3 +106,17 @@ func (s *Service) staleModels(ctx context.Context, keep map[string][]domain.Rout
 func (s *Service) DrainUsage(ctx context.Context) (map[string]map[string]string, error) {
 	return s.store.Usage.Drain(ctx)
 }
+
+// StateHashes is what this box holds, per section/bucket — the control plane diffs its desired
+// state against this and pushes only what differs. Empty on a fresh or wiped store, which is
+// what makes the next push carry everything.
+func (s *Service) StateHashes(ctx context.Context) (map[string]string, error) {
+	return s.store.State.Hashes(ctx)
+}
+
+// ApplyState projects a desired-state push (plan_agent_state_sync.md): upsert what each present
+// section names, delete what it does not, store the carried hashes — one transaction. An error
+// means none of it landed, and the control plane retries on its next tick.
+func (s *Service) ApplyState(ctx context.Context, push repository.StatePush) (repository.StateCounts, error) {
+	return s.store.State.Apply(ctx, push)
+}

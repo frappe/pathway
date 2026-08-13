@@ -30,9 +30,10 @@ type Store struct {
 	Failures map[string]int
 	Usage    map[string]map[string]int64
 	Public   *string
+	Hashes   map[string]string // grove:state_hash — section/bucket → hash
 
 	// Fail names the repositories that should error, by interface name ("routes", "inflight",
-	// "health", "sessions", "keys", "users", "groups", "usage", "catalog").
+	// "health", "sessions", "keys", "users", "groups", "usage", "catalog", "state").
 	Fail map[string]bool
 }
 
@@ -44,7 +45,7 @@ func New() *Store {
 		Groups: map[string]domain.GroupRecord{}, Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, Usage: map[string]map[string]int64{},
-		Fail: map[string]bool{},
+		Hashes: map[string]string{}, Fail: map[string]bool{},
 	}
 }
 
@@ -53,7 +54,7 @@ func (s *Store) Repositories() repository.Store {
 	return repository.Store{
 		Keys: keys{s}, Users: users{s}, Groups: groups{s}, Routes: routes{s},
 		Sessions: sessions{s}, InFlight: inFlight{s}, Health: health{s},
-		Usage: usage{s}, Catalog: catalog{s},
+		Usage: usage{s}, Catalog: catalog{s}, State: state{s},
 	}
 }
 
@@ -375,6 +376,124 @@ func (c catalog) Clear(_ context.Context) error {
 	}
 	c.s.Public = nil
 	return nil
+}
+
+type state struct{ s *Store }
+
+func (st state) Hashes(_ context.Context) (map[string]string, error) {
+	st.s.mu.Lock()
+	defer st.s.mu.Unlock()
+	if err := st.s.failed("state"); err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for k, v := range st.s.Hashes {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// Apply matches the real store: a present section is authoritative for its namespace, a bucket
+// prunes only its own members, and the hashes land with the records — or, on Fail, not at all.
+func (st state) Apply(_ context.Context, push repository.StatePush) (repository.StateCounts, error) {
+	st.s.mu.Lock()
+	defer st.s.mu.Unlock()
+	var counts repository.StateCounts
+	if err := st.s.failed("state"); err != nil {
+		return counts, err
+	}
+	if push.Groups != nil {
+		named := map[string]bool{}
+		for _, rec := range push.Groups.Records {
+			if rec.Name == "" {
+				continue
+			}
+			named[rec.Name] = true
+			st.s.Groups[rec.Name] = domain.GroupRecord{Models: domain.ModelSet(rec.Models)}
+		}
+		for name := range st.s.Groups {
+			if !named[name] {
+				delete(st.s.Groups, name)
+			}
+		}
+		if push.Groups.Catalog == "" {
+			st.s.Public = nil
+		} else {
+			st.s.Public = &push.Groups.Catalog
+		}
+		st.s.Hashes["groups"] = push.Groups.Hash
+		counts.Groups = len(named)
+	}
+	if push.Users != nil {
+		named := map[string]bool{}
+		for label, bucket := range push.Users {
+			for _, rec := range bucket.Records {
+				if rec.Name == "" {
+					continue
+				}
+				named[rec.Name] = true
+				counts.Users++
+				st.s.Users[rec.Name] = domain.UserRecord{
+					Email: rec.Email, Group: rec.Group,
+					Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
+					Limited: rec.Limited,
+				}
+			}
+			st.setBucketHash("users:"+label, bucket.Hash, len(bucket.Records))
+		}
+		for name := range st.s.Users {
+			if _, pushed := push.Users[domain.BucketOf(name)]; pushed && !named[name] {
+				delete(st.s.Users, name)
+			}
+		}
+	}
+	if push.Keys != nil {
+		named := map[string]bool{}
+		for label, bucket := range push.Keys {
+			for _, rec := range bucket.Records {
+				if rec.MeterID == "" {
+					continue
+				}
+				named[rec.MeterID] = true
+				counts.Keys++
+				st.s.Keys[rec.MeterID] = domain.KeyRecord{
+					Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix,
+				}
+			}
+			st.setBucketHash("keys:"+label, bucket.Hash, len(bucket.Records))
+		}
+		for id := range st.s.Keys {
+			if _, pushed := push.Keys[domain.BucketOf(id)]; pushed && !named[id] {
+				delete(st.s.Keys, id)
+			}
+		}
+	}
+	if push.Routes != nil {
+		named := map[string]bool{}
+		for model, table := range push.Routes.Table {
+			if len(table) == 0 {
+				continue
+			}
+			named[model] = true
+			counts.Routes++
+			st.s.Routes[model] = table
+		}
+		for model := range st.s.Routes {
+			if !named[model] {
+				delete(st.s.Routes, model)
+			}
+		}
+		st.s.Hashes["routes"] = push.Routes.Hash
+	}
+	return counts, nil
+}
+
+func (st state) setBucketHash(field, hash string, records int) {
+	if records == 0 {
+		delete(st.s.Hashes, field)
+		return
+	}
+	st.s.Hashes[field] = hash
 }
 
 // deleteFrom skips blank ids, matching the real store: a blank one would name the key prefix

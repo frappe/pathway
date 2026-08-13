@@ -84,6 +84,14 @@ type Catalog interface {
 	Clear(ctx context.Context) error
 }
 
+// State is the desired-state push: apply what the payload names, delete what it does not, and
+// store the hashes it carried — all in one transaction, so the hashes never claim state that
+// did not land. Hashes is what the control plane diffs against before deciding to push at all.
+type State interface {
+	Hashes(ctx context.Context) (map[string]string, error)
+	Apply(ctx context.Context, push StatePush) (StateCounts, error)
+}
+
 // Store is every repository at once, for wiring. Services take only the interfaces they use.
 type Store struct {
 	Keys     Keys
@@ -95,6 +103,7 @@ type Store struct {
 	Health   Health
 	Usage    Usage
 	Catalog  Catalog
+	State    State
 }
 
 // The upsert shapes the control plane pushes. Deliberately flat strings, matching the wire: the
@@ -120,4 +129,44 @@ type UserUpsert struct {
 type GroupUpsert struct {
 	Name   string
 	Models string // comma list
+}
+
+// The state-push shapes (plan_agent_state_sync.md). A nil section is untouched; a present one is
+// authoritative for its namespace, so anything it does not name is deleted. users and keys arrive
+// in buckets (domain.BucketOf) and each bucket prunes only its own members.
+
+type StatePush struct {
+	Groups *GroupsPush
+	Users  map[string]UserBucket // bucket label → contents; empty Records = prune the bucket
+	Keys   map[string]KeyBucket
+	Routes *RoutesPush
+}
+
+type GroupsPush struct {
+	Hash    string
+	Catalog string
+	Records []GroupUpsert
+}
+
+type UserBucket struct {
+	Hash    string
+	Records []UserUpsert
+}
+
+type KeyBucket struct {
+	Hash    string
+	Records []KeyUpsert
+}
+
+type RoutesPush struct {
+	Hash  string
+	Table map[string][]domain.Route
+}
+
+// StateCounts is records written per section, informational for the control plane's run log.
+type StateCounts struct {
+	Groups int `json:"groups"`
+	Users  int `json:"users"`
+	Keys   int `json:"keys"`
+	Routes int `json:"routes"`
 }

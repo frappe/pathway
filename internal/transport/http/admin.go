@@ -129,6 +129,98 @@ func (s *Server) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"ok": true, "models": models, "pruned": pruned})
 }
 
+// GET /admin/state-hash — the hashes stored by the last accepted state push, empty on a fresh or
+// wiped store. The control plane diffs against this before deciding to push anything at all.
+func (s *Server) handleAdminStateHash(w http.ResponseWriter, r *http.Request) {
+	hashes, err := s.provisioning.StateHashes(r.Context())
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "state store error")
+		return
+	}
+	if hashes == nil {
+		hashes = map[string]string{}
+	}
+	respond.JSON(w, map[string]any{"hashes": hashes})
+}
+
+// POST /admin/state — desired state, whole per section (plan_agent_state_sync.md): apply what is
+// named, delete what is not, store the hashes — one transaction. Errors are 500s, never swallowed:
+// a push acknowledged but not stored would be divergence no retry ever heals.
+func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Groups *struct {
+			Hash    string       `json:"hash"`
+			Catalog string       `json:"catalog"`
+			Records []adminGroup `json:"records"`
+		} `json:"groups"`
+		Users *struct {
+			Buckets map[string]struct {
+				Hash    string      `json:"hash"`
+				Records []adminUser `json:"records"`
+			} `json:"buckets"`
+		} `json:"users"`
+		Keys *struct {
+			Buckets map[string]struct {
+				Hash    string     `json:"hash"`
+				Records []adminKey `json:"records"`
+			} `json:"buckets"`
+		} `json:"keys"`
+		Routes *struct {
+			Hash  string                    `json:"hash"`
+			Table map[string][]domain.Route `json:"table"`
+		} `json:"routes"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+
+	var push repository.StatePush
+	if body.Groups != nil {
+		records := make([]repository.GroupUpsert, 0, len(body.Groups.Records))
+		for _, g := range body.Groups.Records {
+			records = append(records, repository.GroupUpsert{Name: g.Name, Models: g.Models})
+		}
+		push.Groups = &repository.GroupsPush{
+			Hash: body.Groups.Hash, Catalog: body.Groups.Catalog, Records: records,
+		}
+	}
+	if body.Users != nil {
+		push.Users = map[string]repository.UserBucket{}
+		for label, bucket := range body.Users.Buckets {
+			records := make([]repository.UserUpsert, 0, len(bucket.Records))
+			for _, u := range bucket.Records {
+				records = append(records, repository.UserUpsert{
+					Name: u.Name, Email: u.Email, Group: u.Group,
+					Allow: u.Allow, Deny: u.Deny, Limited: u.Limited,
+				})
+			}
+			push.Users[label] = repository.UserBucket{Hash: bucket.Hash, Records: records}
+		}
+	}
+	if body.Keys != nil {
+		push.Keys = map[string]repository.KeyBucket{}
+		for label, bucket := range body.Keys.Buckets {
+			records := make([]repository.KeyUpsert, 0, len(bucket.Records))
+			for _, k := range bucket.Records {
+				records = append(records, repository.KeyUpsert{
+					MeterID: k.KeyHash, Prefix: k.Prefix, User: k.User, Status: k.Status,
+				})
+			}
+			push.Keys[label] = repository.KeyBucket{Hash: bucket.Hash, Records: records}
+		}
+	}
+	if body.Routes != nil {
+		push.Routes = &repository.RoutesPush{Hash: body.Routes.Hash, Table: body.Routes.Table}
+	}
+
+	counts, err := s.provisioning.ApplyState(r.Context(), push)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "state store error")
+		return
+	}
+	respond.JSON(w, map[string]any{"counts": counts})
+}
+
 // GET /admin/usage — pull: atomically read-and-delete every live counter. Mutating, and there is no
 // second round trip, so a failed insert control-plane-side drops that cycle's delta rather than
 // double-counting it.

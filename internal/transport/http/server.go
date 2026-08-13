@@ -133,6 +133,10 @@ func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	// The replica table is the one thing both planes hold, so both take this push.
 	mux.HandleFunc("/grove-admin/routes", adminAuth(s.adminToken, s.handleAdminRoutes))
+	// The state push replaces the per-section endpoints above (plan_agent_state_sync.md); both
+	// planes serve it — an ingress simply only ever receives the routes section.
+	mux.HandleFunc("/grove-admin/state", adminAuth(s.adminToken, s.handleAdminState))
+	mux.HandleFunc("/grove-admin/state-hash", adminAuth(s.adminToken, s.handleAdminStateHash))
 	if s.isIngress {
 		return mux
 	}
