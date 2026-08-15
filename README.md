@@ -44,8 +44,8 @@ about to change something, skip to *How to do things* and *Things worth knowing*
                     │  Grove (Frappe control plane)                │
                     │  keys · users · groups · models · placements │
                     └───────┬──────────────────────────▲───────────┘
-      PUT /grove-admin/*    │                          │  GET /grove-admin/usage
-      every 2 min (dirty)   │                          │  every 5 min (drain)
+   POST /grove-admin/state  │                          │  GET /grove-admin/usage
+   every 2 min (hash-gated) │                          │  every 2 min (drain)
                             ▼                          │
    client ──► latency DNS ──► ┌───────────────────────────────────┐
               api.<zone>      │  GATEWAY SERVER   (tenant plane)  │
@@ -657,15 +657,35 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 
 | Key | Type | Written by |
 |---|---|---|
-| `key:<sha256(secret)>` | hash | `PUT /grove-admin/keys` |
-| `user:<Grove User>` | hash | `PUT /grove-admin/users` |
-| `group:<Grove User Group>` | hash | `PUT /grove-admin/groups` |
-| `deploy:<model>` | JSON array of routes | `PUT /grove-admin/routes` |
-| `catalog:public` | comma list | `PUT /grove-admin/groups` |
+| `key:<sha256(secret)>` | hash | state push, `keys` section |
+| `user:<Grove User>` | hash | state push, `users` section |
+| `group:<Grove User Group>` | hash | state push, `groups` section |
+| `deploy:<model>` | JSON array of routes | state push, `routes` section |
+| `catalog:public` | comma list | state push, `groups` section |
+| `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
 | `usage:<key prefix>` | hash | the gateway; drained by `GET /grove-admin/usage` |
 | `sticky:<session>` | string, 30m | the gateway |
 | `inflight:<engine>` | sorted set, member = request id | the gateway |
 | `health:<target>` | counter, 60s | the gateway |
+
+### How the push works
+
+`POST /grove-admin/state` is desired state, whole, and **absence prunes**. The body carries any
+subset of four sections — groups (+ public catalog), users, keys, routes — each stamped with a
+hash Grove computed. The agent applies the whole body in ONE Redis MULTI: HSET every named
+record, DEL every record in a pushed section the payload does not name, then store the hashes in
+`grove:state_hash`. A Redis error is a 500 and none of it lands — the hashes never claim state
+that did not arrive. Only `group:/user:/key:/deploy:/catalog:public` are ever pruned; usage,
+sticky, inflight and health keys are the gateway's own.
+
+`GET /grove-admin/state-hash` returns that stored map. Grove diffs its computed hashes against it
+every 2 minutes and pushes only what differs — an in-sync box costs one GET. `users` and `keys`
+are split into 256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
+independently, so one minted key ships one bucket, not the population. A wiped Redis has no
+hashes, reads as total drift, and is fully rebuilt on the next tick — that is the only repair
+path and the only one needed. Both planes mount these endpoints; an ingress only ever receives
+the routes section. Contract: `plan_agent_state_sync.md` in the infer-plat tree. The old
+per-section `PUT`/`DELETE` endpoints remain for one release after the control plane cuts over.
 
 Every admin endpoint is gated on `X-Grove-Admin-Token`, compared in constant time, and mounted on
 `GROVE_SELF_HOST` only — a push has to reach **one** gateway, and the public name means all of them.
