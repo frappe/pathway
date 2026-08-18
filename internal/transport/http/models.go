@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
@@ -52,11 +53,20 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeModelList(w, models)
 }
 
+// The id is `<provider>/<model>`, so owned_by is read off the id itself rather than pushed as a
+// second field that could drift from it. An unprefixed id predates providers — it is ours.
+func ownerOf(id string) string {
+	if provider, _, found := strings.Cut(id, "/"); found {
+		return provider
+	}
+	return "frappe"
+}
+
 func writeModelList(w http.ResponseWriter, models []string) {
 	created := time.Now().Unix()
 	data := make([]modelObject, 0, len(models))
 	for _, id := range models {
-		data = append(data, modelObject{ID: id, Object: "model", Created: created, OwnedBy: "frappe"})
+		data = append(data, modelObject{ID: id, Object: "model", Created: created, OwnedBy: ownerOf(id)})
 	}
 	respond.JSON(w, map[string]any{"object": "list", "data": data})
 }
