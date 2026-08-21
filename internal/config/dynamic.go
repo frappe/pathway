@@ -56,7 +56,7 @@ type Resolved struct {
 func Defaults() Resolved {
 	return Resolved{
 		LogLevel:            slog.LevelInfo,
-		Transforms:          []string{"streamusage"},
+		Transforms:          []string{"modelmap", "streamusage"},
 		SyntheticSessionTTL: 0,
 		MaxBodyBytes:        32 << 20,
 		UpstreamReadTimeout: 600 * time.Second,

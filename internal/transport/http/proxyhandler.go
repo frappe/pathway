@@ -21,7 +21,9 @@ func (s *Server) proxyHandler() http.Handler {
 			return
 		}
 
-		outcome := s.proxy.Forward(w, r, target)
+		// A provider hop leaves our network, which is what decides whether its certificate is
+		// checked — an engine's is one we signed, a vendor's is not.
+		outcome := s.proxy.Forward(w, r, target, state.Decision.Route.IsProvider())
 		state.UpstreamStatus = outcome.Status
 		state.Usage = outcome.Usage
 		state.Reason = outcome.Reason

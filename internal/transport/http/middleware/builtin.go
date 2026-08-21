@@ -287,11 +287,17 @@ func newTransform(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
+			// An upgrade carries the model in the query and no body at all, so this is the only
+			// rewrite it will get — the rule below never runs on it.
+			rewriteQueryModel(r, state.Decision.Route.UpstreamModel)
 			if state.Body == nil {
 				next.ServeHTTP(w, r)
 				return
 			}
-			changed, err := deps.Transform.Apply(transform.Context{Path: r.URL.Path}, state.Body)
+			changed, err := deps.Transform.Apply(transform.Context{
+				Path:          r.URL.Path,
+				UpstreamModel: state.Decision.Route.UpstreamModel,
+			}, state.Body)
 			if err != nil {
 				deps.Log.Error("request transform failed", "path", r.URL.Path, "err", err)
 				deny(w, r, domain.Deny(http.StatusInternalServerError, "gateway error"))
@@ -310,6 +316,22 @@ func newTransform(deps Deps) (Middleware, error) {
 	}, nil
 }
 
+// rewriteQueryModel puts the upstream's own id in the query, where the realtime API carries it.
+// The body form of this is the modelmap transform; both are blank-safe, and blank is every route
+// we run ourselves. Untouched when the caller named no model — inventing one would send a request
+// they did not make, and an upgrade with no model has already been refused above.
+func rewriteQueryModel(r *http.Request, upstreamModel string) {
+	if upstreamModel == "" {
+		return
+	}
+	query := r.URL.Query()
+	if query.Get("model") == "" {
+		return
+	}
+	query.Set("model", upstreamModel)
+	r.URL.RawQuery = query.Encode()
+}
+
 // upstreamauth swaps the client's key for the target's own and sets the headers the hop needs. The
 // client's credential never reaches an engine.
 func newUpstreamAuth(deps Deps) (Middleware, error) {
@@ -317,7 +339,20 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
 			route := state.Decision.Route
-			if route.InternalKey != "" {
+			switch {
+			case route.IsProvider():
+				// A vendor authenticates its own way, and would read our Bearer as a caller's
+				// credential leaking outward — so it is deleted, not overwritten.
+				// ponytail: one vendor's scheme hardcoded. A second one means pushing the header
+				// name, the value prefix and any constants on the route instead of this branch.
+				r.Header.Del("Authorization")
+				if route.InternalKey != "" {
+					r.Header.Set("x-api-key", route.InternalKey)
+				}
+				if route.APIVersion != "" {
+					r.Header.Set("anthropic-version", route.APIVersion)
+				}
+			case route.InternalKey != "":
 				r.Header.Set("Authorization", "Bearer "+route.InternalKey)
 			}
 			// This is the edge, so a client-sent forwarding header is a claim, not a fact.

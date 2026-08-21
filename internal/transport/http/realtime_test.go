@@ -169,3 +169,78 @@ func TestARealtimeUpgradeStillNeedsTheGrant(t *testing.T) {
 		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
+
+// The realtime twin of the modelmap transform. A container advertising its own name 400s the Grove
+// id — and the transform never sees an upgrade, because an upgrade has no body to rewrite.
+func TestARealtimeUpgradeCarriesTheUpstreamsOwnModelID(t *testing.T) {
+	seen := make(chan string, 1)
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Query().Get("model")
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("engine could not hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = buf.Flush()
+	}))
+	t.Cleanup(engine.Close)
+
+	store := realtimeStore(t, engine.URL, "audio")
+	route := store.Routes["nemotron-asr"][0]
+	route.UpstreamModel = "nemotron-3.5-asr-streaming-0.6b"
+	store.Routes["nemotron-asr"] = []domain.Route{route}
+
+	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
+	t.Cleanup(front.Close)
+
+	resp, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	defer conn.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+
+	select {
+	case got := <-seen:
+		if got != "nemotron-3.5-asr-streaming-0.6b" {
+			t.Errorf("upstream was asked for %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the engine was never reached")
+	}
+}
+
+// Blank is every route we run ourselves: the engine answers to the Grove id, so rewriting it would
+// ask for a name nothing serves.
+func TestARealtimeUpgradeWithNoUpstreamModelIsUntouched(t *testing.T) {
+	seen := make(chan string, 1)
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Query().Get("model")
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = buf.Flush()
+	}))
+	t.Cleanup(engine.Close)
+
+	front := httptest.NewServer(buildHandler(t, realtimeStore(t, engine.URL, "audio"), config.Config{}, 0))
+	t.Cleanup(front.Close)
+
+	_, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	defer conn.Close()
+
+	select {
+	case got := <-seen:
+		if got != "nemotron-asr" {
+			t.Errorf("upstream was asked for %q, want the id the caller sent", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the engine was never reached")
+	}
+}

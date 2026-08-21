@@ -42,6 +42,8 @@ type engineRecord struct {
 	groveModel    string
 	groveSession  string
 	forwardedFor  string
+	apiKey        string
+	apiVersion    string
 	body          []byte
 }
 
@@ -65,6 +67,8 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 			groveModel:    r.Header.Get("X-Grove-Model"),
 			groveSession:  r.Header.Get("X-Grove-Session-Key"),
 			forwardedFor:  r.Header.Get("X-Forwarded-For"),
+			apiKey:        r.Header.Get("x-api-key"),
+			apiVersion:    r.Header.Get("anthropic-version"),
 			body:          body,
 		}
 		engineHandler(w, r)

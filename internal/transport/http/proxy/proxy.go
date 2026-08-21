@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"crypto/tls"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -33,6 +34,7 @@ type Options struct {
 	DialTimeout time.Duration
 	// VerifyUpstream turns on certificate verification for engine and ingress hops. Per target here,
 	// so it is a fleet default rather than the ceiling nginx's per-location directive imposed.
+	// It does not reach an external hop, which always verifies.
 	VerifyUpstream bool
 }
 
@@ -46,8 +48,9 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Proxy holds the transports. One per target host rather than one for the fleet: it is what makes
-// verification a property of the hop instead of a property of the whole listener.
+// Proxy holds the transports. One per target host and verification setting rather than one for the
+// fleet: it is what makes verification a property of the hop instead of a property of the whole
+// listener, and what stops an external hop borrowing a pooled connection dialled without checks.
 type Proxy struct {
 	log *slog.Logger
 
@@ -73,7 +76,7 @@ func (p *Proxy) Reconfigure(opts Options) {
 // Forward proxies to target (a base URL; the client's path is appended) and reports what the hop
 // did. The Outcome is filled even on a dial failure — a hop with no status is itself the signal
 // that ejects a dead engine.
-func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string) Outcome {
+func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, external bool) Outcome {
 	base, err := url.Parse(target)
 	if err != nil || base.Host == "" {
 		p.log.Error("unroutable target", "target", target, "err", err)
@@ -100,7 +103,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string) O
 				}
 			}
 		},
-		Transport: p.transportFor(base),
+		Transport: p.transportFor(base, external),
 		// -1 flushes every write immediately, which is what streams a token the moment it arrives.
 		// Any positive interval would batch an SSE stream into chunks and make the response feel
 		// slower than the engine actually is.
@@ -137,10 +140,18 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string) O
 	return *outcome
 }
 
-// transportFor keeps one transport per target host, so connections are pooled per engine and the
-// TLS settings are the hop's own.
-func (p *Proxy) transportFor(base *url.URL) http.RoundTripper {
-	host := base.Scheme + "://" + base.Host
+// transportFor keeps one transport per target host and verification setting, so connections are
+// pooled per engine and the TLS settings are the hop's own.
+//
+// An external hop verifies whatever the fleet default is. That default is off, because an engine
+// inside the VPC answers on a certificate we signed ourselves — but a vendor is reached over the
+// public internet carrying its own API key, and an unverified hop there is a key handed to whoever
+// answers the address.
+func (p *Proxy) transportFor(base *url.URL, external bool) http.RoundTripper {
+	verify := external || p.opts.VerifyUpstream
+	// The key carries `verify`: two hops to one host that disagree about it must not share a
+	// connection pool dialled under the weaker one.
+	host := fmt.Sprintf("%s://%s|verify=%t", base.Scheme, base.Host, verify)
 
 	p.mu.RLock()
 	existing, ok := p.transports[host]
@@ -165,7 +176,7 @@ func (p *Proxy) transportFor(base *url.URL) http.RoundTripper {
 		DisableCompression: true,
 		ForceAttemptHTTP2:  true,
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: !opts.VerifyUpstream, //nolint:gosec // see Options.VerifyUpstream
+			InsecureSkipVerify: !verify, //nolint:gosec // see Options.VerifyUpstream
 			MinVersion:         tls.VersionTLS12,
 		},
 	}

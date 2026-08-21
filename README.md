@@ -587,7 +587,7 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
   "log_level": "info",
   "middleware": ["recover", "accesslog", "drain", "auth", "quota", "body",
                  "modelaccess", "route", "meter", "transform", "upstreamauth"],
-  "transforms": ["streamusage", "priority"],
+  "transforms": ["modelmap", "streamusage", "priority"],
   "synthetic_session_ttl": "0s",
   "max_body_bytes": 33554432,
   "upstream_read_timeout": "600s",
@@ -726,6 +726,37 @@ vLLM's convention (lowest served first), so the gateway never reasons about the 
 `engine_url` is a **base**; the path the client asked for is appended to it. `in_flight` is
 computed here and never pushed — the control plane has no view of what is running right now.
 
+A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries two
+more fields:
+
+```json
+[{
+  "engine_url":     "https://api.anthropic.com",
+  "internal_key":   "<the vendor's API key>",
+  "healthy":        true,
+  "capacity":       0,
+  "deployment":     "anthropic",
+  "server":         "anthropic",
+  "kind":           "provider",
+  "upstream_model": "claude-sonnet-4-5-20250929",
+  "api_version":    "2023-06-01"
+}]
+```
+
+`upstream_model` is what the `modelmap` transform puts in `body.model`; blank means send the
+caller's unchanged, which is every route we run ourselves — an engine is started under the Grove
+id. A realtime upgrade carries its model in the query string and has no body for a transform to
+rewrite, so the same substitution is applied to `?model=` in the transform stage. Access, routing, metering and `/v1/models` all key on the id the caller sent, so the rewrite
+cannot desync a grant from a route. On a provider hop the client's `Authorization` is deleted
+rather than replaced, `x-api-key` carries the credential, and the certificate is verified whatever
+`upstream_tls_verify` says — that hop leaves our network carrying someone else's key.
+
+A provider route is also **deny-by-default on the surface check**. `Serves` is generous to an engine
+because an engine answers on more than the OpenAI core (`/tokenize`, `/v1/rerank`), but a vendor is a
+closed set we already know, so `ServesRoute` holds it to an allowlist — `/v1/messages` and
+`/v1/messages/count_tokens` for the Anthropic dialect. Anything else is our 404 at `routing.go`,
+above `meter`, instead of a round trip that comes back as theirs.
+
 ### Backwards compatibility that is still load-bearing
 
 - A key record written before access moved off the credential carries `group`/`allow`/`deny`/
@@ -736,6 +767,8 @@ computed here and never pushed — the control plane has no view of what is runn
 - `status: "rate_limited"` was once a third value on the credential. It is lifted off on read, so
   `status` means only "is this live".
 - A route with no `kind` is `direct`, which is what every route pushed before the split was.
+- A route with no `upstream_model` sends the caller's `model` unchanged, which is what every route
+  pushed before the vendor split did.
 
 ### Public endpoints
 
@@ -855,7 +888,10 @@ Grove drives this from its `install_gateway_agent` role.
   metering feature that reordered or buffered a token stream would be worse than no metering.
 - **`upstream_tls_verify` is per target, not per listener.** That is the thing nginx could not do —
   `proxy_ssl_verify` is a per-location directive, so one self-signed box pinned verification off for
-  every target sharing that location. Defaulted `false` for parity; it is a default, not a ceiling.
+  every target sharing that location. Defaulted `false` for parity; it is a default, not a ceiling —
+  and it is not a floor either: a `kind: "provider"` hop verifies whatever it is set to, because
+  that request leaves our network carrying a vendor's own API key. The transport pool is keyed on
+  the setting as well as the host, so the two can never share a connection.
 - **Least-in-flight balances concurrent traffic, not sequential.** A sequential caller releases its
   slot before the next pick, so both replicas read zero and the tie takes the first. Fine for one
   chatty client — it keeps a prefix cache warm — but a fleet of many sequential clients pins them

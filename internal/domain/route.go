@@ -25,11 +25,22 @@ type Route struct {
 	// every row of the model because deploy:<model> is the only thing pushed per model. Blank on a
 	// route pushed before this field existed, which reads as unrestricted.
 	Modality string `json:"modality"`
+	// What this upstream answers to, when that is not the id the caller sent. The control plane
+	// owns the mapping. Blank on every route we run ourselves — an engine is started under the
+	// Grove id — and on any route pushed before this field existed, which reads as "send unchanged".
+	UpstreamModel string `json:"upstream_model"`
+	// The vendor's API version header, sent only on a provider route. Blank sends none.
+	APIVersion string `json:"api_version"`
 }
 
 // IsIngress reports whether this row hands off to an ingress rather than naming an engine.
 // Empty Kind is direct, which is what every route pushed before the split was.
 func (r Route) IsIngress() bool { return r.Kind == "ingress" }
+
+// IsProvider reports whether this row dials a third-party vendor rather than anything we run. The
+// hop then leaves our network, which is what makes its credential and its certificate different in
+// kind from an engine's.
+func (r Route) IsProvider() bool { return r.Kind == "provider" }
 
 // HasRoom reports whether this engine can take another request. A placement with no
 // --max-num-seqs set has no number to hold it to, so it is never held back.

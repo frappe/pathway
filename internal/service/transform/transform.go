@@ -17,6 +17,9 @@ type Body map[string]json.RawMessage
 // Context is what a transform may know about the request beyond its body.
 type Context struct {
 	Path string
+	// UpstreamModel is what the chosen route says this upstream answers to, pushed by the control
+	// plane. Blank means send the caller's `model` unchanged, which is every route we run ourselves.
+	UpstreamModel string
 }
 
 // Request is one body rewrite. Apply reports whether it changed anything, so a body that no
@@ -57,7 +60,7 @@ func Registered() []string {
 
 // Default is what runs when nothing is configured. Order matters only in that a later transform
 // sees an earlier one's output.
-var Default = []string{"streamusage"}
+var Default = []string{"modelmap", "streamusage"}
 
 // Chain is an ordered, resolved set of transforms, replaceable in place under its own lock — the
 // middleware holds a pointer, and rebuilding the whole chain to change which rewrites run would be

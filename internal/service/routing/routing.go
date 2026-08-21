@@ -98,10 +98,10 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 		return Decision{}, domain.Deny(503, "model unavailable")
 	}
 
-	// Modality is the model's, stamped on every row, so the first answers for the table. Refused
-	// here rather than forwarded: the engine would 404 it, and this sits above meter, so a
-	// wrong-surface call bills nothing.
-	if !domain.Serves(table[0].Modality, req.Path) {
+	// The surface check reads the first row: modality is the model's, stamped on every row, and a
+	// model's rows are all the same kind. Refused here rather than forwarded — the upstream would
+	// 404 it, and this sits above meter, so a wrong-surface call bills nothing.
+	if !domain.ServesRoute(table[0], req.Path) {
 		return Decision{}, domain.Deny(404, req.Model+" does not serve "+req.Path)
 	}
 
