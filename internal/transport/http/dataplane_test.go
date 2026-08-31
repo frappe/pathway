@@ -77,9 +77,9 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-		Status: "active", User: "ritwik", KeyPrefix: "abc123",
+		Status: "active", User: "test-user", KeyPrefix: "abc123",
 	}
-	store.Users["ritwik"] = domain.UserRecord{Group: "acme"}
+	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	store.Routes["qwen3-4b"] = []domain.Route{{
 		EngineURL: engine.URL + "/e/md1", InternalKey: "engine-key",
@@ -404,8 +404,8 @@ func TestARefusedRequestClaimsNothing(t *testing.T) {
 // was sent.
 func TestAnOversizedBodyIsRefused(t *testing.T) {
 	store := memory.New()
-	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", User: "ritwik", KeyPrefix: "abc123"}
-	store.Users["ritwik"] = domain.UserRecord{Group: "acme"}
+	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", User: "test-user", KeyPrefix: "abc123"}
+	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	handler := buildHandler(t, store, config.Config{}, 128)
 

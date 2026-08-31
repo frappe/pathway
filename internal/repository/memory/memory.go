@@ -123,7 +123,7 @@ func (u users) Upsert(_ context.Context, records []repository.UserUpsert) error 
 			continue
 		}
 		u.s.Users[rec.Name] = domain.UserRecord{
-			Email: rec.Email, Group: rec.Group,
+			Email: rec.Email, Groups: domain.ModelSet(rec.Groups),
 			Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 			Limited: rec.Limited,
 		}
@@ -434,7 +434,7 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 				named[rec.Name] = true
 				counts.Users++
 				st.s.Users[rec.Name] = domain.UserRecord{
-					Email: rec.Email, Group: rec.Group,
+					Email: rec.Email, Groups: domain.ModelSet(rec.Groups),
 					Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 					Limited: rec.Limited,
 				}

@@ -93,13 +93,10 @@ func applyUsers(ctx context.Context, p redis.Pipeliner, buckets map[string]repos
 			}
 			named[rec.Name] = true
 			count++
-			limited := "0"
-			if rec.Limited {
-				limited = "1"
-			}
 			p.HSet(ctx, "user:"+rec.Name, map[string]any{
-				"email": rec.Email, "group": rec.Group,
-				"allow": rec.Allow, "deny": rec.Deny, "limited": limited,
+				"email": rec.Email, "group": rec.Groups, // comma list of group names
+				"allow": rec.Allow, "deny": rec.Deny,
+				"limited": flag(rec.Limited),
 			})
 		}
 		setBucketHash(ctx, p, "users:"+label, bucket.Hash, len(bucket.Records))

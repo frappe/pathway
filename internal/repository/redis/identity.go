@@ -89,7 +89,7 @@ func (u users) Get(ctx context.Context, name string) (domain.UserRecord, bool, e
 	}
 	return domain.UserRecord{
 		Email:   h["email"],
-		Group:   strings.TrimSpace(h["group"]),
+		Groups:  domain.ModelSet(h["group"]),
 		Allow:   domain.ModelSet(h["allow"]),
 		Deny:    domain.ModelSet(h["deny"]),
 		Limited: strings.TrimSpace(h["limited"]) == "1",
@@ -101,16 +101,12 @@ func (u users) Upsert(ctx context.Context, records []repository.UserUpsert) erro
 		if rec.Name == "" {
 			continue
 		}
-		limited := "0"
-		if rec.Limited {
-			limited = "1"
-		}
 		if err := u.rdb.HSet(ctx, "user:"+rec.Name, map[string]any{
 			"email":   rec.Email,
-			"group":   rec.Group,
+			"group":   rec.Groups, // comma list of group names
 			"allow":   rec.Allow,
 			"deny":    rec.Deny,
-			"limited": limited,
+			"limited": flag(rec.Limited),
 		}).Err(); err != nil {
 			return err
 		}
@@ -120,6 +116,13 @@ func (u users) Upsert(ctx context.Context, records []repository.UserUpsert) erro
 
 func (u users) Delete(ctx context.Context, ids []string) (int, error) {
 	return deletePrefixed(ctx, u.rdb, "user:", ids)
+}
+
+func flag(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }
 
 type groups struct{ rdb *redis.Client }

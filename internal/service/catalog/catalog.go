@@ -19,8 +19,8 @@ func New(routes repository.Routes, public repository.Catalog) *Service {
 	return &Service{routes: routes, catalog: public}
 }
 
-// ForIdentity is the models this key may use: what is deployed, intersected with what its group and
-// its own allow/deny resolve to. The filter is domain.CanUse — literally the decision the inference
+// ForIdentity is the models this key may use: what is deployed, intersected with what its groups
+// and its own allow/deny resolve to. The filter is domain.CanUse — literally the decision the inference
 // path makes — so the list can never disagree with what a request would be admitted for.
 func (s *Service) ForIdentity(ctx context.Context, id admission.Identity) ([]string, error) {
 	deployed, err := s.routes.Models(ctx)
@@ -29,7 +29,7 @@ func (s *Service) ForIdentity(ctx context.Context, id admission.Identity) ([]str
 	}
 	out := make([]string, 0, len(deployed))
 	for _, model := range deployed {
-		if domain.CanUse(id.User, id.Group, model) {
+		if domain.CanUse(id.User, id.Grant, model) {
 			out = append(out, model)
 		}
 	}

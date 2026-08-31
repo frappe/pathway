@@ -19,7 +19,7 @@ never registered, so no handler on that box could read a key store even if one w
 
 1. Terminates TLS on `:443` with the fleet wildcard, reloading it from disk when it changes, and
    redirects `:80`.
-2. Resolves the caller — bearer → key → user → group — and refuses on the credential, the monthly
+2. Resolves the caller — bearer → key → user → groups — and refuses on the credential, the monthly
    budget, or the model grant.
 3. Picks an engine: region tier, capacity gate, session stickiness, least in flight.
 4. Rewrites the request body where the endpoint's schema allows it, and swaps the client's key for
@@ -274,7 +274,7 @@ proxy ──► engine (or ingress ──► engine)
 | `recover` | panic → 500, so nothing below can drop a connection |
 | `accesslog` | times the request, writes the one durable line per request |
 | `drain` | while shutting down: 503 + `Retry-After` + "gateway is restarting" |
-| `auth` | bearer → key → user → group, once, into the request state |
+| `auth` | bearer → key → user → groups, once, into the request state |
 | `quota` | the monthly budget flag the control plane pushed → 429 |
 | `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here |
 | `modelaccess` | `CanUse` → 403 |
@@ -414,7 +414,8 @@ is on.
 
 ## Admission
 
-Three records, resolved in order — `key:` → `user:` → `group:`.
+Three records, resolved in order — `key:` → `user:` → `group:`. A user names any number of
+groups; their grants are unioned into one before the gates run.
 
 The split is deliberate. A credential's only fact of its own is whether it has been revoked;
 **who holds it, what they may call and whether they are over budget are facts about the person.**
@@ -433,7 +434,7 @@ that person holds.
 
 ```
 deny wins over everything          usr.Deny[model]        → false
-otherwise, group grant ∪ user's own allow                 → true
+otherwise, every group's grant ∪ user's own allow          → true
 nothing granted it                                        → false
 ```
 
@@ -697,16 +698,16 @@ so it never double-counts and a control-plane crash loses at most one cycle.
 
 ```
 key:<sha256(secret)>      status  user  prefix
-user:<Grove User>         email  group  allow  deny  limited
-group:<Grove User Group>  models  priority
+user:<Grove User>         email  group (comma list)  allow  deny  limited
+group:<Grove User Group>  models
 catalog:public            "model-a,model-b"
 usage:<key prefix>        request_count  prompt_tokens  completion_tokens  total_tokens
                           cached_tokens  m:<metric>:<model>  m:<metric>:<deployment>
 ```
 
-`allow` / `deny` / `models` are comma lists; blank parses to a map that answers false to
-everything, which is the fail-closed default. `priority` is already sign-flipped by Grove into
-vLLM's convention (lowest served first), so the gateway never reasons about the sign.
+`group` / `allow` / `deny` / `models` are comma lists; blank parses to a map that answers false
+to everything, which is the fail-closed default. `group` holds every group the user is in, so a
+name containing a comma would split — Grove refuses one.
 
 `deploy:<model>` is a JSON array, replaced whole:
 
@@ -842,9 +843,9 @@ Seed it the way the control plane does, then call it:
 
 ```sh
 curl -XPUT localhost:8080/grove-admin/groups -H 'X-Grove-Admin-Token: tok' \
-  -d '{"groups":[{"name":"acme","priority":-10,"models":"qwen3-4b"}]}'
+  -d '{"groups":[{"name":"acme","models":"qwen3-4b"}]}'
 curl -XPUT localhost:8080/grove-admin/users -H 'X-Grove-Admin-Token: tok' \
-  -d '{"users":[{"name":"you","group":"acme"}]}'
+  -d '{"users":[{"name":"you","group":"acme,beta"}]}'
 curl -XPUT localhost:8080/grove-admin/keys -H 'X-Grove-Admin-Token: tok' \
   -d "{\"keys\":[{\"key_hash\":\"$(printf gr_sk_demo | sha256sum | cut -d' ' -f1)\",\"prefix\":\"dev\",\"user\":\"you\",\"status\":\"active\"}]}"
 curl -XPUT localhost:8080/grove-admin/routes -H 'X-Grove-Admin-Token: tok' \

@@ -13,14 +13,14 @@ func set(models ...string) map[string]bool {
 // holder builds a current-shape user record — one that names a group, so canUse resolves rather
 // than reading a flattened set.
 func holder(group string) UserRecord {
-	return UserRecord{Group: group}
+	return UserRecord{Groups: ModelSet(group)}
 }
 
 func live(status string) KeyRecord { return KeyRecord{Status: status} }
 
 func TestEvaluate(t *testing.T) {
 	tier := GroupRecord{Models: set("a")}
-	overBudget := UserRecord{Group: "tier", Limited: true}
+	overBudget := UserRecord{Groups: ModelSet("tier"), Limited: true}
 	cases := []struct {
 		name   string
 		rec    KeyRecord
@@ -40,7 +40,7 @@ func TestEvaluate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			grp := GroupRecord{}
-			if tc.usr.Group != "" {
+			if len(tc.usr.Groups) > 0 {
 				grp = tier
 			}
 			got, reason := Evaluate(tc.rec, tc.usr, grp, tc.model)
@@ -61,16 +61,16 @@ func TestCanUseResolvesTheUsersDeltas(t *testing.T) {
 		model string
 		want  bool
 	}{
-		{"allow adds a model the group lacks", UserRecord{Group: "t", Allow: set("z")}, "z", true},
+		{"allow adds a model the group lacks", UserRecord{Groups: ModelSet("t"), Allow: set("z")}, "z", true},
 		{"allow works without any group", UserRecord{Allow: set("z")}, "z", true},
-		{"deny beats the group's grant", UserRecord{Group: "t", Deny: set("b")}, "b", false},
+		{"deny beats the group's grant", UserRecord{Groups: ModelSet("t"), Deny: set("b")}, "b", false},
 		{"deny beats the user's own allow", UserRecord{Allow: set("z"), Deny: set("z")}, "z", false},
-		{"denying an ungranted model is harmless", UserRecord{Group: "t", Deny: set("zzz")}, "a", true},
+		{"denying an ungranted model is harmless", UserRecord{Groups: ModelSet("t"), Deny: set("zzz")}, "a", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			grp := GroupRecord{}
-			if tc.usr.Group != "" {
+			if len(tc.usr.Groups) > 0 {
 				grp = tier
 			}
 			if got := CanUse(tc.usr, grp, tc.model); got != tc.want {
@@ -83,7 +83,7 @@ func TestCanUseResolvesTheUsersDeltas(t *testing.T) {
 // Over budget must win over the model gate: the holder is rejected before we check whether the
 // model was allowed, so the 429 is not masked by a 403.
 func TestEvaluateRateLimitPrecedence(t *testing.T) {
-	usr := UserRecord{Group: "tier", Limited: true}
+	usr := UserRecord{Groups: ModelSet("tier"), Limited: true}
 	if got, _ := Evaluate(live("active"), usr, GroupRecord{Models: set("a")}, "b"); got != 429 {
 		t.Fatalf("expected 429 to win over 403, got %d", got)
 	}

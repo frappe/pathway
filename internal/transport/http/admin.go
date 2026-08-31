@@ -24,8 +24,8 @@ type adminKey struct {
 type adminUser struct {
 	Name    string `json:"name"`
 	Email   string `json:"email"`
-	Group   string `json:"group"` // "" = ungrouped
-	Allow   string `json:"allow"` // comma list: this user's adds on top of the group
+	Group   string `json:"group"` // comma list of group names; "" = ungrouped
+	Allow   string `json:"allow"` // comma list: this user's adds on top of their groups'
 	Deny    string `json:"deny"`  // comma list: removals that beat every grant
 	Limited bool   `json:"limited"`
 }
@@ -77,7 +77,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	records := make([]repository.UserUpsert, 0, len(body.Users))
 	for _, u := range body.Users {
 		records = append(records, repository.UserUpsert{
-			Name: u.Name, Email: u.Email, Group: u.Group,
+			Name: u.Name, Email: u.Email, Groups: u.Group,
 			Allow: u.Allow, Deny: u.Deny, Limited: u.Limited,
 		})
 	}
@@ -190,7 +190,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			records := make([]repository.UserUpsert, 0, len(bucket.Records))
 			for _, u := range bucket.Records {
 				records = append(records, repository.UserUpsert{
-					Name: u.Name, Email: u.Email, Group: u.Group,
+					Name: u.Name, Email: u.Email, Groups: u.Group,
 					Allow: u.Allow, Deny: u.Deny, Limited: u.Limited,
 				})
 			}

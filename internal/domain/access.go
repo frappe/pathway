@@ -38,8 +38,8 @@ func (l LegacyKey) HasProjection() bool {
 // grants nothing.
 type UserRecord struct {
 	Email   string          // denormalized, for humans reading Redis; no decision reads it
-	Group   string          // Grove User Group name; "" = ungrouped (grants nothing by itself)
-	Allow   map[string]bool // models this user may call on top of the group's
+	Groups  map[string]bool // Grove User Group names; empty = ungrouped (grants nothing by itself)
+	Allow   map[string]bool // models this user may call on top of their groups'
 	Deny    map[string]bool // models this user may not call, whatever granted them
 	Limited bool            // over their monthly token budget → 429
 
@@ -59,7 +59,7 @@ type GroupRecord struct {
 // missing, which is what makes the control plane and the agent deployable in either order.
 func SynthUser(rec KeyRecord) UserRecord {
 	return UserRecord{
-		Group:     rec.Legacy.Group,
+		Groups:    ModelSet(rec.Legacy.Group),
 		Allow:     rec.Legacy.Allow,
 		Deny:      rec.Legacy.Deny,
 		Limited:   rec.Legacy.Limited,
@@ -68,8 +68,9 @@ func SynthUser(rec KeyRecord) UserRecord {
 	}
 }
 
-// CanUse is the access decision: the group's grant plus the user's own Allow, minus their Deny.
-// Deny wins over every grant. Fails closed — no group and no Allow reaches nothing.
+// CanUse is the access decision: the grant of every group the user is in, plus their own Allow,
+// minus their Deny. The union is already merged into grp by the time it gets here. Deny wins over
+// every grant. Fails closed — no group and no Allow reaches nothing.
 func CanUse(usr UserRecord, grp GroupRecord, model string) bool {
 	if usr.Flattened {
 		return usr.Models[model] // legacy record: the control plane already resolved it
@@ -96,8 +97,9 @@ func Evaluate(rec KeyRecord, usr UserRecord, grp GroupRecord, model string) (int
 	return 200, ""
 }
 
-// ModelSet parses one of the comma-joined model lists the control plane writes. Blank → nil, which
-// is a map that answers false to everything — the fail-closed default.
+// ModelSet parses one of the comma-joined lists the control plane writes — models, or the group
+// names on a user record. Blank → nil, which is a map that answers false to everything, the
+// fail-closed default.
 func ModelSet(csv string) map[string]bool {
 	csv = strings.TrimSpace(csv)
 	if csv == "" {
