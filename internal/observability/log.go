@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
 
 // Two loggers on purpose. Process is diagnostics on stdout for journald, mirrored at Warn and above
@@ -35,7 +37,7 @@ func New(opts Options) (Loggers, func(), error) {
 	if level == nil {
 		level = new(slog.LevelVar)
 	}
-	var open []*os.File
+	var open []*reopener
 	closeAll := func() {
 		for _, f := range open {
 			_ = f.Close()
@@ -70,11 +72,63 @@ func New(opts Options) (Loggers, func(), error) {
 	return Loggers{Process: process, Access: access}, closeAll, nil
 }
 
-func openLog(path string) (*os.File, error) {
+func openLog(path string) (*reopener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
+	file, err := openAppend(path)
+	if err != nil {
+		return nil, err
+	}
+	return &reopener{path: path, file: file, checked: time.Now()}, nil
+}
+
+func openAppend(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+}
+
+// reopener follows logrotate's `create`: when the path no longer names the file it holds — the
+// old one was renamed away — it reopens before writing. This is what lets rotation move the file
+// instead of copytruncating it, which loses whatever lands during the copy and yanks the tail
+// out from under anything following the file by inode. The stat is throttled to one a second;
+// the lines written in between land on the renamed file, which a follower still holds open.
+type reopener struct {
+	mu      sync.Mutex
+	path    string
+	file    *os.File
+	checked time.Time
+}
+
+func (w *reopener) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if now := time.Now(); now.Sub(w.checked) >= time.Second {
+		w.checked = now
+		w.reopenIfMoved()
+	}
+	return w.file.Write(p)
+}
+
+func (w *reopener) reopenIfMoved() {
+	held, err := w.file.Stat()
+	if err == nil {
+		if current, err := os.Stat(w.path); err == nil && os.SameFile(held, current) {
+			return
+		}
+	}
+	fresh, err := openAppend(w.path)
+	if err != nil {
+		// The held descriptor still works; a record on the rotated file beats a lost one.
+		return
+	}
+	_ = w.file.Close()
+	w.file = fresh
+}
+
+func (w *reopener) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.file.Close()
 }
 
 // Discard is for tests, which want neither file.
