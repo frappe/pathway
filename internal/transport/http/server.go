@@ -34,6 +34,10 @@ type Server struct {
 	// chain is swapped in place when the tunables file changes the middleware list, so the mux
 	// built at startup keeps serving and only what it dispatches to moves.
 	chain swappable
+	// logged wraps a whole listener handler in recover+accesslog, so everything the server
+	// answers — health checks, admin calls, 404s — leaves its one line, nginx-style. The data
+	// chain's own accesslog stage sees the outer State and steps aside.
+	logged middleware.Middleware
 
 	adminToken string
 	isIngress  bool
@@ -57,7 +61,7 @@ type Services struct {
 }
 
 func New(cfg config.Config, svc Services, log *slog.Logger) *Server {
-	return &Server{
+	server := &Server{
 		admission: svc.Admission, routing: svc.Routing, metering: svc.Metering,
 		catalog: svc.Catalog, provisioning: svc.Provisioning, proxy: svc.Proxy,
 		log: log, drain: svc.Drain,
@@ -70,6 +74,14 @@ func New(cfg config.Config, svc Services, log *slog.Logger) *Server {
 		adminToken: cfg.AdminToken,
 		isIngress:  cfg.IsIngress(),
 	}
+	logged, err := middleware.Chain(server.deps, []string{"recover", "accesslog"})
+	if err != nil {
+		// Both names are literals registered in this module; failing here means the registry
+		// itself is broken, and no request could be served accountably.
+		panic("building the access-log wrapper: " + err.Error())
+	}
+	server.logged = logged
+	return server
 }
 
 // DataHandler is the customer-facing surface: /v1/, plus the model list the gateway answers itself.
@@ -83,7 +95,7 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 	if s.isIngress {
 		// An ingress forwards whatever the gateway sends and reads none of it.
 		mux.Handle("/", &s.chain)
-		return mux, nil
+		return s.logged(mux), nil
 	}
 
 	// Exact match, so it wins over the /v1/ proxy and is never forwarded to an engine — an engine
@@ -91,7 +103,9 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.Handle("/v1/", &s.chain)
 	mux.HandleFunc("GET /{$}", root)
-	return mux, nil
+	// The whole surface behind recover+accesslog, so the routes the mux answers itself — the model
+	// list, the root banner, plain 404s — leave a line like everything else.
+	return s.logged(mux), nil
 }
 
 // SetChain builds the data chain and swaps it in. Returning an error leaves the running chain

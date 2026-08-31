@@ -64,18 +64,34 @@ func newAccessLog(deps Deps) (Middleware, error) {
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Already inside an accesslog: a listener wraps its whole mux in one, and the data
+			// chain carries its own. One line per request — the outermost wins.
+			if !From(r).Started.IsZero() {
+				next.ServeHTTP(w, r)
+				return
+			}
 			r, state := newState(r)
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
 			next.ServeHTTP(recorder, r)
 
-			access.LogAttrs(r.Context(), slog.LevelInfo, "access",
+			attrs := []slog.Attr{
 				slog.String("remote", clientIP(r)),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", recorder.status),
 				slog.Int64("bytes", recorder.written),
 				slog.Float64("rt", time.Since(state.Started).Seconds()),
+			}
+			// ttft is an upstream measurement — the wait for the first byte an engine or vendor
+			// sent back. On a request the gateway answered itself (a model list, a health check,
+			// a refusal) it would only repeat rt, so it is left off the line.
+			if state.Decision.EngineURL() != "" {
+				attrs = append(attrs, slog.Float64("ttft", recorder.ttft(state.Started)))
+			}
+			attrs = append(attrs,
+				// Constant until §A retry lands; emitted now so the log schema never moves.
+				slog.Int("attempts", 1),
 				slog.String("key", or(state.Identity.Prefix(), "-")),
 				slog.String("model", or(state.Model, "-")),
 				slog.String("rid", or(state.Decision.RequestID, "-")),
@@ -85,6 +101,7 @@ func newAccessLog(deps Deps) (Middleware, error) {
 				slog.Int("upstream_status", state.UpstreamStatus),
 				slog.String("reason", or(state.DeniedReason, state.Reason)),
 			)
+			access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
 		})
 	}, nil
 }
@@ -516,6 +533,9 @@ type statusRecorder struct {
 	status  int
 	written int64
 	wrote   bool
+	// firstByte is when the first body byte left — what TTFT means on a streaming response,
+	// and the number a log store can aggregate that total time hides.
+	firstByte time.Time
 }
 
 func (s *statusRecorder) WriteHeader(status int) {
@@ -527,9 +547,20 @@ func (s *statusRecorder) WriteHeader(status int) {
 
 func (s *statusRecorder) Write(p []byte) (int, error) {
 	s.wrote = true
+	if s.firstByte.IsZero() {
+		s.firstByte = time.Now()
+	}
 	n, err := s.ResponseWriter.Write(p)
 	s.written += int64(n)
 	return n, err
+}
+
+// ttft is seconds to the first body byte, 0 when nothing was ever written.
+func (s *statusRecorder) ttft(started time.Time) float64 {
+	if s.firstByte.IsZero() {
+		return 0
+	}
+	return s.firstByte.Sub(started).Seconds()
 }
 
 // Unwrap lets net/http find the underlying writer for Flush and Hijack. Without it, wrapping the
