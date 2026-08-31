@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/phot0n/pathway/internal/transport/http/middleware"
+	"github.com/phot0n/pathway/internal/transport/http/proxy"
 	"github.com/phot0n/pathway/internal/transport/respond"
 )
 
@@ -23,15 +24,21 @@ func (s *Server) proxyHandler() http.Handler {
 
 		// A provider hop leaves our network, which is what decides whether its certificate is
 		// checked — an engine's is one we signed, a vendor's is not.
-		outcome := s.proxy.Forward(w, r, target, state.Decision.Route.IsProvider())
-		state.UpstreamStatus = outcome.Status
-		state.Usage = outcome.Usage
-		state.Reason = outcome.Reason
-		if outcome.Deployment != "" {
-			// An ingress picked the replica and said so. The only way usage reaches a placement
-			// this gateway never chose.
-			state.Deployment = outcome.Deployment
-		}
+		//
+		// Deferred, like meter's own record: a client hanging up mid-stream unwinds this handler
+		// through http.ErrAbortHandler, and the upstream still billed whatever it had generated.
+		var outcome proxy.Outcome
+		defer func() {
+			state.UpstreamStatus = outcome.Status
+			state.Usage = outcome.Usage
+			state.Reason = outcome.Reason
+			if outcome.Deployment != "" {
+				// An ingress picked the replica and said so. The only way usage reaches a placement
+				// this gateway never chose.
+				state.Deployment = outcome.Deployment
+			}
+		}()
+		s.proxy.Forward(w, r, target, state.Decision.Route.IsProvider(), &outcome)
 	})
 }
 

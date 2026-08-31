@@ -73,18 +73,26 @@ func (p *Proxy) Reconfigure(opts Options) {
 	p.transports = map[string]http.RoundTripper{}
 }
 
-// Forward proxies to target (a base URL; the client's path is appended) and reports what the hop
-// did. The Outcome is filled even on a dial failure — a hop with no status is itself the signal
-// that ejects a dead engine.
-func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, external bool) Outcome {
+// Forward proxies to target (a base URL; the client's path is appended) and fills outcome with what
+// the hop did. The Outcome is filled even on a dial failure — a hop with no status is itself the
+// signal that ejects a dead engine.
+//
+// The caller owns the Outcome instead of taking it as a return value: ReverseProxy panics with
+// http.ErrAbortHandler when a client hangs up mid-stream, and the unwind discards a return value
+// along with whatever usage the tee had already captured.
+func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, external bool, outcome *Outcome) {
 	base, err := url.Parse(target)
 	if err != nil || base.Host == "" {
 		p.log.Error("unroutable target", "target", target, "err", err)
-		return Outcome{}
+		return
 	}
 
-	outcome := &Outcome{}
 	var tee *usageTee
+	defer func() {
+		if tee != nil {
+			outcome.Usage = tee.Usage()
+		}
+	}()
 
 	reverse := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -122,7 +130,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			resp.Body = tee
 			return nil
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			// Status stays 0, which is what marks the hop failed: the connection never got far
 			// enough to have one. A client that hung up lands here too, and is not worth
 			// distinguishing against a threshold of three consecutive failures.
@@ -134,10 +142,6 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	}
 
 	reverse.ServeHTTP(w, r)
-	if tee != nil {
-		outcome.Usage = tee.Usage()
-	}
-	return *outcome
 }
 
 // transportFor keeps one transport per target host and verification setting, so connections are

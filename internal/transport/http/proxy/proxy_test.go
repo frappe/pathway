@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -24,7 +26,9 @@ func tlsEngine(t *testing.T) *httptest.Server {
 
 func forward(p *Proxy, target string, external bool) Outcome {
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
-	return p.Forward(httptest.NewRecorder(), r, target, external)
+	var out Outcome
+	p.Forward(httptest.NewRecorder(), r, target, external, &out)
+	return out
 }
 
 // The fleet default is off because an engine answers on a certificate we signed ourselves. A
@@ -61,5 +65,44 @@ func TestOneHostGetsATransportPerVerificationSetting(t *testing.T) {
 	}
 	if outcome := forward(p, engine.URL, true); outcome.Status != 0 {
 		t.Errorf("external hop reused the unverified pool and returned %d", outcome.Status)
+	}
+}
+
+// deadClient is a browser tab closed mid-stream: the response writer refuses the copy, which is
+// what makes net/http's ReverseProxy panic with http.ErrAbortHandler.
+type deadClient struct{ *httptest.ResponseRecorder }
+
+func (deadClient) Write([]byte) (int, error) { return 0, errors.New("client gone") }
+
+func (d deadClient) Unwrap() http.ResponseWriter { return d.ResponseRecorder }
+
+// A client that hangs up mid-stream unwinds Forward through the panic, but the vendor billed
+// whatever it had already generated — so the usage frame the tee caught must still reach the
+// caller, or every abandoned stream meters as zero tokens.
+func TestUsageSurvivesAClientHangup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`+"\n\n")
+	}))
+	t.Cleanup(server.Close)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	// ReverseProxy only panics on a copy error when it can tell it is serving a real connection.
+	r = r.WithContext(context.WithValue(r.Context(), http.ServerContextKey, &http.Server{}))
+
+	var out Outcome
+	func() {
+		defer func() {
+			if p := recover(); p == nil {
+				t.Fatal("a refused copy did not abort the handler")
+			} else if !errors.Is(p.(error), http.ErrAbortHandler) {
+				t.Fatalf("panic = %v, want ErrAbortHandler", p)
+			}
+		}()
+		New(Options{}, quiet()).Forward(deadClient{httptest.NewRecorder()}, r, server.URL, false, &out)
+	}()
+
+	if !strings.Contains(out.Usage, `"total_tokens":9`) {
+		t.Errorf("usage lost to the hangup: %q", out.Usage)
 	}
 }
