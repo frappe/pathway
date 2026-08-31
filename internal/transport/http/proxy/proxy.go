@@ -1,5 +1,6 @@
 // Package proxy forwards an admitted request to the engine that was picked for it, and reads the
-// usage frame out of the response on the way back without touching a byte of it.
+// usage frame out of the response on the way back without touching a byte of it — save one: on a
+// route whose upstream answers under its own model id, that id is swapped back to the client's.
 package proxy
 
 import (
@@ -80,7 +81,7 @@ func (p *Proxy) Reconfigure(opts Options) {
 // The caller owns the Outcome instead of taking it as a return value: ReverseProxy panics with
 // http.ErrAbortHandler when a client hangs up mid-stream, and the unwind discards a return value
 // along with whatever usage the tee had already captured.
-func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, external bool, outcome *Outcome) {
+func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, external bool, swap ModelSwap, outcome *Outcome) {
 	base, err := url.Parse(target)
 	if err != nil || base.Host == "" {
 		p.log.Error("unroutable target", "target", target, "err", err)
@@ -128,6 +129,13 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			}
 			tee = newUsageTee(resp.Body)
 			resp.Body = tee
+			if swap.active() {
+				// The tee stays innermost so usage is scraped off the raw upstream bytes. The two
+				// ids differ in length, so the declared length cannot survive the rewrite.
+				resp.Header.Del("Content-Length")
+				resp.ContentLength = -1
+				resp.Body = newModelSwapReader(tee, swap)
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {

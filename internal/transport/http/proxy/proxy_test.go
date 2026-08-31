@@ -27,7 +27,7 @@ func tlsEngine(t *testing.T) *httptest.Server {
 func forward(p *Proxy, target string, external bool) Outcome {
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	var out Outcome
-	p.Forward(httptest.NewRecorder(), r, target, external, &out)
+	p.Forward(httptest.NewRecorder(), r, target, external, ModelSwap{}, &out)
 	return out
 }
 
@@ -99,7 +99,8 @@ func TestUsageSurvivesAClientHangup(t *testing.T) {
 				t.Fatalf("panic = %v, want ErrAbortHandler", p)
 			}
 		}()
-		New(Options{}, quiet()).Forward(deadClient{httptest.NewRecorder()}, r, server.URL, false, &out)
+		New(Options{}, quiet()).Forward(deadClient{httptest.NewRecorder()}, r, server.URL, false,
+			ModelSwap{}, &out)
 	}()
 
 	if !strings.Contains(out.Usage, `"total_tokens":9`) {

@@ -2,7 +2,9 @@ package http
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/phot0n/pathway/internal/domain"
@@ -12,7 +14,12 @@ import (
 // vendor: what matters is the request as it leaves us, not who answers it.
 func providerFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
+	return providerFixtureAnswering(t, jsonEngine(`{`+usageObject+`}`))
+}
+
+func providerFixtureAnswering(t *testing.T, engineHandler http.HandlerFunc) *fixture {
+	t.Helper()
+	f := newFixture(t, engineHandler)
 	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b,anthropic/claude-4-5")}
 	f.store.Routes["anthropic/claude-4-5"] = []domain.Route{{
 		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
@@ -72,6 +79,45 @@ func TestProviderUsageIsRecordedAgainstTheGroveID(t *testing.T) {
 	}
 	if usage["m:total_tokens:claude-sonnet-4-5-20250929"] != 0 {
 		t.Errorf("usage was recorded against the vendor's id; usage = %v", usage)
+	}
+}
+
+// modelmap in reverse: the vendor answers under its own spelling, and the client gets back the id
+// it asked for — the rewrite must not be visible from outside.
+func TestAProviderResponseSpeaksTheGroveModelID(t *testing.T) {
+	f := providerFixtureAnswering(t, jsonEngine(`{"id":"msg_1","model":"claude-sonnet-4-5-20250929",`+usageObject+`}`))
+	resp := f.post("/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
+
+	if !strings.Contains(resp.Body.String(), `"model":"anthropic/claude-4-5"`) ||
+		strings.Contains(resp.Body.String(), "claude-sonnet") {
+		t.Errorf("vendor spelling reached the client: %s", resp.Body)
+	}
+}
+
+// The same swap on a stream, frame by frame, with everything else byte-identical and the usage
+// frame still captured off the raw bytes underneath the rewrite.
+func TestAProviderStreamSpeaksTheGroveModelIDInEveryFrame(t *testing.T) {
+	frames := []string{
+		`data: {"type":"message_start","message":{"model":"claude-sonnet-4-5-20250929"}}`,
+		`data: {"type":"content_block_delta","delta":{"text":"Hi"}}`,
+		`data: {"type":"message_delta","model":"claude-sonnet-4-5-20250929",` + usageObject + `}`,
+	}
+	f := providerFixtureAnswering(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range frames {
+			_, _ = io.WriteString(w, frame+"\n\n")
+			w.(http.Flusher).Flush()
+		}
+	})
+	resp := f.post("/v1/messages", `{"model":"anthropic/claude-4-5","stream":true}`)
+
+	want := strings.ReplaceAll(strings.Join(frames, "\n\n")+"\n\n",
+		"claude-sonnet-4-5-20250929", "anthropic/claude-4-5")
+	if resp.Body.String() != want {
+		t.Errorf("stream altered beyond the model swap.\n got: %q\nwant: %q", resp.Body.String(), want)
+	}
+	if f.store.Usage["abc123"]["m:total_tokens:anthropic/claude-4-5"] == 0 {
+		t.Errorf("usage lost under the swap: %v", f.store.Usage["abc123"])
 	}
 }
 

@@ -23,8 +23,10 @@ func (s *Server) proxyHandler() http.Handler {
 		}
 
 		// A provider hop leaves our network, which is what decides whether its certificate is
-		// checked — an engine's is one we signed, a vendor's is not.
-		//
+		// checked — an engine's is one we signed, a vendor's is not. A route that rewrote the
+		// model on the way out gets it swapped back on the way in: the response must speak the id
+		// the client asked for, not the upstream's own spelling.
+		route := state.Decision.Route
 		// Deferred, like meter's own record: a client hanging up mid-stream unwinds this handler
 		// through http.ErrAbortHandler, and the upstream still billed whatever it had generated.
 		var outcome proxy.Outcome
@@ -38,7 +40,8 @@ func (s *Server) proxyHandler() http.Handler {
 				state.Deployment = outcome.Deployment
 			}
 		}()
-		s.proxy.Forward(w, r, target, state.Decision.Route.IsProvider(), &outcome)
+		s.proxy.Forward(w, r, target, route.IsProvider(),
+			proxy.ModelSwap{Upstream: route.UpstreamModel, Client: state.Model}, &outcome)
 	})
 }
 
