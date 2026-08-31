@@ -96,7 +96,7 @@ func applyUsers(ctx context.Context, p redis.Pipeliner, buckets map[string]repos
 			p.HSet(ctx, "user:"+rec.Name, map[string]any{
 				"email": rec.Email, "group": rec.Groups, // comma list of group names
 				"allow": rec.Allow, "deny": rec.Deny,
-				"limited": flag(rec.Limited),
+				"limited": flag(rec.Limited), "log_payloads": flag(rec.LogPayloads),
 			})
 		}
 		setBucketHash(ctx, p, "users:"+label, bucket.Hash, len(bucket.Records))

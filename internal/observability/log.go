@@ -17,6 +17,10 @@ import (
 type Loggers struct {
 	Process *slog.Logger
 	Access  *slog.Logger
+	// Payload carries opted-in users' prompts and outputs — customer content, so unlike the two
+	// above it has no stdout fallback: nil when no path is configured, and the stage that would
+	// write it stays off. Content must never land somewhere retention was not decided for.
+	Payload *slog.Logger
 }
 
 type Options struct {
@@ -29,6 +33,9 @@ type Options struct {
 	AccessLogPath string
 	// ErrorLogPath receives Warn and above, in addition to stdout. Blank keeps stdout alone.
 	ErrorLogPath string
+	// PayloadLogPath is the file opted-in users' prompts and outputs go to. Blank disables
+	// payload logging for the whole box, whatever the pushed per-user flags say.
+	PayloadLogPath string
 }
 
 // New builds both loggers and returns a close for the files it opened.
@@ -58,18 +65,27 @@ func New(opts Options) (Loggers, func(), error) {
 	}
 	process := slog.New(fanout{handlers: handlers})
 
-	if opts.AccessLogPath == "" {
-		return Loggers{Process: process, Access: process}, closeAll, nil
+	loggers := Loggers{Process: process, Access: process}
+	if opts.AccessLogPath != "" {
+		file, err := openLog(opts.AccessLogPath)
+		if err != nil {
+			closeAll()
+			return Loggers{}, func() {}, err
+		}
+		open = append(open, file)
+		// Always at Info: the access line is the record, and a level change is about diagnostics.
+		loggers.Access = slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
-	file, err := openLog(opts.AccessLogPath)
-	if err != nil {
-		closeAll()
-		return Loggers{}, func() {}, err
+	if opts.PayloadLogPath != "" {
+		file, err := openLog(opts.PayloadLogPath)
+		if err != nil {
+			closeAll()
+			return Loggers{}, func() {}, err
+		}
+		open = append(open, file)
+		loggers.Payload = slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
-	open = append(open, file)
-	// Always at Info: the access line is the record, and a level change is about diagnostics.
-	access := slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	return Loggers{Process: process, Access: access}, closeAll, nil
+	return loggers, closeAll, nil
 }
 
 func openLog(path string) (*reopener, error) {

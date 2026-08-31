@@ -118,12 +118,13 @@ type KeyUpsert struct {
 }
 
 type UserUpsert struct {
-	Name    string
-	Email   string
-	Groups  string // comma list of Grove User Group names
-	Allow   string // comma list
-	Deny    string // comma list
-	Limited bool
+	Name        string
+	Email       string
+	Groups      string // comma list of Grove User Group names
+	Allow       string // comma list
+	Deny        string // comma list
+	Limited     bool
+	LogPayloads bool
 }
 
 type GroupUpsert struct {

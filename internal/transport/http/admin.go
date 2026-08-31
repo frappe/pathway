@@ -28,6 +28,9 @@ type adminUser struct {
 	Allow   string `json:"allow"` // comma list: this user's adds on top of their groups'
 	Deny    string `json:"deny"`  // comma list: removals that beat every grant
 	Limited bool   `json:"limited"`
+	// LogPayloads opts this user's prompts and outputs into the payload log. Absent on an older
+	// control plane's push, which decodes false — off.
+	LogPayloads bool `json:"log_payloads"`
 }
 
 type adminGroup struct {
@@ -78,7 +81,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	for _, u := range body.Users {
 		records = append(records, repository.UserUpsert{
 			Name: u.Name, Email: u.Email, Groups: u.Group,
-			Allow: u.Allow, Deny: u.Deny, Limited: u.Limited,
+			Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
 		})
 	}
 	if err := s.provisioning.UpsertUsers(r.Context(), records); err != nil {
@@ -191,7 +194,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			for _, u := range bucket.Records {
 				records = append(records, repository.UserUpsert{
 					Name: u.Name, Email: u.Email, Groups: u.Group,
-					Allow: u.Allow, Deny: u.Deny, Limited: u.Limited,
+					Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
 				})
 			}
 			push.Users[label] = repository.UserBucket{Hash: bucket.Hash, Records: records}

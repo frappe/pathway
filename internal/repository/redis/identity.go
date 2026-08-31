@@ -88,11 +88,12 @@ func (u users) Get(ctx context.Context, name string) (domain.UserRecord, bool, e
 		return domain.UserRecord{}, false, nil
 	}
 	return domain.UserRecord{
-		Email:   h["email"],
-		Groups:  domain.ModelSet(h["group"]),
-		Allow:   domain.ModelSet(h["allow"]),
-		Deny:    domain.ModelSet(h["deny"]),
-		Limited: strings.TrimSpace(h["limited"]) == "1",
+		Email:       h["email"],
+		Groups:      domain.ModelSet(h["group"]),
+		Allow:       domain.ModelSet(h["allow"]),
+		Deny:        domain.ModelSet(h["deny"]),
+		Limited:     strings.TrimSpace(h["limited"]) == "1",
+		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
 	}, true, nil
 }
 
@@ -102,11 +103,12 @@ func (u users) Upsert(ctx context.Context, records []repository.UserUpsert) erro
 			continue
 		}
 		if err := u.rdb.HSet(ctx, "user:"+rec.Name, map[string]any{
-			"email":   rec.Email,
-			"group":   rec.Groups, // comma list of group names
-			"allow":   rec.Allow,
-			"deny":    rec.Deny,
-			"limited": flag(rec.Limited),
+			"email":        rec.Email,
+			"group":        rec.Groups, // comma list of group names
+			"allow":        rec.Allow,
+			"deny":         rec.Deny,
+			"limited":      flag(rec.Limited),
+			"log_payloads": flag(rec.LogPayloads),
 		}).Err(); err != nil {
 			return err
 		}

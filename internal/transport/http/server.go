@@ -51,6 +51,7 @@ type Services struct {
 	Proxy        *proxy.Proxy
 	Drain        middleware.DrainState
 	Access       *slog.Logger
+	Payload      *slog.Logger
 	// MaxBodyBytes is read per request, so a reload moves it.
 	MaxBodyBytes func() int64
 }
@@ -63,6 +64,7 @@ func New(cfg config.Config, svc Services, log *slog.Logger) *Server {
 		deps: middleware.Deps{
 			Admission: svc.Admission, Routing: svc.Routing, Metering: svc.Metering,
 			Transform: svc.Transform, Drain: svc.Drain, Log: log, Access: svc.Access,
+			Payload:      svc.Payload,
 			MaxBodyBytes: svc.MaxBodyBytes, IngressToken: cfg.IngressToken,
 		},
 		adminToken: cfg.AdminToken,

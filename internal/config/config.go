@@ -42,9 +42,10 @@ type Config struct {
 	HtpasswdPath    string
 	NodeExporterURL string
 
-	AccessLogPath string
-	ErrorLogPath  string
-	PIDFile       string
+	AccessLogPath  string
+	ErrorLogPath   string
+	PayloadLogPath string
+	PIDFile        string
 }
 
 // ServesData reports whether this process owns the customer-facing ports. False while OpenResty
@@ -77,9 +78,10 @@ func Load() (Config, error) {
 		HtpasswdPath:    env("GROVE_HTPASSWD", "/etc/grove/nginx/metrics.htpasswd"),
 		NodeExporterURL: env("GROVE_NODE_EXPORTER_URL", "http://127.0.0.1:9100/metrics"),
 
-		AccessLogPath: strings.TrimSpace(os.Getenv("GROVE_ACCESS_LOG")),
-		ErrorLogPath:  strings.TrimSpace(os.Getenv("GROVE_ERROR_LOG")),
-		PIDFile:       strings.TrimSpace(os.Getenv("GROVE_PID_FILE")),
+		AccessLogPath:  strings.TrimSpace(os.Getenv("GROVE_ACCESS_LOG")),
+		ErrorLogPath:   strings.TrimSpace(os.Getenv("GROVE_ERROR_LOG")),
+		PayloadLogPath: strings.TrimSpace(os.Getenv("GROVE_PAYLOAD_LOG")),
+		PIDFile:        strings.TrimSpace(os.Getenv("GROVE_PID_FILE")),
 	}
 
 	// Before Redis: a missing token is a config fault, and needing a reachable Redis to hear

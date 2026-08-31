@@ -32,6 +32,9 @@ type Deps struct {
 	// Access is the per-request record. Separate from Log because it is a record, not a
 	// diagnostic, and must not move when the log level does.
 	Access *slog.Logger
+	// Payload is where opted-in users' prompts and outputs go — customer content, its own file so
+	// it can carry its own retention. Nil disables the payloadlog stage box-wide.
+	Payload *slog.Logger
 
 	// MaxBodyBytes bounds a request body. Beyond it the caller gets a 413 rather than the process
 	// growing to hold whatever was sent. Read per request so a reload moves it.
@@ -74,7 +77,7 @@ func Registered() []string {
 // whatever the key, and meter directly below route because route claims a slot that must come back.
 var GatewayChain = []string{
 	"recover", "accesslog", "drain",
-	"auth", "quota", "body", "modelaccess",
+	"auth", "quota", "body", "modelaccess", "payloadlog",
 	"route", "meter", "transform", "upstreamauth",
 }
 

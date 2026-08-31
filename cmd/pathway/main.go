@@ -51,8 +51,9 @@ func run() error {
 	level := new(slog.LevelVar)
 	log, closeLogs, err := observability.New(observability.Options{
 		Level:         level,
-		AccessLogPath: cfg.AccessLogPath,
-		ErrorLogPath:  cfg.ErrorLogPath,
+		AccessLogPath:  cfg.AccessLogPath,
+		ErrorLogPath:   cfg.ErrorLogPath,
+		PayloadLogPath: cfg.PayloadLogPath,
 	})
 	if err != nil {
 		return err
@@ -108,6 +109,7 @@ func run() error {
 		Proxy:        rebuilt.proxy,
 		Drain:        lifecycle,
 		Access:       log.Access,
+		Payload:      log.Payload,
 		MaxBodyBytes: func() int64 { return live.Get().MaxBodyBytes },
 	}, log.Process)
 	rebuilt.server = server

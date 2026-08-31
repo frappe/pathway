@@ -20,6 +20,10 @@ type State struct {
 	Model    string
 	Session  string
 	Body     transform.Body
+	// Raw is the request body exactly as the client sent it, kept for the payload log — Body above
+	// is decoded and later mutated by transforms, so it cannot testify to what the customer wrote.
+	// Nil on the bodyless paths (upgrade, multipart).
+	Raw []byte
 
 	Decision routing.Decision
 

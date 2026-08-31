@@ -197,6 +197,7 @@ func newBody(deps Deps) (Middleware, error) {
 
 			// A body that is not a JSON object is not an error here: some /v1 endpoints take none
 			// at all, and the engine is the right place to reject a malformed one.
+			state.Raw = raw
 			var decoded transform.Body
 			if len(raw) > 0 && json.Unmarshal(raw, &decoded) == nil {
 				state.Body = decoded

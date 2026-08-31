@@ -42,6 +42,10 @@ type UserRecord struct {
 	Allow   map[string]bool // models this user may call on top of their groups'
 	Deny    map[string]bool // models this user may not call, whatever granted them
 	Limited bool            // over their monthly token budget → 429
+	// LogPayloads opts this user's prompts and outputs into the payload log — the one piece of
+	// customer CONTENT the platform may retain, so it is off unless the control plane says
+	// otherwise, and a record from before the field existed reads as off.
+	LogPayloads bool
 
 	// Set only by SynthUser off a pre-group key, where the control plane had already resolved
 	// access down to one model set. Nothing read from Redis sets it.
