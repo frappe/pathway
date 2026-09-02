@@ -29,20 +29,24 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 				return
 			}
 			recorder := &payloadRecorder{ResponseWriter: w, status: http.StatusOK}
+			// Deferred for the same reason the access line is: a client that hangs up mid-stream
+			// unwinds this stage through http.ErrAbortHandler, and the frames already generated
+			// are exactly the ones a support query about an abandoned request asks after.
+			defer func() {
+				deps.Payload.LogAttrs(r.Context(), slog.LevelInfo, "payload",
+					slog.String("rid", or(state.Decision.RequestID, "-")),
+					slog.String("key", or(state.Identity.Prefix(), "-")),
+					slog.String("user", state.Identity.Key.User),
+					slog.String("model", or(state.Model, "-")),
+					slog.String("path", r.URL.Path),
+					slog.Int("status", recorder.status),
+					slog.String("prompt", string(state.Raw)),
+					slog.String("output", string(recorder.body)),
+					slog.Int("prompt_bytes", len(state.Raw)),
+					slog.Int64("output_bytes", recorder.total),
+				)
+			}()
 			next.ServeHTTP(recorder, r)
-
-			deps.Payload.LogAttrs(r.Context(), slog.LevelInfo, "payload",
-				slog.String("rid", or(state.Decision.RequestID, "-")),
-				slog.String("key", or(state.Identity.Prefix(), "-")),
-				slog.String("user", state.Identity.Key.User),
-				slog.String("model", or(state.Model, "-")),
-				slog.String("path", r.URL.Path),
-				slog.Int("status", recorder.status),
-				slog.String("prompt", string(state.Raw)),
-				slog.String("output", string(recorder.body)),
-				slog.Int("prompt_bytes", len(state.Raw)),
-				slog.Int64("output_bytes", recorder.total),
-			)
 		})
 	}, nil
 }

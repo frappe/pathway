@@ -73,35 +73,42 @@ func newAccessLog(deps Deps) (Middleware, error) {
 			r, state := newState(r)
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
-			next.ServeHTTP(recorder, r)
+			// Deferred: a client hanging up mid-stream unwinds this stage through
+			// http.ErrAbortHandler, which recover deliberately re-panics. A request served
+			// until the moment it was abandoned still owes its line — the upstream generated
+			// and billed whatever it had, and a log that silently drops those requests is one
+			// that cannot be reconciled against the bill.
+			defer func() {
+				attrs := []slog.Attr{
+					slog.String("remote", clientIP(r)),
+					slog.String("method", r.Method),
+					slog.String("path", r.URL.Path),
+					slog.Int("status", recorder.status),
+					slog.Int64("bytes", recorder.written),
+					slog.Float64("rt", time.Since(state.Started).Seconds()),
+				}
+				// ttft is an upstream measurement — the wait for the first byte an engine or vendor
+				// sent back. On a request the gateway answered itself (a model list, a health check,
+				// a refusal) it would only repeat rt, so it is left off the line.
+				if state.Decision.EngineURL() != "" {
+					attrs = append(attrs, slog.Float64("ttft", recorder.ttft(state.Started)))
+				}
+				attrs = append(attrs,
+					// Constant until §A retry lands; emitted now so the log schema never moves.
+					slog.Int("attempts", 1),
+					slog.String("key", or(state.Identity.Prefix(), "-")),
+					slog.String("model", or(state.Model, "-")),
+					slog.String("rid", or(state.Decision.RequestID, "-")),
+					slog.String("upstream", or(state.Decision.EngineURL(), "-")),
+					slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
+					slog.String("engine", or(state.Deployment, "-")),
+					slog.Int("upstream_status", state.UpstreamStatus),
+					slog.String("reason", or(state.DeniedReason, state.Reason)),
+				)
+				access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
+			}()
 
-			attrs := []slog.Attr{
-				slog.String("remote", clientIP(r)),
-				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
-				slog.Int("status", recorder.status),
-				slog.Int64("bytes", recorder.written),
-				slog.Float64("rt", time.Since(state.Started).Seconds()),
-			}
-			// ttft is an upstream measurement — the wait for the first byte an engine or vendor
-			// sent back. On a request the gateway answered itself (a model list, a health check,
-			// a refusal) it would only repeat rt, so it is left off the line.
-			if state.Decision.EngineURL() != "" {
-				attrs = append(attrs, slog.Float64("ttft", recorder.ttft(state.Started)))
-			}
-			attrs = append(attrs,
-				// Constant until §A retry lands; emitted now so the log schema never moves.
-				slog.Int("attempts", 1),
-				slog.String("key", or(state.Identity.Prefix(), "-")),
-				slog.String("model", or(state.Model, "-")),
-				slog.String("rid", or(state.Decision.RequestID, "-")),
-				slog.String("upstream", or(state.Decision.EngineURL(), "-")),
-				slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
-				slog.String("engine", or(state.Deployment, "-")),
-				slog.Int("upstream_status", state.UpstreamStatus),
-				slog.String("reason", or(state.DeniedReason, state.Reason)),
-			)
-			access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
+			next.ServeHTTP(recorder, r)
 		})
 	}, nil
 }
