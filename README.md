@@ -29,7 +29,7 @@ never registered, so no handler on that box could read a key store even if one w
 7. Answers `/v1/models` itself, and `/metrics/node` behind basic auth.
 8. Upgrades its own binary and reloads its own configuration without dropping a connection.
 
-Requirements: Redis on loopback, a certificate on disk, and an admin token. It refuses to start
+Requirements: Redis (loopback, or the Network's shared store), a certificate on disk, and an admin token. It refuses to start
 without the last one, and refuses to start as an ingress without a data token.
 
 **Reading order** if you are new to it: *Where it sits* → *Layers* → *The request path*. If you are
@@ -50,7 +50,7 @@ about to change something, skip to *How to do things* and *Things worth knowing*
    client ──► latency DNS ──► ┌───────────────────────────────────┐
               api.<zone>      │  GATEWAY SERVER   (tenant plane)  │
                               │  TLS · auth · quota · route · meter│
-                              │  local Redis                       │
+                              │  Redis: loopback or Network store  │
                               └────┬──────────────────────┬────────┘
                         direct     │                      │  ingress
                                    ▼                      ▼
@@ -66,7 +66,7 @@ about to change something, skip to *How to do things* and *Things worth knowing*
 ```
 
 **The control plane pushes; the gateway never calls back.** Grove projects its state into each
-box's local Redis over `/grove-admin/*` and pulls usage counters back out. Between syncs the
+box's Redis over `/grove-admin/*` and pulls usage counters back out. Between syncs the
 gateway is autonomous — if Grove is down, traffic keeps flowing on the last table it was given.
 
 **Two route kinds.** A `direct` row names an engine the gateway dials itself. An `ingress` row names
@@ -75,9 +75,11 @@ a pod restarting in one region is invisible to a gateway in another. Which kind 
 control plane's decision; the gateway just reads `kind`. An empty `kind` is `direct` — that is what
 every route pushed before the split carried.
 
-**Everything on this box is local.** Redis is on loopback, and its contents are either pushed
-(keys, users, groups, routes) or derived (sticky, in-flight, health, usage). Nothing is shared
-between gateways, which is why a restart costs at most a round of cold prefix caches.
+**A gateway's state lives in one Redis:** loopback, or the Gateway State Store its Network's
+gateways share (`GROVE_REDIS_ADDR` + `GROVE_REDIS_PASSWORD`). Its contents are either pushed (keys,
+users, groups, routes) or derived (sticky, in-flight, health, usage). On a shared store in-flight is
+one counter, so a directly dialled replica's cap holds across those gateways. A dead store fails its
+gateways closed: nothing authenticates and `/healthz` reports it.
 
 ---
 
@@ -203,8 +205,8 @@ The rule everywhere: **one owner per piece of state that can drift.**
 | the middleware chain | `atomic.Pointer` in `Server` | until SIGUSR1 | `Server.SetChain` |
 | transport pool | `proxy.Proxy` | until a tunable changes | `Proxy.Reconfigure` |
 | certificate | `certLoader` | until the file's mtime moves | the loader |
-| sticky, in-flight, health, usage | local Redis | minutes to a pull cycle | this box |
-| keys, users, groups, routes | local Redis | until the next push | **the control plane** |
+| sticky, in-flight, health, usage | the box's Redis | minutes to a pull cycle | this box (or its store's gateways) |
+| keys, users, groups, routes | the box's Redis | until the next push | **the control plane** |
 
 The last row is the important one. Everything pushed is a *projection*: the gateway never edits it,
 never merges into it, and never treats a local change as authoritative. Anything it does own is
@@ -569,7 +571,9 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
 | `GROVE_GATEWAY_ID` / `GROVE_INGRESS_ID` | which plane; both set is a refusal |
 | `GROVE_INGRESS_TOKEN` | required on an ingress; blank there refuses every gateway |
 | `GROVE_GATEWAY_REGION` | this gateway's region, which `PickRoute` prefers |
-| `GROVE_REDIS_ADDR` | default `127.0.0.1:6379` |
+| `GROVE_GATEWAY_GEOGRAPHY` | this gateway's geography; a user pinned to another (any pin, when blank) gets 403 `this key is restricted to geography <g>` on inference and `/v1/models` |
+| `GROVE_REDIS_ADDR` | default `127.0.0.1:6379`; the store's private address when shared |
+| `GROVE_REDIS_PASSWORD` | the shared store's `requirepass`; blank = no AUTH |
 | `GROVE_LISTEN_HTTP` / `GROVE_LISTEN_HTTPS` | the data path; at least one is required |
 | `GROVE_PUBLIC_HOST` | the shared name customer traffic arrives on |
 | `GROVE_SELF_HOST` | this box's own name — carries `/grove-admin` and the scrape |
@@ -595,7 +599,8 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
   "upstream_tls_verify": false,
   "drain_timeout": "630s",
   "lame_duck": "5s",
-  "upgrade_timeout": "30s"
+  "upgrade_timeout": "30s",
+  "maintenance": false
 }
 ```
 
@@ -609,6 +614,12 @@ believes they turned.
 `synthetic_session_ttl` is the one worth knowing. `0s` balances every caller that names no session
 of its own; `30m` pins each API key to one engine, which is what a single-placement fleet always
 did and the lever to pull if balancing goes wrong.
+
+`maintenance: true` refuses every new data request with 503 `maintenance` (`Retry-After: 30`) and
+fails `/healthz`, while requests already running finish. It lives in the file, so a box restarted
+in maintenance comes back in it. `GET /grove-admin/in-flight` → `{"maintenance", "in_flight"}` is
+how the control plane knows the box has gone idle. An older binary refuses a file carrying this key
+(unknown field), so it is written only once this release is deployed.
 
 ---
 
@@ -662,7 +673,6 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `user:<Grove User>` | hash | state push, `users` section |
 | `group:<Grove User Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
-| `catalog:public` | comma list | state push, `groups` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
 | `usage:<key prefix>` | hash | the gateway; drained by `GET /grove-admin/usage` |
 | `sticky:<session>` | string, 30m | the gateway |
@@ -672,11 +682,11 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 ### How the push works
 
 `POST /grove-admin/state` is desired state, whole, and **absence prunes**. The body carries any
-subset of four sections — groups (+ public catalog), users, keys, routes — each stamped with a
+subset of four sections — groups, users, keys, routes — each stamped with a
 hash Grove computed. The agent applies the whole body in ONE Redis MULTI: HSET every named
 record, DEL every record in a pushed section the payload does not name, then store the hashes in
 `grove:state_hash`. A Redis error is a 500 and none of it lands — the hashes never claim state
-that did not arrive. Only `group:/user:/key:/deploy:/catalog:public` are ever pruned; usage,
+that did not arrive. Only `group:/user:/key:/deploy:` are ever pruned; usage,
 sticky, inflight and health keys are the gateway's own.
 
 `GET /grove-admin/state-hash` returns that stored map. Grove diffs its computed hashes against it
@@ -691,6 +701,9 @@ per-section `PUT`/`DELETE` endpoints remain for one release after the control pl
 Every admin endpoint is gated on `X-Grove-Admin-Token`, compared in constant time, and mounted on
 `GROVE_SELF_HOST` only — a push has to reach **one** gateway, and the public name means all of them.
 
+`GET /grove-admin/in-flight` is read-only: `{"maintenance": bool, "in_flight": n}`, where
+`in_flight` counts data requests past the `drain` stage, realtime sessions until they close.
+
 `GET /grove-admin/usage` **reads and deletes** in one step. The returned snapshot is the only copy,
 so it never double-counts and a control-plane crash loses at most one cycle.
 
@@ -700,7 +713,6 @@ so it never double-counts and a control-plane crash loses at most one cycle.
 key:<sha256(secret)>      status  user  prefix
 user:<Grove User>         email  group (comma list)  allow  deny  limited
 group:<Grove User Group>  models
-catalog:public            "model-a,model-b"
 usage:<key prefix>        request_count  prompt_tokens  completion_tokens  total_tokens
                           cached_tokens  m:<metric>:<model>  m:<metric>:<deployment>
 ```
@@ -727,7 +739,7 @@ name containing a comma would split — Grove refuses one.
 `engine_url` is a **base**; the path the client asked for is appended to it. `in_flight` is
 computed here and never pushed — the control plane has no view of what is running right now.
 
-A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries two
+A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries three
 more fields:
 
 ```json
@@ -740,7 +752,8 @@ more fields:
   "server":         "anthropic",
   "kind":           "provider",
   "upstream_model": "claude-sonnet-4-5-20250929",
-  "api_version":    "2023-06-01"
+  "api_version":    "2023-06-01",
+  "dialect":        "anthropic"
 }]
 ```
 
@@ -749,14 +762,22 @@ caller's unchanged, which is every route we run ourselves — an engine is start
 id. A realtime upgrade carries its model in the query string and has no body for a transform to
 rewrite, so the same substitution is applied to `?model=` in the transform stage. Access, routing, metering and `/v1/models` all key on the id the caller sent, so the rewrite
 cannot desync a grant from a route. On a provider hop the client's `Authorization` is deleted
-rather than replaced, `x-api-key` carries the credential, and the certificate is verified whatever
-`upstream_tls_verify` says — that hop leaves our network carrying someone else's key.
+rather than replaced, the vendor's own key goes in the header its `dialect` expects (`x-api-key`
+plus `anthropic-version` for an Anthropic front, a Bearer for an OpenAI-compatible one), and the
+certificate is verified whatever `upstream_tls_verify` says — that hop leaves our network carrying
+someone else's key.
+
+`dialect` is the API shape the row speaks, `openai` or `anthropic`, and nothing translates between
+them: a request reaches only rows of its surface's dialect. A vendor with both fronts is two rows. On
+a row we run, blank means both, since vLLM answers both natively; on a provider row, blank is
+malformed and the row serves nothing.
 
 A provider route is also **deny-by-default on the surface check**. `Serves` is generous to an engine
 because an engine answers on more than the OpenAI core (`/tokenize`, `/v1/rerank`), but a vendor is a
-closed set we already know, so `ServesRoute` holds it to an allowlist — `/v1/messages` and
-`/v1/messages/count_tokens` for the Anthropic dialect. Anything else is our 404 at `routing.go`,
-above `meter`, instead of a round trip that comes back as theirs.
+closed set we already know, so `ServesRoute` holds it to its dialect's chat paths —
+`/v1/chat/completions` and `/v1/completions` for `openai`, `/v1/messages` and
+`/v1/messages/count_tokens` for `anthropic`. Anything else is our 404 at `routing.go`, above
+`meter`, instead of a round trip that comes back as theirs.
 
 ### Backwards compatibility that is still load-bearing
 
@@ -775,9 +796,11 @@ above `meter`, instead of a round trip that comes back as theirs.
 
 | | |
 |---|---|
-| `POST /v1/*` | the data path |
-| `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use. Without one: the public catalogue |
-| `GET /healthz` | 200, or 503 while draining |
+| `POST /v1/*` | the data path for OpenAI clients. `/v1/messages` here is a 404 pointing at `/anthropic` |
+| `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` and `/v1/messages/count_tokens` only, keyed by `x-api-key` or a Bearer |
+| `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
+| `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
+| `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |
 
 ---
@@ -805,8 +828,11 @@ was unreadable turns one broken dependency into an outage.
 
 ### Status vocabulary
 
-Every refusal is OpenAI-shaped — `{"error":{"message":…,"type":"grove_gateway"}}` — so a client
-parses them the same way whichever gate produced it.
+Every refusal speaks its surface's shape — `{"error":{"message":…,"type":…}}` for OpenAI clients,
+`{"type":"error","error":{…}}` under `/anthropic` — so a client parses them the same way whichever
+gate produced it. `type` is the error's class, named off the status as the
+Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except `maintenance` and
+`draining`, which a 503 alone does not say.
 
 | | Means | Client should |
 |---|---|---|
@@ -815,7 +841,7 @@ parses them the same way whichever gate produced it.
 | 413 | body over `max_body_bytes` | send less |
 | 429 | over monthly budget, **or** every replica at capacity | back off and retry |
 | 502 | the engine could not be reached or failed the hop | retry; another replica may take it |
-| 503 | the model has no healthy placement, a store is unreadable, or the gateway is draining | retry with backoff — `Retry-After` is set when draining |
+| 503 | the model has no healthy placement, a store is unreadable, or the gateway is draining or in maintenance | retry with backoff — `Retry-After` is set when draining or in maintenance |
 
 ---
 
@@ -867,15 +893,65 @@ fake in `dataplane_test.go`) for token counts.
 
 Tagged versions publish a static `linux/amd64` and `linux/arm64` binary (`CGO_ENABLED=0`,
 `-trimpath`) plus a `sha256sums.txt`. A control plane downloads the checksummed asset, installs it to
-`/usr/local/bin/pathway`, and runs it under systemd with `Type=notify` + `NotifyAccess=all` —
-required, because the PID changes on an upgrade and systemd has to follow the child's `MAINPID`.
-Grove drives this from its `install_gateway_agent` role.
+`/usr/local/bin/pathway`, and runs it under systemd as an unprivileged user with `PIDFile=` inside a
+`RuntimeDirectory=` — the PID changes on an upgrade and systemd follows the child through the file
+tableflip writes there (`Type=notify` + `NotifyAccess=all` is the other way to do it). Grove drives this
+from its `install_gateway_agent` role.
 
 - **New binary** → copy + `systemctl reload` (SIGHUP). No dropped connections.
 - **Changed tunable** → write `config.json` + SIGUSR1. No restart.
 - **Changed `agent.env`** → restart. The child reads the environment from systemd, so a reload would
   not pick it up. This is the only case that drains, and it is rare.
 - **Renewed certificate** → copy the file. Nothing else: the loader watches its mtime.
+
+### Release from a branch or a fork
+
+A `v*` tag push releases that commit. For any other branch or name, dispatch the same workflow:
+
+```sh
+gh workflow run release.yml -f ref=dialect -f tag=dialect-2026-09-15   # add -R owner/fork for a fork
+```
+
+It builds `ref`, creates `tag` on that commit, and publishes the same assets as a pre-release (pass
+`-f prerelease=false` to let it become Latest). In Grove, set **Pathway Release** and **Pathway Repo**
+in Grove Settings, then create a **Pathway Update**, tick Gateways and/or Ingresses, and Start: it
+deploys each server in turn and stops at the first failure. A fork must enable Actions once, and its
+releases must be public: boxes download them unauthenticated.
+
+### Build a binary locally
+
+The release build, minus the tag — so what you ship is what CI would have shipped:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+  -ldflags "-s -w -X main.version=dev-$(git rev-parse --short HEAD)" \
+  -o dist/pathway-linux-amd64 ./cmd/pathway
+./dist/pathway-linux-amd64 --version    # dev-<sha>
+```
+
+Static (`CGO_ENABLED=0`), so it runs on any Linux box whatever its libc; `GOARCH=arm64` for a
+Graviton front box. Without `-X main.version` it reports plain `dev`.
+
+### Dev deploy
+
+A build off your machine instead of a release, through the same play, with the same tracking
+(an Ansible Play under the Gateway Server). From the Grove bench root:
+
+```sh
+bench --site grove.localhost execute frappe.enqueue_doc --kwargs \
+  '{"doctype":"Gateway Server","name":"gw1-ap-south-1","method":"_deploy_agent","now":True,"agent_binary":"/abs/path/to/pathway-linux-amd64"}'
+```
+
+`agent_binary` is an extra-var of Grove's `install_gateway_agent` role: set, that file is copied to
+the box in place of the checksummed download, and nothing else about the deploy changes — `agent.env`
+and `config.json` are still written whole from the doc, and the binary lands with a `systemctl reload`
+(SIGHUP) unless `agent.env` moved. The Setup job (`provision`) takes it too, for a box that needs the
+unit shipped as well. `now: True` runs it in this process rather than the queue, so a worker on
+stale code is not in the way. Gateway Server only for now; the Ingress Server jobs do not take it.
+
+The doc keeps reporting the pinned release: a box on a dev build reads as that release until the
+next **Deploy Agent** click puts it back — which is the point. A dev deploy is a temporary state,
+and the button is how it ends.
 
 ---
 
