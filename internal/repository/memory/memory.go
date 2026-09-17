@@ -29,11 +29,10 @@ type Store struct {
 	InFlight map[string]map[string]bool // engine → request ids
 	Failures map[string]int
 	Usage    map[string]map[string]int64
-	Public   *string
 	Hashes   map[string]string // grove:state_hash — section/bucket → hash
 
 	// Fail names the repositories that should error, by interface name ("routes", "inflight",
-	// "health", "sessions", "keys", "users", "groups", "usage", "catalog", "state").
+	// "health", "sessions", "keys", "users", "groups", "usage", "state").
 	Fail map[string]bool
 }
 
@@ -54,7 +53,7 @@ func (s *Store) Repositories() repository.Store {
 	return repository.Store{
 		Keys: keys{s}, Users: users{s}, Groups: groups{s}, Routes: routes{s},
 		Sessions: sessions{s}, InFlight: inFlight{s}, Health: health{s},
-		Usage: usage{s}, Catalog: catalog{s}, State: state{s},
+		Usage: usage{s}, State: state{s},
 	}
 }
 
@@ -344,40 +343,6 @@ func (u usage) Drain(_ context.Context) (map[string]map[string]string, error) {
 	return out, nil
 }
 
-type catalog struct{ s *Store }
-
-func (c catalog) Get(_ context.Context) (string, bool, error) {
-	c.s.mu.Lock()
-	defer c.s.mu.Unlock()
-	if err := c.s.failed("catalog"); err != nil {
-		return "", false, err
-	}
-	if c.s.Public == nil {
-		return "", false, nil
-	}
-	return *c.s.Public, true, nil
-}
-
-func (c catalog) Set(_ context.Context, csv string) error {
-	c.s.mu.Lock()
-	defer c.s.mu.Unlock()
-	if err := c.s.failed("catalog"); err != nil {
-		return err
-	}
-	c.s.Public = &csv
-	return nil
-}
-
-func (c catalog) Clear(_ context.Context) error {
-	c.s.mu.Lock()
-	defer c.s.mu.Unlock()
-	if err := c.s.failed("catalog"); err != nil {
-		return err
-	}
-	c.s.Public = nil
-	return nil
-}
-
 type state struct{ s *Store }
 
 func (st state) Hashes(_ context.Context) (map[string]string, error) {
@@ -415,11 +380,6 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 			if !named[name] {
 				delete(st.s.Groups, name)
 			}
-		}
-		if push.Groups.Catalog == "" {
-			st.s.Public = nil
-		} else {
-			st.s.Public = &push.Groups.Catalog
 		}
 		st.s.Hashes["groups"] = push.Groups.Hash
 		counts.Groups = len(named)

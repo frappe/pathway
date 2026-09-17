@@ -38,7 +38,6 @@ func (c *Client) Store() repository.Store {
 		InFlight: inFlight{c.rdb},
 		Health:   health{c.rdb},
 		Usage:    usage{c.rdb},
-		Catalog:  catalog{c.rdb},
 		State:    state{c.rdb},
 	}
 }

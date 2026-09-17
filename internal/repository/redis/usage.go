@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"strings"
 
 	"github.com/redis/go-redis/v9"
@@ -81,28 +80,4 @@ func pairsToMap(res any) map[string]string {
 		m[field] = value
 	}
 	return m
-}
-
-// catalog:public — the comma list of models every group flagged Show in Public Catalogue names,
-// assembled by the control plane and replaced whole on each groups push. Absent = no group is
-// public, which is the default.
-type catalog struct{ rdb *redis.Client }
-
-func (c catalog) Get(ctx context.Context) (string, bool, error) {
-	csv, err := c.rdb.Get(ctx, "catalog:public").Result()
-	if errors.Is(err, redis.Nil) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return csv, true, nil
-}
-
-func (c catalog) Set(ctx context.Context, csv string) error {
-	return c.rdb.Set(ctx, "catalog:public", csv, 0).Err()
-}
-
-func (c catalog) Clear(ctx context.Context) error {
-	return c.rdb.Del(ctx, "catalog:public").Err()
 }

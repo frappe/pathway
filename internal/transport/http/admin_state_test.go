@@ -44,7 +44,7 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	bucket := domain.BucketOf("aa")
 
 	body := fmt.Sprintf(`{
-		"groups": {"hash": "gh", "catalog": "m1", "records": [{"name": "acme", "models": "m1"}]},
+		"groups": {"hash": "gh", "records": [{"name": "acme", "models": "m1"}]},
 		"keys": {"buckets": {"%s": {"hash": "kh", "records": [
 			{"key_hash": "aa", "prefix": "K-1", "user": "GU-1", "status": "active"}]}}},
 		"routes": {"hash": "rh", "table": {"m1": [

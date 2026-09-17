@@ -75,11 +75,6 @@ func applyGroups(ctx context.Context, p redis.Pipeliner, push repository.GroupsP
 		p.HSet(ctx, "group:"+rec.Name, map[string]any{"models": rec.Models})
 	}
 	deleteUnnamed(ctx, p, "group:", held, func(id string) bool { return named[id] })
-	if push.Catalog == "" {
-		p.Del(ctx, "catalog:public")
-	} else {
-		p.Set(ctx, "catalog:public", push.Catalog, 0)
-	}
 	p.HSet(ctx, stateHashKey, "groups", push.Hash)
 	return len(named)
 }

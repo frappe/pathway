@@ -36,7 +36,7 @@ func accessFixture(t *testing.T, f *fixture) *bytes.Buffer {
 		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
 		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
 		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
-		Catalog:      catalog.New(repos.Routes, repos.Catalog),
+		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),
 		Transform:    transforms,
 		Proxy:        proxy.New(proxy.Options{}, logs.Process),
@@ -94,6 +94,17 @@ func TestListingModelsLeavesAnAccessLine(t *testing.T) {
 	}
 	if _, present := line["ttft"]; present {
 		t.Error("ttft on a gateway-answered line — it is an upstream measurement and would only repeat rt")
+	}
+}
+
+// No key is a 401, as on the inference path: a list answered anyway hides a client that forgot its key.
+func TestListingModelsWithoutAKeyIsRefused(t *testing.T) {
+	f := newFixture(t, jsonEngine(`{}`))
+
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body = %s", w.Code, w.Body)
 	}
 }
 

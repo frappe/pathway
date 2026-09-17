@@ -63,7 +63,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	kept := sibling(t, "aa") // named in aa's bucket, so the push keeps it while pruning aa
 	counts, err := state.Apply(ctx, repository.StatePush{
 		Groups: &repository.GroupsPush{
-			Hash: "gh", Catalog: "m1",
+			Hash:    "gh",
 			Records: []repository.GroupUpsert{{Name: "acme", Models: "m1"}},
 		},
 		Keys: map[string]repository.KeyBucket{

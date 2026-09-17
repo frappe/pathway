@@ -35,20 +35,8 @@ func (s *Service) DeleteUsers(ctx context.Context, ids []string) (int, error) {
 	return s.store.Users.Delete(ctx, ids)
 }
 
-// UpsertGroups also replaces the pooled public catalogue when given one. Replaced whole, never
-// merged — that is how a deleted group stops being advertised. A nil pointer predates the catalogue
-// and leaves the current one alone rather than clearing it.
-func (s *Service) UpsertGroups(ctx context.Context, records []repository.GroupUpsert, publicCatalog *string) error {
-	if err := s.store.Groups.Upsert(ctx, records); err != nil {
-		return err
-	}
-	if publicCatalog == nil {
-		return nil
-	}
-	if *publicCatalog == "" {
-		return s.store.Catalog.Clear(ctx)
-	}
-	return s.store.Catalog.Set(ctx, *publicCatalog)
+func (s *Service) UpsertGroups(ctx context.Context, records []repository.GroupUpsert) error {
+	return s.store.Groups.Upsert(ctx, records)
 }
 
 // ReplaceRoutes replaces the table per model named; an empty list retires that model, which is what

@@ -41,7 +41,7 @@ func payloadFixture(t *testing.T, engineHandler http.HandlerFunc, optIn bool) (*
 		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
 		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
 		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
-		Catalog:      catalog.New(repos.Routes, repos.Catalog),
+		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),
 		Transform:    transforms,
 		Proxy:        proxy.New(proxy.Options{}, logs.Process),

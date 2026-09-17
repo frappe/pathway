@@ -93,12 +93,11 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"ok": true, "count": len(body.Users)})
 }
 
-// PUT /admin/groups — upsert what each group grants, plus the pooled public catalogue. Upsert-only:
+// PUT /admin/groups — upsert what each group grants. Upsert-only:
 // a group nobody links to is unreachable, not harmful.
 func (s *Server) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Groups  []adminGroup `json:"groups"`
-		Catalog *string      `json:"catalog"` // nil = a control plane that predates it
+		Groups []adminGroup `json:"groups"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -109,7 +108,7 @@ func (s *Server) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 			Name: g.Name, Models: g.Models,
 		})
 	}
-	if err := s.provisioning.UpsertGroups(r.Context(), records, body.Catalog); err != nil {
+	if err := s.provisioning.UpsertGroups(r.Context(), records); err != nil {
 		respond.Error(w, http.StatusServiceUnavailable, "group store error")
 		return
 	}
@@ -155,7 +154,6 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Groups *struct {
 			Hash    string       `json:"hash"`
-			Catalog string       `json:"catalog"`
 			Records []adminGroup `json:"records"`
 		} `json:"groups"`
 		Users *struct {
@@ -186,7 +184,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			records = append(records, repository.GroupUpsert{Name: g.Name, Models: g.Models})
 		}
 		push.Groups = &repository.GroupsPush{
-			Hash: body.Groups.Hash, Catalog: body.Groups.Catalog, Records: records,
+			Hash: body.Groups.Hash, Records: records,
 		}
 	}
 	if body.Users != nil {

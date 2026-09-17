@@ -53,18 +53,6 @@ func TestAGroupThePushDoesNotNameIsDeleted(t *testing.T) {
 	}
 }
 
-func TestAnEmptyCatalogClearsThePublishedOne(t *testing.T) {
-	store := memory.New()
-	old := "old-model"
-	store.Public = &old
-
-	apply(t, store, repository.StatePush{Groups: &repository.GroupsPush{Hash: "h"}})
-
-	if store.Public != nil {
-		t.Errorf("catalog = %q, want cleared", *store.Public)
-	}
-}
-
 // sibling finds a distinct id in the same bucket as `id` — a bucket push only ever carries and
 // prunes its own members, so the fixture must respect the labeling the control plane uses.
 func sibling(t *testing.T, id string) string {

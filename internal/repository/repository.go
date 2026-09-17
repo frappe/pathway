@@ -76,14 +76,6 @@ type Usage interface {
 	Drain(ctx context.Context) (map[string]map[string]string, error)
 }
 
-// Catalog holds the pooled public model list, replaced whole on each groups push.
-type Catalog interface {
-	// Get answers ok=false when no group is public, which is the default.
-	Get(ctx context.Context) (string, bool, error)
-	Set(ctx context.Context, csv string) error
-	Clear(ctx context.Context) error
-}
-
 // State is the desired-state push: apply what the payload names, delete what it does not, and
 // store the hashes it carried — all in one transaction, so the hashes never claim state that
 // did not land. Hashes is what the control plane diffs against before deciding to push at all.
@@ -102,7 +94,6 @@ type Store struct {
 	InFlight InFlight
 	Health   Health
 	Usage    Usage
-	Catalog  Catalog
 	State    State
 }
 
@@ -146,7 +137,6 @@ type StatePush struct {
 
 type GroupsPush struct {
 	Hash    string
-	Catalog string
 	Records []GroupUpsert
 }
 

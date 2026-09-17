@@ -103,7 +103,7 @@ func run() error {
 			SyntheticTTL: func() time.Duration { return live.Get().SyntheticSessionTTL },
 		}),
 		Metering:     metering.New(store.Usage, store.Health, log.Process),
-		Catalog:      catalog.New(store.Routes, store.Catalog),
+		Catalog:      catalog.New(store.Routes),
 		Provisioning: provisioning.New(store, log.Process),
 		Transform:    rebuilt.chain,
 		Proxy:        rebuilt.proxy,

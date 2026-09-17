@@ -39,20 +39,7 @@ func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
 // when there are none to show.
 func (s *Server) modelsForCaller(w http.ResponseWriter, r *http.Request) ([]string, bool) {
 	ctx := r.Context()
-	credential := middleware.Credential(r)
-	if domain.Bearer(credential) == "" {
-		// No key at all → the public catalogue, so a prospect can see what is on offer before
-		// signing up. A key that is present but wrong still 401s below: answering it with the
-		// anonymous list would hide a broken key behind a shorter, plausible one.
-		models, err := s.catalog.Public(ctx)
-		if err != nil {
-			respond.DenialFor(w, r, err)
-			return nil, false
-		}
-		return models, true
-	}
-
-	identity, err := s.admission.Identify(ctx, credential)
+	identity, err := s.admission.Identify(ctx, middleware.Credential(r))
 	if err != nil {
 		respond.DenialFor(w, r, err)
 		return nil, false
