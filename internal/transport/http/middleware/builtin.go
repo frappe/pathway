@@ -369,10 +369,16 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 			switch {
 			case route.IsProvider():
 				// A vendor authenticates its own way, and would read our Bearer as a caller's
-				// credential leaking outward — so it is deleted, not overwritten.
-				// ponytail: one vendor's scheme hardcoded. A second one means pushing the header
-				// name, the value prefix and any constants on the route instead of this branch.
+				// credential leaking outward — so it is deleted, not overwritten. The scheme
+				// follows the front's dialect: an Anthropic front takes x-api-key and its version
+				// header, an OpenAI-compatible one takes the Bearer everyone else does.
 				r.Header.Del("Authorization")
+				if route.Dialect != domain.DialectAnthropic {
+					if route.InternalKey != "" {
+						r.Header.Set("Authorization", "Bearer "+route.InternalKey)
+					}
+					break
+				}
 				if route.InternalKey != "" {
 					r.Header.Set("x-api-key", route.InternalKey)
 				}

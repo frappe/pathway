@@ -31,6 +31,18 @@ type Route struct {
 	UpstreamModel string `json:"upstream_model"`
 	// The vendor's API version header, sent only on a provider route. Blank sends none.
 	APIVersion string `json:"api_version"`
+	// Dialect is the API shape this upstream speaks: "openai" or "anthropic". Blank means BOTH on a
+	// row we run — vLLM answers both surfaces natively — and NOTHING on a provider: a vendor row
+	// without a dialect is malformed, so it serves no path rather than a guessed one.
+	Dialect string `json:"dialect"`
+}
+
+// SpeaksDialect reports whether this upstream answers requests of this dialect.
+func (r Route) SpeaksDialect(dialect string) bool {
+	if r.Dialect == "" {
+		return !r.IsProvider()
+	}
+	return r.Dialect == dialect
 }
 
 // IsIngress reports whether this row hands off to an ingress rather than naming an engine.

@@ -57,6 +57,16 @@ type Service struct {
 	syntheticTTL func() time.Duration
 }
 
+func serving(table []domain.Route, path string) []domain.Route {
+	out := make([]domain.Route, 0, len(table))
+	for _, candidate := range table {
+		if domain.ServesRoute(candidate, path) {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
 type Options struct {
 	GatewayID string
 	Region    string
@@ -98,10 +108,12 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 		return Decision{}, domain.Deny(503, "model unavailable")
 	}
 
-	// The surface check reads the first row: modality is the model's, stamped on every row, and a
-	// model's rows are all the same kind. Refused here rather than forwarded — the upstream would
-	// 404 it, and this sits above meter, so a wrong-surface call bills nothing.
-	if !domain.ServesRoute(table[0], req.Path) {
+	// Surface admission is per ROW: a dual-front vendor's rows differ in dialect, so the path
+	// filters the table and the pick runs on what survives. Refused only when nothing does,
+	// rather than forwarded — the upstream would 404 it, and this sits above meter, so a
+	// wrong-surface call bills nothing.
+	table = serving(table, req.Path)
+	if len(table) == 0 {
 		return Decision{}, domain.Deny(404, req.Model+" does not serve "+req.Path)
 	}
 

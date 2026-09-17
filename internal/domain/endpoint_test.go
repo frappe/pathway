@@ -51,33 +51,44 @@ func TestServes(t *testing.T) {
 	}
 }
 
-// A vendor is a closed set: we know what Anthropic serves, so anything else is our 404 rather than
-// a round trip that comes back as theirs. The engine table is generous for the opposite reason —
-// an engine serves more than we have written down.
+// A vendor is a closed set: only its own chat dialect exists there, so anything else is our 404
+// rather than a round trip that comes back as theirs. The engine table is generous for the
+// opposite reason — an engine serves more than we have written down.
 func TestServesRoute(t *testing.T) {
-	vendor := Route{Kind: "provider", Modality: "text"}
+	vendor := Route{Kind: "provider", Modality: "text", Dialect: DialectAnthropic}
+	openaiVendor := Route{Kind: "provider", Modality: "text", Dialect: DialectOpenAI}
+	blankVendor := Route{Kind: "provider", Modality: "text"}
 	engine := Route{Kind: "direct", Modality: "text"}
 
 	for _, c := range []struct {
+		name  string
 		route Route
 		path  string
 		want  bool
 		why   string
 	}{
-		{vendor, "/v1/messages", true, "the surface the dialect exists for"},
-		{vendor, "/v1/messages/count_tokens", true, ""},
-		{vendor, "/v1/messages/", true, "a trailing slash is the same endpoint"},
-		{vendor, "/v1/chat/completions", false, "not a surface we speak to this vendor"},
-		{vendor, "/v1/embeddings", false, ""},
-		{vendor, "/v1/rerank", false, "unclaimed is allowed on an engine and refused on a vendor"},
-		{vendor, "/tokenize", false, ""},
+		{"vendor", vendor, "/v1/messages", true, "the surface the dialect exists for"},
+		{"vendor", vendor, "/v1/messages/count_tokens", true, ""},
+		{"vendor", vendor, "/v1/messages/", true, "a trailing slash is the same endpoint"},
+		{"vendor", vendor, "/v1/chat/completions", false, "nothing translates"},
+		{"vendor", vendor, "/v1/embeddings", false, ""},
+		{"vendor", vendor, "/v1/rerank", false, "unclaimed is allowed on an engine and refused on a vendor"},
+		{"vendor", vendor, "/tokenize", false, ""},
 
-		{engine, "/v1/rerank", true, "engines still serve more than the OpenAI core"},
-		{engine, "/v1/chat/completions", true, ""},
-		{engine, "/v1/embeddings", false, "a text engine is still held to its modality"},
+		{"openai-vendor", openaiVendor, "/v1/chat/completions", true, ""},
+		{"openai-vendor", openaiVendor, "/v1/completions", true, ""},
+		{"openai-vendor", openaiVendor, "/v1/messages", false, "nothing translates"},
+
+		{"blank-vendor", blankVendor, "/v1/chat/completions", false, "a vendor row without a dialect serves nothing"},
+		{"blank-vendor", blankVendor, "/v1/messages", false, ""},
+
+		{"engine", engine, "/v1/rerank", true, "engines still serve more than the OpenAI core"},
+		{"engine", engine, "/v1/chat/completions", true, ""},
+		{"engine", engine, "/v1/messages", true, "vLLM answers both dialects natively"},
+		{"engine", engine, "/v1/embeddings", false, "a text engine is still held to its modality"},
 	} {
 		if got := ServesRoute(c.route, c.path); got != c.want {
-			t.Errorf("ServesRoute(%s, %q) = %v, want %v — %s", c.route.Kind, c.path, got, c.want, c.why)
+			t.Errorf("ServesRoute(%s, %q) = %v, want %v — %s", c.name, c.path, got, c.want, c.why)
 		}
 	}
 }

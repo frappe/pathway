@@ -23,7 +23,7 @@ func providerFixtureAnswering(t *testing.T, engineHandler http.HandlerFunc) *fix
 	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b,anthropic/claude-4-5")}
 	f.store.Routes["anthropic/claude-4-5"] = []domain.Route{{
 		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
-		Deployment: "anthropic", Server: "anthropic", Kind: "provider",
+		Deployment: "anthropic", Server: "anthropic", Kind: "provider", Dialect: "anthropic",
 		UpstreamModel: "claude-sonnet-4-5-20250929", APIVersion: "2023-06-01",
 	}}
 	return f
@@ -121,10 +121,10 @@ func TestAProviderStreamSpeaksTheGroveModelIDInEveryFrame(t *testing.T) {
 	}
 }
 
-// The point of gating locally: Anthropic has no /v1/embeddings and no /v1/rerank, so dialling
-// either buys a 404 we could have given ourselves — plus a round trip on a paid link.
+// The point of gating locally: a vendor's surfaces are a closed set, so dialling anything
+// outside its dialect buys a 404 we could have given ourselves, plus a round trip on a paid link.
 func TestAPathTheVendorDoesNotServeNeverLeavesTheGateway(t *testing.T) {
-	for _, path := range []string{"/v1/embeddings", "/v1/rerank", "/v1/chat/completions"} {
+	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/rerank", "/v1/completions"} {
 		t.Run(path, func(t *testing.T) {
 			f := providerFixture(t)
 			resp := f.post(path, `{"model":"anthropic/claude-4-5"}`)
@@ -136,6 +136,41 @@ func TestAPathTheVendorDoesNotServeNeverLeavesTheGateway(t *testing.T) {
 				t.Errorf("the vendor was dialled anyway: %s", f.seen.path)
 			}
 		})
+	}
+}
+
+// One provider record, two fronts: each surface's requests dial the front that speaks it, and a
+// path neither front serves still never leaves the gateway.
+func TestADualFrontVendorRoutesEachSurfaceToItsOwnFront(t *testing.T) {
+	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
+	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b,kimi/k2")}
+	f.store.Routes["kimi/k2"] = []domain.Route{
+		{EngineURL: f.engine.URL + "/root", InternalKey: "kimi-key", Healthy: true,
+			Deployment: "kimi", Server: "kimi", Kind: "provider", Dialect: "openai", UpstreamModel: "k2"},
+		{EngineURL: f.engine.URL + "/anthropic", InternalKey: "kimi-key", Healthy: true,
+			Deployment: "kimi", Server: "kimi", Kind: "provider", Dialect: "anthropic", UpstreamModel: "k2"},
+	}
+
+	if resp := f.post("/v1/messages", `{"model":"kimi/k2"}`); resp.Code != http.StatusOK {
+		t.Fatalf("anthropic surface: status = %d, body = %s", resp.Code, resp.Body)
+	}
+	if f.seen.path != "/anthropic/v1/messages" {
+		t.Errorf("anthropic surface dialled %q, want the anthropic front", f.seen.path)
+	}
+
+	if resp := f.post("/v1/chat/completions", `{"model":"kimi/k2"}`); resp.Code != http.StatusOK {
+		t.Fatalf("openai surface: status = %d, body = %s", resp.Code, resp.Body)
+	}
+	if f.seen.path != "/root/v1/chat/completions" {
+		t.Errorf("openai surface dialled %q, want the root front", f.seen.path)
+	}
+
+	*f.seen = engineRecord{}
+	if resp := f.post("/v1/embeddings", `{"model":"kimi/k2"}`); resp.Code != http.StatusNotFound {
+		t.Errorf("embeddings: status = %d, want 404", resp.Code)
+	}
+	if f.seen.path != "" {
+		t.Errorf("a path no front serves was dialled anyway: %s", f.seen.path)
 	}
 }
 
