@@ -94,6 +94,7 @@ func (u users) Get(ctx context.Context, name string) (domain.UserRecord, bool, e
 		Deny:        domain.ModelSet(h["deny"]),
 		Limited:     strings.TrimSpace(h["limited"]) == "1",
 		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
+		Geography:   strings.TrimSpace(h["geography"]),
 	}, true, nil
 }
 
@@ -109,6 +110,7 @@ func (u users) Upsert(ctx context.Context, records []repository.UserUpsert) erro
 			"deny":         rec.Deny,
 			"limited":      flag(rec.Limited),
 			"log_payloads": flag(rec.LogPayloads),
+			"geography":    rec.Geography,
 		}).Err(); err != nil {
 			return err
 		}

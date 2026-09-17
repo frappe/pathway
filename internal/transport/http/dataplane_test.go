@@ -415,6 +415,44 @@ func TestARefusedRequestClaimsNothing(t *testing.T) {
 	}
 }
 
+// A user pinned to a geography is served only by that geography's gateways, on inference and on
+// the model list alike. A gateway with no geography refuses every pin.
+func TestAGeographyPinIsHonoured(t *testing.T) {
+	for _, c := range []struct {
+		name, gateway, pin string
+		want               int
+	}{
+		{"unpinned", "in", "", http.StatusOK},
+		{"pinned here", "eu", "eu", http.StatusOK},
+		{"pinned elsewhere", "in", "eu", http.StatusForbidden},
+		{"gateway without a geography", "", "eu", http.StatusForbidden},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, jsonEngine(`{}`))
+			user := f.store.Users["test-user"]
+			user.Geography = c.pin
+			f.store.Users["test-user"] = user
+			f.handler = buildHandler(t, f.store, config.Config{Geography: c.gateway}, 0)
+
+			w := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
+			if w.Code != c.want {
+				t.Fatalf("inference status = %d, want %d (%s)", w.Code, c.want, w.Body)
+			}
+			if c.want == http.StatusForbidden && !strings.Contains(w.Body.String(), "restricted to geography eu") {
+				t.Errorf("refusal does not name the pin: %s", w.Body)
+			}
+
+			r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			r.Header.Set("Authorization", "Bearer "+secret)
+			listing := httptest.NewRecorder()
+			f.handler.ServeHTTP(listing, r)
+			if listing.Code != c.want {
+				t.Errorf("/v1/models status = %d, want %d (%s)", listing.Code, c.want, listing.Body)
+			}
+		})
+	}
+}
+
 // The body cap: beyond it the caller gets a 413 rather than the process growing to hold whatever
 // was sent.
 func TestAnOversizedBodyIsRefused(t *testing.T) {

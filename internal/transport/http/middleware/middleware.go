@@ -41,6 +41,8 @@ type Deps struct {
 	MaxBodyBytes func() int64
 	// IngressToken is the bearer a gateway must present on an ingress. Blank on a gateway.
 	IngressToken string
+	// Geography is this gateway's; a user pinned elsewhere is refused.
+	Geography string
 }
 
 // DrainState reports whether the process is shutting down. An interface so the lifecycle owns the

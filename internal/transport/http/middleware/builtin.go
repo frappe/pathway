@@ -163,11 +163,15 @@ func newAuth(deps Deps) (Middleware, error) {
 	}, nil
 }
 
-// quota honours the monthly token budget the control plane pushed. The gateway keeps no counters of
-// its own — it reads a flag someone else computed.
+// quota honours the geography pin and the monthly token budget the control plane pushed. The
+// gateway keeps no counters of its own — it reads flags someone else computed.
 func newQuota(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := domain.GeographyDenial(From(r).Identity.User, deps.Geography); err != nil {
+				deny(w, r, err)
+				return
+			}
 			if From(r).Identity.User.Limited {
 				deny(w, r, domain.Deny(http.StatusTooManyRequests, "monthly token quota exhausted"))
 				return

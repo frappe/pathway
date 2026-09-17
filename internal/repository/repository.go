@@ -125,6 +125,7 @@ type UserUpsert struct {
 	Deny        string // comma list
 	Limited     bool
 	LogPayloads bool
+	Geography   string
 }
 
 type GroupUpsert struct {

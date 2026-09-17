@@ -46,6 +46,8 @@ type UserRecord struct {
 	// customer CONTENT the platform may retain, so it is off unless the control plane says
 	// otherwise, and a record from before the field existed reads as off.
 	LogPayloads bool
+	// Geography pins this user's keys to one geography's gateways; blank serves anywhere.
+	Geography string
 
 	// Set only by SynthUser off a pre-group key, where the control plane had already resolved
 	// access down to one model set. Nothing read from Redis sets it.
@@ -99,6 +101,15 @@ func Evaluate(rec KeyRecord, usr UserRecord, grp GroupRecord, model string) (int
 		return 403, "access not allowed for model " + model
 	}
 	return 200, ""
+}
+
+// GeographyDenial refuses a user pinned to a geography other than this gateway's. A gateway with
+// no geography refuses every pinned user: fail closed.
+func GeographyDenial(usr UserRecord, geography string) error {
+	if usr.Geography == "" || usr.Geography == geography {
+		return nil
+	}
+	return Deny(403, "this key is restricted to geography "+usr.Geography)
 }
 
 // ModelSet parses one of the comma-joined lists the control plane writes — models, or the group

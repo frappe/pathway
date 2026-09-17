@@ -27,6 +27,7 @@ type Config struct {
 	GatewayID    string // set → tenant plane
 	IngressID    string // set → infra plane; both set is a refusal
 	Region       string
+	Geography    string // blank refuses every user pinned to a geography
 
 	// The data path. Blank ListenHTTPS keeps the new listeners down entirely, which is what lets
 	// this binary ship to a box still fronted by OpenResty.
@@ -69,6 +70,7 @@ func Load() (Config, error) {
 
 		IngressToken: strings.TrimSpace(os.Getenv("GROVE_INGRESS_TOKEN")),
 		Region:       strings.TrimSpace(os.Getenv("GROVE_GATEWAY_REGION")),
+		Geography:    strings.TrimSpace(os.Getenv("GROVE_GATEWAY_GEOGRAPHY")),
 
 		ListenHTTP:  strings.TrimSpace(os.Getenv("GROVE_LISTEN_HTTP")),
 		ListenHTTPS: strings.TrimSpace(os.Getenv("GROVE_LISTEN_HTTPS")),

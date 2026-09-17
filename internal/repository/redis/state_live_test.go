@@ -128,3 +128,18 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 		t.Errorf("emptied bucket kept its hash %q", hashes["keys:"+pushed])
 	}
 }
+
+func TestAUserRecordRoundTripsItsGeography(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	bucket := domain.BucketOf("GU-1")
+	if _, err := state.Apply(ctx, repository.StatePush{Users: map[string]repository.UserBucket{
+		bucket: {Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Geography: "eu"}}},
+	}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	usr, found, err := client.Store().Users.Get(ctx, "GU-1")
+	if err != nil || !found || usr.Geography != "eu" {
+		t.Errorf("Get = %+v, %v, %v; want geography eu", usr, found, err)
+	}
+}

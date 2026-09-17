@@ -125,7 +125,7 @@ func (u users) Upsert(_ context.Context, records []repository.UserUpsert) error 
 		u.s.Users[rec.Name] = domain.UserRecord{
 			Email: rec.Email, Groups: domain.ModelSet(rec.Groups),
 			Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
-			Limited: rec.Limited, LogPayloads: rec.LogPayloads,
+			Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
 		}
 	}
 	return nil
@@ -436,7 +436,7 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 				st.s.Users[rec.Name] = domain.UserRecord{
 					Email: rec.Email, Groups: domain.ModelSet(rec.Groups),
 					Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
-					Limited: rec.Limited, LogPayloads: rec.LogPayloads,
+					Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
 				}
 			}
 			st.setBucketHash("users:"+label, bucket.Hash, len(bucket.Records))

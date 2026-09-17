@@ -143,3 +143,23 @@ func TestAnIngressServesTheStateSurfaceToo(t *testing.T) {
 		t.Errorf("routes = %v, want the whole table pruned", store.Routes)
 	}
 }
+
+// The pin rides the users section; an older push without it decodes unpinned.
+func TestAStatePushCarriesTheUsersGeography(t *testing.T) {
+	store := memory.New()
+	handler := adminFixture(t, store)
+	body := fmt.Sprintf(`{"users": {"buckets": {"%s": {"hash": "uh", "records": [
+		{"name": "GU-1", "group": "acme", "geography": "eu"}]},
+		"%s": {"hash": "uh2", "records": [{"name": "GU-2", "group": "acme"}]}}}}`,
+		domain.BucketOf("GU-1"), domain.BucketOf("GU-2"))
+
+	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body); w.Code != http.StatusOK {
+		t.Fatalf("POST state = %d: %s", w.Code, w.Body)
+	}
+	if got := store.Users["GU-1"].Geography; got != "eu" {
+		t.Errorf("GU-1 geography = %q, want eu", got)
+	}
+	if got := store.Users["GU-2"].Geography; got != "" {
+		t.Errorf("GU-2 geography = %q, want unpinned", got)
+	}
+}

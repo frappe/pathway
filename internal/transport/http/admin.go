@@ -30,7 +30,8 @@ type adminUser struct {
 	Limited bool   `json:"limited"`
 	// LogPayloads opts this user's prompts and outputs into the payload log. Absent on an older
 	// control plane's push, which decodes false — off.
-	LogPayloads bool `json:"log_payloads"`
+	LogPayloads bool   `json:"log_payloads"`
+	Geography   string `json:"geography"` // blank = unpinned, as an older push decodes
 }
 
 type adminGroup struct {
@@ -82,6 +83,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		records = append(records, repository.UserUpsert{
 			Name: u.Name, Email: u.Email, Groups: u.Group,
 			Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
+			Geography: u.Geography,
 		})
 	}
 	if err := s.provisioning.UpsertUsers(r.Context(), records); err != nil {
@@ -195,6 +197,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 				records = append(records, repository.UserUpsert{
 					Name: u.Name, Email: u.Email, Groups: u.Group,
 					Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
+					Geography: u.Geography,
 				})
 			}
 			push.Users[label] = repository.UserBucket{Hash: bucket.Hash, Records: records}

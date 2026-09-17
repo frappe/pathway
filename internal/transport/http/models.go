@@ -66,6 +66,10 @@ func (s *Server) modelsForCaller(w http.ResponseWriter, r *http.Request) ([]stri
 		respond.ErrorFor(w, r, http.StatusUnauthorized, "unknown or revoked api key")
 		return nil, false
 	}
+	if err := domain.GeographyDenial(identity.User, s.deps.Geography); err != nil {
+		respond.DenialFor(w, r, err)
+		return nil, false
+	}
 	models, err := s.catalog.ForIdentity(ctx, identity)
 	if err != nil {
 		respond.DenialFor(w, r, err)

@@ -72,6 +72,7 @@ func New(cfg config.Config, svc Services, log *slog.Logger) *Server {
 			Transform: svc.Transform, Drain: svc.Drain, Log: log, Access: svc.Access,
 			Payload:      svc.Payload,
 			MaxBodyBytes: svc.MaxBodyBytes, IngressToken: cfg.IngressToken,
+			Geography: cfg.Geography,
 		},
 		adminToken: cfg.AdminToken,
 		isIngress:  cfg.IsIngress(),
