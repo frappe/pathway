@@ -70,3 +70,26 @@ func Intersect(advertised map[string]bool, deployed []string) []string {
 	}
 	return out
 }
+
+// SpeakingDialect narrows a model list to those with at least one placement that natively
+// answers the dialect. Dialect is end-to-end — nothing translates — so a model whose every
+// route speaks the other shape would 404 the surface this list is served on, and advertising
+// it there is the /v1/models version of a 503. An unreadable table keeps the model: a store
+// hiccup must not empty the catalogue.
+func (s *Service) SpeakingDialect(ctx context.Context, models []string, dialect string) []string {
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		table, err := s.routes.Get(ctx, model)
+		if err != nil {
+			out = append(out, model)
+			continue
+		}
+		for _, route := range table {
+			if route.SpeaksDialect(dialect) {
+				out = append(out, model)
+				break
+			}
+		}
+	}
+	return out
+}

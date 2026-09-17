@@ -135,11 +135,24 @@ func newDrain(deps Deps) (Middleware, error) {
 	}, nil
 }
 
+// Credential is the caller's key however their SDK spells it: Authorization Bearer, or the
+// x-api-key header every Anthropic SDK sends instead. Normalised to the Bearer form so one
+// admission path serves both dialects' clients.
+func Credential(r *http.Request) string {
+	if authorization := r.Header.Get("Authorization"); authorization != "" {
+		return authorization
+	}
+	if key := r.Header.Get("x-api-key"); key != "" {
+		return "Bearer " + key
+	}
+	return ""
+}
+
 // auth resolves the caller: bearer → key → user → group, once, into the State.
 func newAuth(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			identity, err := deps.Admission.Identify(r.Context(), r.Header.Get("Authorization"))
+			identity, err := deps.Admission.Identify(r.Context(), Credential(r))
 			if err != nil {
 				deny(w, r, err)
 				return
@@ -366,6 +379,8 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
 			route := state.Decision.Route
+			// The caller may have authenticated with either header; neither may travel onward.
+			r.Header.Del("x-api-key")
 			switch {
 			case route.IsProvider():
 				// A vendor authenticates its own way, and would read our Bearer as a caller's
@@ -485,7 +500,7 @@ func deny(w http.ResponseWriter, r *http.Request, err error) {
 		state := From(r)
 		state.Denied, state.DeniedReason = denial.Status, denial.Reason
 	}
-	respond.Denial(w, err)
+	respond.DenialFor(w, r, err)
 }
 
 func passthrough(next http.Handler) http.Handler { return next }

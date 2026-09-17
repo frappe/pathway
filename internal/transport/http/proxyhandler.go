@@ -51,6 +51,6 @@ func root(w http.ResponseWriter, _ *http.Request) {
 	respond.JSON(w, map[string]any{
 		"status":  "ok",
 		"message": "Grove Gateway Service",
-		"usage":   "POST /v1/messages or /v1/chat/completions",
+		"usage":   "POST /v1/chat/completions, or /anthropic/v1/messages for Anthropic clients",
 	})
 }

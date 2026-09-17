@@ -20,9 +20,18 @@ type modelObject struct {
 	OwnedBy string `json:"owned_by"`
 }
 
+// Each surface lists only what is callable through it: nothing translates, so a model whose every
+// placement speaks the other dialect would 404 there and is left off.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	if models, ok := s.modelsForCaller(w, r); ok {
-		writeModelList(w, models)
+		writeModelList(w, s.catalog.SpeakingDialect(r.Context(), models, domain.DialectOpenAI))
+	}
+}
+
+// The same allow-list under /anthropic, in that dialect's shape.
+func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
+	if models, ok := s.modelsForCaller(w, r); ok {
+		writeAnthropicModelList(w, s.catalog.SpeakingDialect(r.Context(), models, domain.DialectAnthropic))
 	}
 }
 
@@ -30,14 +39,14 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 // when there are none to show.
 func (s *Server) modelsForCaller(w http.ResponseWriter, r *http.Request) ([]string, bool) {
 	ctx := r.Context()
-	credential := r.Header.Get("Authorization")
+	credential := middleware.Credential(r)
 	if domain.Bearer(credential) == "" {
 		// No key at all → the public catalogue, so a prospect can see what is on offer before
 		// signing up. A key that is present but wrong still 401s below: answering it with the
 		// anonymous list would hide a broken key behind a shorter, plausible one.
 		models, err := s.catalog.Public(ctx)
 		if err != nil {
-			respond.Denial(w, err)
+			respond.DenialFor(w, r, err)
 			return nil, false
 		}
 		return models, true
@@ -45,7 +54,7 @@ func (s *Server) modelsForCaller(w http.ResponseWriter, r *http.Request) ([]stri
 
 	identity, err := s.admission.Identify(ctx, credential)
 	if err != nil {
-		respond.Denial(w, err)
+		respond.DenialFor(w, r, err)
 		return nil, false
 	}
 	// Attribute the access line: auth happens here rather than in the chain, so the accesslog
@@ -54,12 +63,12 @@ func (s *Server) modelsForCaller(w http.ResponseWriter, r *http.Request) ([]stri
 	// Revoked/inactive cannot list. Over budget still can: this shows what the key is entitled to,
 	// and that lives on the user, so only inference is blocked.
 	if identity.Key.Status != "active" {
-		respond.Error(w, http.StatusUnauthorized, "unknown or revoked api key")
+		respond.ErrorFor(w, r, http.StatusUnauthorized, "unknown or revoked api key")
 		return nil, false
 	}
 	models, err := s.catalog.ForIdentity(ctx, identity)
 	if err != nil {
-		respond.Denial(w, err)
+		respond.DenialFor(w, r, err)
 		return nil, false
 	}
 	return models, true
@@ -81,4 +90,26 @@ func writeModelList(w http.ResponseWriter, models []string) {
 		data = append(data, modelObject{ID: id, Object: "model", Created: created, OwnedBy: ownerOf(id)})
 	}
 	respond.JSON(w, map[string]any{"object": "list", "data": data})
+}
+
+type anthropicModelObject struct {
+	Type        string `json:"type"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func writeAnthropicModelList(w http.ResponseWriter, models []string) {
+	created := time.Now().UTC().Format(time.RFC3339)
+	data := make([]anthropicModelObject, 0, len(models))
+	for _, id := range models {
+		data = append(data, anthropicModelObject{Type: "model", ID: id, DisplayName: id, CreatedAt: created})
+	}
+	// first_id/last_id are pagination cursors; the whole list fits in one page, so they simply
+	// name its edges and has_more stays false.
+	var first, last any
+	if len(data) > 0 {
+		first, last = data[0].ID, data[len(data)-1].ID
+	}
+	respond.JSON(w, map[string]any{"data": data, "has_more": false, "first_id": first, "last_id": last})
 }

@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The dialect a path declares. Everything outside the two chat pairs stays with the modality
 // rules, which is what keeps "unknown format errored" the standing behaviour.
@@ -44,5 +47,17 @@ func TestABlankDialectVendorSpeaksNothing(t *testing.T) {
 	r := Route{Kind: "provider"}
 	if r.SpeaksDialect(DialectAnthropic) || r.SpeaksDialect(DialectOpenAI) {
 		t.Error("a vendor row with no dialect must serve no surface")
+	}
+}
+
+func TestAnthropicErrorSpeaksTheSDKsShape(t *testing.T) {
+	out := AnthropicError(429, []byte(`{"error":{"message":"slow down","type":"rate_limit"}}`))
+	if string(out) != `{"error":{"message":"slow down","type":"rate_limit_error"},"type":"error"}` {
+		t.Errorf("envelope = %s", out)
+	}
+	out = AnthropicError(500, []byte("upstream exploded"))
+	if !strings.Contains(string(out), `"type":"api_error"`) ||
+		!strings.Contains(string(out), "upstream exploded") {
+		t.Errorf("unparseable body must still carry its text: %s", out)
 	}
 }

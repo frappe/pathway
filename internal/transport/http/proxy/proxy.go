@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/phot0n/pathway/internal/domain"
 )
 
 // Outcome is what the proxy learned, for metering and passive ejection.
@@ -138,14 +140,18 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			}
 			return nil
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			// Status stays 0, which is what marks the hop failed: the connection never got far
 			// enough to have one. A client that hung up lands here too, and is not worth
 			// distinguishing against a threshold of three consecutive failures.
 			p.log.Warn("upstream hop failed", "target", target, "err", err)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
-			_, _ = w.Write([]byte(`{"error":{"message":"upstream unavailable","type":"grove_gateway"}}` + "\n"))
+			if domain.ClientDialect(r.URL.Path) == domain.DialectAnthropic {
+				_, _ = w.Write(append(domain.AnthropicError(http.StatusBadGateway, []byte("upstream unavailable")), '\n'))
+				return
+			}
+			_, _ = w.Write([]byte(`{"error":{"message":"upstream unavailable","type":"api_error"}}` + "\n"))
 		},
 	}
 

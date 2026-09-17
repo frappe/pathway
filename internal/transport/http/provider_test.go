@@ -33,7 +33,7 @@ func providerFixtureAnswering(t *testing.T, engineHandler http.HandlerFunc) *fix
 // has no business seeing, on top of failing to authenticate.
 func TestAProviderRouteGetsTheVendorsOwnCredential(t *testing.T) {
 	f := providerFixture(t)
-	f.post("/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
+	f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
 
 	if f.seen.apiKey != "vendor-key" {
 		t.Errorf("x-api-key = %q, want the route's own key", f.seen.apiKey)
@@ -53,7 +53,7 @@ func TestAProviderRouteGetsTheVendorsOwnCredential(t *testing.T) {
 // anything else.
 func TestAProviderRouteSendsTheUpstreamsOwnModelID(t *testing.T) {
 	f := providerFixture(t)
-	f.post("/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
+	f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
 
 	var body map[string]any
 	if err := json.Unmarshal(f.seen.body, &body); err != nil {
@@ -71,7 +71,7 @@ func TestAProviderRouteSendsTheUpstreamsOwnModelID(t *testing.T) {
 // is billed on — not the vendor's spelling, which no Model row would match.
 func TestProviderUsageIsRecordedAgainstTheGroveID(t *testing.T) {
 	f := providerFixture(t)
-	f.post("/v1/messages", `{"model":"anthropic/claude-4-5"}`)
+	f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5"}`)
 
 	usage := f.store.Usage["abc123"]
 	if usage["m:total_tokens:anthropic/claude-4-5"] == 0 {
@@ -86,7 +86,7 @@ func TestProviderUsageIsRecordedAgainstTheGroveID(t *testing.T) {
 // it asked for — the rewrite must not be visible from outside.
 func TestAProviderResponseSpeaksTheGroveModelID(t *testing.T) {
 	f := providerFixtureAnswering(t, jsonEngine(`{"id":"msg_1","model":"claude-sonnet-4-5-20250929",`+usageObject+`}`))
-	resp := f.post("/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
+	resp := f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
 
 	if !strings.Contains(resp.Body.String(), `"model":"anthropic/claude-4-5"`) ||
 		strings.Contains(resp.Body.String(), "claude-sonnet") {
@@ -109,7 +109,7 @@ func TestAProviderStreamSpeaksTheGroveModelIDInEveryFrame(t *testing.T) {
 			w.(http.Flusher).Flush()
 		}
 	})
-	resp := f.post("/v1/messages", `{"model":"anthropic/claude-4-5","stream":true}`)
+	resp := f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","stream":true}`)
 
 	want := strings.ReplaceAll(strings.Join(frames, "\n\n")+"\n\n",
 		"claude-sonnet-4-5-20250929", "anthropic/claude-4-5")
@@ -151,7 +151,7 @@ func TestADualFrontVendorRoutesEachSurfaceToItsOwnFront(t *testing.T) {
 			Deployment: "kimi", Server: "kimi", Kind: "provider", Dialect: "anthropic", UpstreamModel: "k2"},
 	}
 
-	if resp := f.post("/v1/messages", `{"model":"kimi/k2"}`); resp.Code != http.StatusOK {
+	if resp := f.post("/anthropic/v1/messages", `{"model":"kimi/k2"}`); resp.Code != http.StatusOK {
 		t.Fatalf("anthropic surface: status = %d, body = %s", resp.Code, resp.Body)
 	}
 	if f.seen.path != "/anthropic/v1/messages" {

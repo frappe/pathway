@@ -5,9 +5,11 @@ package http
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/phot0n/pathway/internal/config"
+	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/service/admission"
 	"github.com/phot0n/pathway/internal/service/catalog"
 	"github.com/phot0n/pathway/internal/service/metering"
@@ -101,11 +103,40 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 	// Exact match, so it wins over the /v1/ proxy and is never forwarded to an engine — an engine
 	// only knows its own model. Outside the data chain: it needs no route and claims no slot.
 	mux.HandleFunc("GET /v1/models", s.handleModels)
-	mux.Handle("/v1/", &s.chain)
+	mux.Handle("/v1/", openaiRoot(&s.chain))
+	// Anthropic clients live under the provider convention they arrive with,
+	// ANTHROPIC_BASE_URL=<base>/anthropic, their SDK appending /v1/*. Root is the OpenAI surface.
+	mux.HandleFunc("GET /anthropic/v1/models", s.handleAnthropicModels)
+	mux.Handle("/anthropic/v1/", anthropicAlias(&s.chain))
 	mux.HandleFunc("GET /{$}", root)
 	// The whole surface behind recover+accesslog, so the routes the mux answers itself — the model
-	// list, the root banner, plain 404s — leave a line like everything else.
+	// lists, the root banner, alias refusals, plain 404s — leave a line like everything else.
 	return s.logged(mux), nil
+}
+
+// openaiRoot refuses the Anthropic surfaces at root, before any stage runs: root is the OpenAI
+// surface, and an Anthropic client belongs under /anthropic.
+func openaiRoot(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if domain.ClientDialect(r.URL.Path) == domain.DialectAnthropic {
+			respond.Error(w, http.StatusNotFound, "no such path at root; Anthropic clients use /anthropic"+r.URL.Path)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// anthropicAlias strips the prefix and refuses everything that is not an Anthropic surface —
+// serving an OpenAI path under an Anthropic-declared base would answer in the wrong shape.
+func anthropicAlias(next http.Handler) http.Handler {
+	stripped := http.StripPrefix("/anthropic", next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if domain.ClientDialect(strings.TrimPrefix(r.URL.Path, "/anthropic")) != domain.DialectAnthropic {
+			respond.ErrorFor(w, r, http.StatusNotFound, "no such path under /anthropic")
+			return
+		}
+		stripped.ServeHTTP(w, r)
+	})
 }
 
 // SetChain builds the data chain and swaps it in. Returning an error leaves the running chain
