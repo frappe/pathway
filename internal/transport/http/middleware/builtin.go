@@ -322,6 +322,8 @@ func newTransform(deps Deps) (Middleware, error) {
 			changed, err := deps.Transform.Apply(transform.Context{
 				Path:          r.URL.Path,
 				UpstreamModel: state.Decision.Route.UpstreamModel,
+				User:          state.Identity.Key.User,
+				Provider:      state.Decision.Route.IsProvider(),
 			}, state.Body)
 			if err != nil {
 				deps.Log.Error("request transform failed", "path", r.URL.Path, "err", err)

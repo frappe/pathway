@@ -20,6 +20,10 @@ type Context struct {
 	// UpstreamModel is what the chosen route says this upstream answers to, pushed by the control
 	// plane. Blank means send the caller's `model` unchanged, which is every route we run ourselves.
 	UpstreamModel string
+	// User is the Grove user this request is billed to — the tenant boundary cachesalt keys on.
+	User string
+	// Provider is true when the hop leaves our network for a vendor.
+	Provider bool
 }
 
 // Request is one body rewrite. Apply reports whether it changed anything, so a body that no
@@ -60,7 +64,7 @@ func Registered() []string {
 
 // Default is what runs when nothing is configured. Order matters only in that a later transform
 // sees an earlier one's output.
-var Default = []string{"modelmap", "streamusage"}
+var Default = []string{"modelmap", "streamusage", "cachesalt"}
 
 // Chain is an ordered, resolved set of transforms, replaceable in place under its own lock — the
 // middleware holds a pointer, and rebuilding the whole chain to change which rewrites run would be

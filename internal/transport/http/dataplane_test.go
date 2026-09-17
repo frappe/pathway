@@ -212,6 +212,21 @@ func TestANonStreamingBodyIsForwardedUnchanged(t *testing.T) {
 	}
 }
 
+// The wiring behind the cachesalt transform: the tenant it prefixes with is the authenticated
+// Grove user, not anything the caller can choose.
+func TestACacheSaltIsNamespacedByTheAuthenticatedUser(t *testing.T) {
+	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
+	f.post("/v1/chat/completions", `{"model":"qwen3-4b","cache_salt":"team-a","messages":[]}`)
+
+	var body map[string]any
+	if err := json.Unmarshal(f.seen.body, &body); err != nil {
+		t.Fatalf("engine body: %v", err)
+	}
+	if body["cache_salt"] != "test-user:team-a" {
+		t.Errorf("cache_salt = %v, want the tenant-prefixed form", body["cache_salt"])
+	}
+}
+
 // An endpoint outside the transforms' gate must be forwarded byte-for-byte: a field one vLLM schema
 // accepts, another rejects.
 func TestAnUngatedEndpointIsForwardedUntouched(t *testing.T) {
