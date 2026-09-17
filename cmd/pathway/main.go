@@ -66,7 +66,7 @@ func run() error {
 		return err
 	}
 
-	client := redisstore.New(cfg.RedisAddr)
+	client := redisstore.New(cfg.RedisAddr, cfg.RedisPassword)
 	if err := client.Ping(context.Background()); err != nil {
 		return err
 	}

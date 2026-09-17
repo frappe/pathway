@@ -19,7 +19,8 @@ const DefaultPath = "/etc/pathway/config.json"
 type Config struct {
 	ConfigPath string // the tunables file this process watches
 
-	RedisAddr string
+	RedisAddr     string
+	RedisPassword string // blank = no AUTH, as a loopback Redis has
 
 	AdminToken   string
 	IngressToken string
@@ -62,8 +63,9 @@ func (c Config) IsIngress() bool { return c.IngressID != "" }
 // Load reads the environment and refuses to return a Config that would run wrong.
 func Load() (Config, error) {
 	cfg := Config{
-		ConfigPath: env("GROVE_CONFIG", DefaultPath),
-		RedisAddr:  env("GROVE_REDIS_ADDR", "127.0.0.1:6379"),
+		ConfigPath:    env("GROVE_CONFIG", DefaultPath),
+		RedisAddr:     env("GROVE_REDIS_ADDR", "127.0.0.1:6379"),
+		RedisPassword: strings.TrimSpace(os.Getenv("GROVE_REDIS_PASSWORD")),
 
 		IngressToken: strings.TrimSpace(os.Getenv("GROVE_INGRESS_TOKEN")),
 		Region:       strings.TrimSpace(os.Getenv("GROVE_GATEWAY_REGION")),
