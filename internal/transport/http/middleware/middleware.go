@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/phot0n/pathway/internal/service/admission"
 	"github.com/phot0n/pathway/internal/service/metering"
@@ -28,7 +29,10 @@ type Deps struct {
 	Metering  *metering.Service
 	Transform *transform.Chain
 	Drain     DrainState
-	Log       *slog.Logger
+	// Maintenance refuses new requests while in-flight ones finish; InFlight counts those let through.
+	Maintenance func() bool
+	InFlight    *atomic.Int64
+	Log         *slog.Logger
 	// Access is the per-request record. Separate from Log because it is a record, not a
 	// diagnostic, and must not move when the log level does.
 	Access *slog.Logger

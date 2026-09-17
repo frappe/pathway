@@ -31,8 +31,11 @@ type Server struct {
 	proxy        *proxy.Proxy
 	log          *slog.Logger
 
-	deps  middleware.Deps
-	drain middleware.DrainState
+	deps        middleware.Deps
+	drain       middleware.DrainState
+	maintenance func() bool
+	// inFlight is every data request past the drain stage, for GET /grove-admin/in-flight.
+	inFlight atomic.Int64
 	// chain is swapped in place when the tunables file changes the middleware list, so the mux
 	// built at startup keeps serving and only what it dispatches to moves.
 	chain swappable
@@ -58,25 +61,27 @@ type Services struct {
 	Drain        middleware.DrainState
 	Access       *slog.Logger
 	Payload      *slog.Logger
-	// MaxBodyBytes is read per request, so a reload moves it.
+	// MaxBodyBytes and Maintenance are read per request, so a reload moves them.
 	MaxBodyBytes func() int64
+	Maintenance  func() bool
 }
 
 func New(cfg config.Config, svc Services, log *slog.Logger) *Server {
 	server := &Server{
 		admission: svc.Admission, routing: svc.Routing, metering: svc.Metering,
 		catalog: svc.Catalog, provisioning: svc.Provisioning, proxy: svc.Proxy,
-		log: log, drain: svc.Drain,
+		log: log, drain: svc.Drain, maintenance: svc.Maintenance,
 		deps: middleware.Deps{
 			Admission: svc.Admission, Routing: svc.Routing, Metering: svc.Metering,
-			Transform: svc.Transform, Drain: svc.Drain, Log: log, Access: svc.Access,
-			Payload:      svc.Payload,
+			Transform: svc.Transform, Drain: svc.Drain, Maintenance: svc.Maintenance,
+			Log: log, Access: svc.Access, Payload: svc.Payload,
 			MaxBodyBytes: svc.MaxBodyBytes, IngressToken: cfg.IngressToken,
 			Geography: cfg.Geography,
 		},
 		adminToken: cfg.AdminToken,
 		isIngress:  cfg.IsIngress(),
 	}
+	server.deps.InFlight = &server.inFlight
 	logged, err := middleware.Chain(server.deps, []string{"recover", "accesslog"})
 	if err != nil {
 		// Both names are literals registered in this module; failing here means the registry
@@ -101,15 +106,21 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 		return s.logged(mux), nil
 	}
 
+	// The routes the mux answers itself still pass drain, so a box in maintenance refuses every
+	// customer path the way the chain does. /grove-admin, /healthz and the scrape are not on this mux.
+	drain, err := middleware.Chain(s.deps, []string{"drain"})
+	if err != nil {
+		return nil, err
+	}
 	// Exact match, so it wins over the /v1/ proxy and is never forwarded to an engine — an engine
 	// only knows its own model. Outside the data chain: it needs no route and claims no slot.
-	mux.HandleFunc("GET /v1/models", s.handleModels)
+	mux.Handle("GET /v1/models", drain(http.HandlerFunc(s.handleModels)))
 	mux.Handle("/v1/", openaiRoot(&s.chain))
 	// Anthropic clients live under the provider convention they arrive with,
 	// ANTHROPIC_BASE_URL=<base>/anthropic, their SDK appending /v1/*. Root is the OpenAI surface.
-	mux.HandleFunc("GET /anthropic/v1/models", s.handleAnthropicModels)
+	mux.Handle("GET /anthropic/v1/models", drain(http.HandlerFunc(s.handleAnthropicModels)))
 	mux.Handle("/anthropic/v1/", anthropicAlias(&s.chain))
-	mux.HandleFunc("GET /{$}", root)
+	mux.Handle("GET /{$}", drain(http.HandlerFunc(root)))
 	// The whole surface behind recover+accesslog, so the routes the mux answers itself — the model
 	// lists, the root banner, alias refusals, plain 404s — leave a line like everything else.
 	return s.logged(mux), nil
@@ -185,6 +196,8 @@ func (s *Server) AdminHandler() http.Handler {
 	// planes serve it — an ingress simply only ever receives the routes section.
 	mux.HandleFunc("/grove-admin/state", adminAuth(s.adminToken, s.handleAdminState))
 	mux.HandleFunc("/grove-admin/state-hash", adminAuth(s.adminToken, s.handleAdminStateHash))
+	// Read-only: maintenance is only ever changed through the tunables file.
+	mux.HandleFunc("/grove-admin/in-flight", adminAuth(s.adminToken, s.handleAdminInFlight))
 	if s.isIngress {
 		return mux
 	}
@@ -204,7 +217,11 @@ func (s *Server) AdminHandler() http.Handler {
 // names nothing.
 func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
 	if s.drain != nil && s.drain.Draining() {
-		respond.Error(w, http.StatusServiceUnavailable, "draining")
+		respond.TypedError(w, http.StatusServiceUnavailable, "draining", "draining")
+		return
+	}
+	if s.inMaintenance() {
+		respond.TypedError(w, http.StatusServiceUnavailable, "maintenance", "maintenance")
 		return
 	}
 	if s.routing != nil {

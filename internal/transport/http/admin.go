@@ -147,6 +147,14 @@ func (s *Server) handleAdminStateHash(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"hashes": hashes})
 }
 
+// GET /admin/in-flight — whether new requests are refused, and how many are still running. The
+// control plane polls it to know a box in maintenance has gone idle.
+func (s *Server) handleAdminInFlight(w http.ResponseWriter, _ *http.Request) {
+	respond.JSON(w, map[string]any{"maintenance": s.inMaintenance(), "in_flight": s.inFlight.Load()})
+}
+
+func (s *Server) inMaintenance() bool { return s.maintenance != nil && s.maintenance() }
+
 // POST /admin/state — desired state, whole per section (plan_agent_state_sync.md): apply what is
 // named, delete what is not, store the hashes — one transaction. Errors are 500s, never swallowed:
 // a push acknowledged but not stored would be divergence no retry ever heals.

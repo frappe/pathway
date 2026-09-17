@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -181,6 +182,24 @@ func TestAFileIsAppliedWholeOrNotAtAll(t *testing.T) {
 	}
 }
 
+// Maintenance is turned on and off the way every knob is: an edit and a signal.
+func TestMaintenanceIsAReloadableKnob(t *testing.T) {
+	path := write(t, `{}`)
+	live, err := Open(path, Defaults(), quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, on := range []bool{true, false} {
+		if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"maintenance":%t}`, on)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, next, changed, err := live.Reload()
+		if err != nil || next.Maintenance != on || !SameList(changed, []string{"maintenance"}) {
+			t.Errorf("maintenance=%t: next=%t changed=%v err=%v", on, next.Maintenance, changed, err)
+		}
+	}
+}
+
 // A reload that changes nothing should say so rather than reporting a change.
 func TestReloadingAnUnchangedFileReportsNoChange(t *testing.T) {
 	live, _ := Open(write(t, `{"log_level":"warn"}`), Defaults(), quiet())
@@ -209,6 +228,7 @@ func sameResolved(a, b Resolved) bool {
 		a.MaxBodyBytes == b.MaxBodyBytes &&
 		a.UpstreamReadTimeout == b.UpstreamReadTimeout &&
 		a.UpstreamTLSVerify == b.UpstreamTLSVerify &&
+		a.Maintenance == b.Maintenance &&
 		a.DrainTimeout == b.DrainTimeout &&
 		a.LameDuck == b.LameDuck &&
 		a.UpgradeTimeout == b.UpgradeTimeout

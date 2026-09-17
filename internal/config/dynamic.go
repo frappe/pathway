@@ -33,6 +33,10 @@ type Dynamic struct {
 	DrainTimeout   string `json:"drain_timeout"`
 	LameDuck       string `json:"lame_duck"`
 	UpgradeTimeout string `json:"upgrade_timeout"`
+
+	// Maintenance refuses new requests with a 503 while in-flight ones finish. In the file, not
+	// behind an endpoint, so a box restarted while in maintenance comes back still in it.
+	Maintenance bool `json:"maintenance"`
 }
 
 // Resolved is Dynamic with every string parsed once, so the request path never parses a duration.
@@ -49,6 +53,8 @@ type Resolved struct {
 	DrainTimeout   time.Duration
 	LameDuck       time.Duration
 	UpgradeTimeout time.Duration
+
+	Maintenance bool
 }
 
 // Defaults are what a box with no config file runs, and what any field the file omits falls back
@@ -114,6 +120,7 @@ func (d Dynamic) Resolve(base Resolved) (Resolved, error) {
 	if d.UpstreamTLSVerify != nil {
 		out.UpstreamTLSVerify = *d.UpstreamTLSVerify
 	}
+	out.Maintenance = d.Maintenance
 	return out, nil
 }
 

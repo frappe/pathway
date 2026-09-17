@@ -75,6 +75,7 @@ func diff(previous, next Resolved) []string {
 	add("drain_timeout", previous.DrainTimeout != next.DrainTimeout)
 	add("lame_duck", previous.LameDuck != next.LameDuck)
 	add("upgrade_timeout", previous.UpgradeTimeout != next.UpgradeTimeout)
+	add("maintenance", previous.Maintenance != next.Maintenance)
 	return changed
 }
 

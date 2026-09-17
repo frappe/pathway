@@ -111,6 +111,7 @@ func run() error {
 		Access:       log.Access,
 		Payload:      log.Payload,
 		MaxBodyBytes: func() int64 { return live.Get().MaxBodyBytes },
+		Maintenance:  func() bool { return live.Get().Maintenance },
 	}, log.Process)
 	rebuilt.server = server
 	rebuilt.applyScalars(live.Get())
@@ -121,6 +122,7 @@ func run() error {
 		"redis", cfg.RedisAddr,
 		"config", live.Path(),
 		"log_level", live.Get().LogLevel,
+		"maintenance", live.Get().Maintenance,
 		"transforms", rebuilt.chain.Names(),
 	)
 

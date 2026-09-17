@@ -113,26 +113,37 @@ func newAccessLog(deps Deps) (Middleware, error) {
 	}, nil
 }
 
-// drain answers while the process is shutting down. In-flight requests are past this stage and stay
-// past it; only a new one on an already-open connection lands here, and it gets a real message with
-// a retry hint rather than a reset.
+// drain answers while the process is shutting down or in maintenance. In-flight requests are past
+// this stage and stay past it; a new one gets a real message with a retry hint rather than a reset.
+// Everything it lets through is counted, so the control plane can wait for zero.
 func newDrain(deps Deps) (Middleware, error) {
-	if deps.Drain == nil {
-		return passthrough, nil
-	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !deps.Drain.Draining() {
-				next.ServeHTTP(w, r)
+			if deps.Drain != nil && deps.Drain.Draining() {
+				refuse(w, r, "draining", "5", "gateway is restarting, retry shortly")
 				return
 			}
-			state := From(r)
-			state.Denied, state.DeniedReason = http.StatusServiceUnavailable, "draining"
-			w.Header().Set("Retry-After", "5")
-			w.Header().Set("Connection", "close")
-			respond.Error(w, http.StatusServiceUnavailable, "gateway is restarting, retry shortly")
+			// Counted BEFORE the check: a request that saw maintenance off is already in the count
+			// any reader who turned it on sees afterwards.
+			if deps.InFlight != nil {
+				deps.InFlight.Add(1)
+				defer deps.InFlight.Add(-1)
+			}
+			if deps.Maintenance != nil && deps.Maintenance() {
+				refuse(w, r, "maintenance", "30", "gateway is under maintenance, retry shortly")
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}, nil
+}
+
+func refuse(w http.ResponseWriter, r *http.Request, reason, retryAfter, message string) {
+	state := From(r)
+	state.Denied, state.DeniedReason = http.StatusServiceUnavailable, reason
+	w.Header().Set("Retry-After", retryAfter)
+	w.Header().Set("Connection", "close")
+	respond.TypedErrorFor(w, r, http.StatusServiceUnavailable, reason, message)
 }
 
 // Credential is the caller's key however their SDK spells it: Authorization Bearer, or the
