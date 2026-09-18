@@ -460,6 +460,8 @@ half of one.
 **Where the numbers come from.** The response's last newline-delimited line containing `"usage"` —
 the final frame of an OpenAI stream, or the whole of a non-streaming body. Streaming requests only
 have one because the `streamusage` transform forces `stream_options.include_usage` on the way in.
+A line past 1 MiB is held by its tail only, which is no longer a document, so `ParseUsage` falls
+back to the last `"usage":` object in it — a long body, or one carrying logprobs, still meters.
 
 **Two engine shapes, one meaning.** vLLM answers OpenAI-shaped on `/v1/chat/completions` and
 Anthropic-shaped on `/v1/messages`, and they disagree about what "input tokens" means:

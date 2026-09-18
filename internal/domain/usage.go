@@ -18,20 +18,56 @@ type Usage struct {
 	Cached int
 }
 
-// ParseUsage reads a token count from either a full response or a bare usage object, in either key
-// dialect. ok=false when no token fields are present — a streaming chunk before the final frame.
+// ParseUsage reads a token count from a full response, a bare usage object, or the tail of a
+// response the tee truncated, in either key dialect. ok=false when no token fields are present — a
+// streaming chunk before the final frame.
 func ParseUsage(raw []byte) (Usage, bool) {
+	raw = TrimSSE(raw)
 	var m map[string]json.RawMessage
-	if err := json.Unmarshal(TrimSSE(raw), &m); err != nil {
-		return Usage{}, false
-	}
-	// Unwrap a nested "usage" object if present.
-	if uraw, ok := m["usage"]; ok {
-		var um map[string]json.RawMessage
-		if json.Unmarshal(uraw, &um) == nil {
-			m = um
+	if json.Unmarshal(raw, &m) == nil {
+		// Unwrap a nested "usage" object if present.
+		if uraw, ok := m["usage"]; ok {
+			var um map[string]json.RawMessage
+			if json.Unmarshal(uraw, &um) == nil {
+				m = um
+			}
+		}
+		if u, ok := usageFrom(m); ok {
+			return u, true
 		}
 	}
+	return lastUsage(raw)
+}
+
+// lastUsage recovers usage from a line the tee cut at the front — no longer a document, but the
+// usage object at its tail is whole — or one that nests it deeper. Backwards, because the real one
+// is last. The ':' skips a token whose TEXT is "usage": a bare value is followed by ',' or '}', and
+// inside a string the quotes arrive escaped and never match.
+func lastUsage(raw []byte) (Usage, bool) {
+	key := []byte(`"usage"`)
+	for end := len(raw); ; {
+		at := bytes.LastIndex(raw[:end], key)
+		if at < 0 {
+			return Usage{}, false
+		}
+		end = at
+		value, isKey := bytes.CutPrefix(bytes.TrimLeft(raw[at+len(key):], " \t\r\n"), []byte(":"))
+		if !isKey {
+			continue
+		}
+		// A decoder reads ONE value and stops, so what follows the object need not parse.
+		var object map[string]json.RawMessage
+		if json.NewDecoder(bytes.NewReader(value)).Decode(&object) != nil {
+			continue
+		}
+		if u, ok := usageFrom(object); ok {
+			return u, true
+		}
+	}
+}
+
+// usageFrom normalizes one usage object, in either key dialect.
+func usageFrom(m map[string]json.RawMessage) (Usage, bool) {
 	geti := func(keys ...string) (int, bool) {
 		for _, k := range keys {
 			if r, ok := m[k]; ok {

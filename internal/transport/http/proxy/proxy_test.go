@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/phot0n/pathway/internal/domain"
 )
 
 func quiet() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil)) }
@@ -75,6 +77,22 @@ type deadClient struct{ *httptest.ResponseRecorder }
 func (deadClient) Write([]byte) (int, error) { return 0, errors.New("client gone") }
 
 func (d deadClient) Unwrap() http.ResponseWriter { return d.ResponseRecorder }
+
+// A non-streaming body is one line, and past carryLimit the tee keeps only its tail. The usage
+// object is in that tail, so the request must still meter — under the limit and over it.
+func TestUsageSurvivesABodyPastTheCarryLimit(t *testing.T) {
+	for name, padding := range map[string]int{"under": carryLimit / 2, "over": carryLimit * 2} {
+		body := `{"choices":[{"text":"` + strings.Repeat("a", padding) +
+			`"}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`
+		tee := newUsageTee(io.NopCloser(strings.NewReader(body)))
+		if _, err := io.Copy(io.Discard, tee); err != nil {
+			t.Fatal(err)
+		}
+		if u, ok := domain.ParseUsage([]byte(tee.Usage())); !ok || u.Total != 9 {
+			t.Errorf("%s the limit: got %+v ok=%v, want Total=9", name, u, ok)
+		}
+	}
+}
 
 // A client that hangs up mid-stream unwinds Forward through the panic, but the vendor billed
 // whatever it had already generated — so the usage frame the tee caught must still reach the

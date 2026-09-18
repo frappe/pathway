@@ -5,9 +5,10 @@ import (
 	"io"
 )
 
-// carryLimit bounds the partial line held across reads — a single huge non-streaming body. The tail
-// is what matters, because the usage object is at the end of it.
-const carryLimit = 256 << 10
+// carryLimit bounds the partial line held across reads — a single huge non-streaming body. Past it
+// the tail is kept, because the usage object is at the end of it and domain.ParseUsage reads it out
+// of a line cut at the front. scan re-copies the carry on every Read, so raise this only after that.
+const carryLimit = 1 << 20
 
 // usageTee keeps the last newline-delimited line containing "usage" — the final frame of a stream,
 // or a whole non-streaming body. It reads what it is already copying and writes nothing back, so
