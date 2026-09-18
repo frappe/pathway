@@ -24,7 +24,7 @@ type Users interface {
 	Delete(ctx context.Context, ids []string) (int, error)
 }
 
-// Groups holds what a Grove User Group grants everyone in it.
+// Groups holds what a Model Group grants everyone in it.
 type Groups interface {
 	// Get answers the zero value for a group that was never pushed, so a key pointing at one falls
 	// back to its own Allow list instead of erroring.
@@ -111,7 +111,7 @@ type KeyUpsert struct {
 type UserUpsert struct {
 	Name        string
 	Email       string
-	Groups      string // comma list of Grove User Group names
+	Groups      string // comma list of Model Group names
 	Allow       string // comma list
 	Deny        string // comma list
 	Limited     bool

@@ -10,7 +10,7 @@ import (
 	"github.com/phot0n/pathway/internal/repository"
 )
 
-// key:<sha256(secret)>, user:<Grove User name>, group:<Grove User Group name>. Three records
+// key:<sha256(secret)>, user:<Grove User name>, model_group:<Model Group name>. Three records
 // rather than one projection on the credential, so one leaked key dies without touching the rest
 // and a budget flip is one write however many keys the holder has.
 
@@ -137,7 +137,7 @@ func (g groups) Get(ctx context.Context, name string) (domain.GroupRecord, error
 	if name == "" {
 		return domain.GroupRecord{}, nil
 	}
-	h, err := g.rdb.HGetAll(ctx, "group:"+name).Result()
+	h, err := g.rdb.HGetAll(ctx, "model_group:"+name).Result()
 	if err != nil {
 		return domain.GroupRecord{}, err
 	}
@@ -149,7 +149,7 @@ func (g groups) Upsert(ctx context.Context, records []repository.GroupUpsert) er
 		if rec.Name == "" {
 			continue
 		}
-		if err := g.rdb.HSet(ctx, "group:"+rec.Name, map[string]any{
+		if err := g.rdb.HSet(ctx, "model_group:"+rec.Name, map[string]any{
 			"models": rec.Models,
 		}).Err(); err != nil {
 			return err

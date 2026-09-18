@@ -38,7 +38,7 @@ func (l LegacyKey) HasProjection() bool {
 // grants nothing.
 type UserRecord struct {
 	Email   string          // denormalized, for humans reading Redis; no decision reads it
-	Groups  map[string]bool // Grove User Group names; empty = ungrouped (grants nothing by itself)
+	Groups  map[string]bool // Model Group names; empty = ungrouped (grants nothing by itself)
 	Allow   map[string]bool // models this user may call on top of their groups'
 	Deny    map[string]bool // models this user may not call, whatever granted them
 	Limited bool            // over their monthly token budget → 429
@@ -55,7 +55,7 @@ type UserRecord struct {
 	Models    map[string]bool
 }
 
-// GroupRecord is what a Grove User Group grants everyone in it, stored under group:<name>. A group
+// GroupRecord is what a Model Group grants everyone in it, stored under model_group:<name>. A group
 // the control plane has not pushed reads back as the zero value, which grants nothing.
 type GroupRecord struct {
 	Models map[string]bool // models the group grants

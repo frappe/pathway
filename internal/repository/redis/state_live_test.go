@@ -50,7 +50,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed records the push will and will not name, plus one in an untouched bucket.
-	client.rdb.HSet(ctx, "group:stale", "models", "m")
+	client.rdb.HSet(ctx, "model_group:stale", "models", "m")
 	client.rdb.HSet(ctx, "key:aa", "status", "active")
 	client.rdb.HSet(ctx, "key:bb", "status", "active")
 	client.rdb.Set(ctx, "deploy:stale", "[]", 0)
@@ -86,14 +86,14 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	}
 
 	for key, want := range map[string]bool{
-		"group:acme":   true,
-		"group:stale":  false, // unnamed → pruned
-		"key:" + kept:  true,
-		"key:aa":       false, // in the pushed bucket, unnamed → pruned
-		"key:bb":       true,  // its bucket was not pushed → survives
-		"deploy:m1":    true,
-		"deploy:stale": false,
-		"usage:prefix": true, // never a prune target
+		"model_group:acme":  true,
+		"model_group:stale": false, // unnamed → pruned
+		"key:" + kept:       true,
+		"key:aa":            false, // in the pushed bucket, unnamed → pruned
+		"key:bb":            true,  // its bucket was not pushed → survives
+		"deploy:m1":         true,
+		"deploy:stale":      false,
+		"usage:prefix":      true, // never a prune target
 	} {
 		n, err := client.rdb.Exists(ctx, key).Result()
 		if err != nil {

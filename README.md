@@ -75,7 +75,7 @@ a pod restarting in one region is invisible to a gateway in another. Which kind 
 control plane's decision; the gateway just reads `kind`. An empty `kind` is `direct` — that is what
 every route pushed before the split carried.
 
-**A gateway's state lives in one Redis:** loopback, or the Gateway State Store its Network's
+**A gateway's state lives in one Redis:** loopback, or the Gateway Store its Network's
 gateways share (`GROVE_REDIS_ADDR` + `GROVE_REDIS_PASSWORD`). Its contents are either pushed (keys,
 users, groups, routes) or derived (sticky, in-flight, health, usage). On a shared store in-flight is
 one counter, so a directly dialled replica's cap holds across those gateways. A dead store fails its
@@ -416,7 +416,7 @@ is on.
 
 ## Admission
 
-Three records, resolved in order — `key:` → `user:` → `group:`. A user names any number of
+Three records, resolved in order — `key:` → `user:` → `model_group:`. A user names any number of
 groups; their grants are unioned into one before the gates run.
 
 The split is deliberate. A credential's only fact of its own is whether it has been revoked;
@@ -671,7 +671,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 |---|---|---|
 | `key:<sha256(secret)>` | hash | state push, `keys` section |
 | `user:<Grove User>` | hash | state push, `users` section |
-| `group:<Grove User Group>` | hash | state push, `groups` section |
+| `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
 | `usage:<key prefix>` | hash | the gateway; drained by `GET /grove-admin/usage` |
@@ -686,7 +686,7 @@ subset of four sections — groups, users, keys, routes — each stamped with a
 hash Grove computed. The agent applies the whole body in ONE Redis MULTI: HSET every named
 record, DEL every record in a pushed section the payload does not name, then store the hashes in
 `grove:state_hash`. A Redis error is a 500 and none of it lands — the hashes never claim state
-that did not arrive. Only `group:/user:/key:/deploy:` are ever pruned; usage,
+that did not arrive. Only `model_group:/user:/key:/deploy:` are ever pruned; usage,
 sticky, inflight and health keys are the gateway's own.
 
 `GET /grove-admin/state-hash` returns that stored map. Grove diffs its computed hashes against it
@@ -710,11 +710,11 @@ so it never double-counts and a control-plane crash loses at most one cycle.
 ### The records themselves
 
 ```
-key:<sha256(secret)>      status  user  prefix
-user:<Grove User>         email  group (comma list)  allow  deny  limited
-group:<Grove User Group>  models
-usage:<key prefix>        request_count  prompt_tokens  completion_tokens  total_tokens
-                          cached_tokens  m:<metric>:<model>  m:<metric>:<deployment>
+key:<sha256(secret)>       status  user  prefix
+user:<Grove User>          email  group (comma list)  allow  deny  limited
+model_group:<Model Group>  models
+usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens
+                           cached_tokens  m:<metric>:<model>  m:<metric>:<deployment>
 ```
 
 `group` / `allow` / `deny` / `models` are comma lists; blank parses to a map that answers false
@@ -813,7 +813,7 @@ was unreadable turns one broken dependency into an outage.
 | What fails | What happens |
 |---|---|
 | Redis unreachable at **startup** | refuses to start — a gateway that cannot read its keys serves nothing, and finding out on the first customer request would report it as a routing fault |
-| `key:` / `user:` / `group:` read fails | **503**, never 401 — "we cannot read your key" must not send someone to rotate a credential that was fine |
+| `key:` / `user:` / `model_group:` read fails | **503**, never 401 — "we cannot read your key" must not send someone to rotate a credential that was fine |
 | in-flight counts unreadable | every count reads 0, so the pick degrades to first-healthy. Balancing is an optimisation on a table that is already correct |
 | health counters unreadable | every route stays as the control plane pushed it. Ejection is an optimisation too |
 | sticky read/write fails | one cold prefix cache, not a wrong answer |
