@@ -38,6 +38,8 @@ type Report struct {
 	Target         string
 	UpstreamStatus string
 	Reason         string
+	// Cut names who ended a response that did not finish; blank on one that did.
+	Cut string
 }
 
 type Service struct {
@@ -171,7 +173,7 @@ func (s *Service) recordOutcome(ctx context.Context, rep Report) {
 	}
 	var err error
 	switch {
-	case domain.IsHopFailure(rep.UpstreamStatus, rep.Reason):
+	case domain.IsHopFailure(rep.UpstreamStatus, rep.Reason, rep.Cut):
 		err = s.health.RecordFailure(ctx, rep.Target)
 		s.log.Debug("hop failed", "target", rep.Target, "status", rep.UpstreamStatus, "reason", rep.Reason)
 	case domain.IsHopSuccess(rep.UpstreamStatus):

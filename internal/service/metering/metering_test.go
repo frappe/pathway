@@ -280,6 +280,22 @@ func TestOneSuccessClearsTheFailureStreak(t *testing.T) {
 	}
 }
 
+// Three impatient clients in a row must not retire an upstream that did nothing wrong. Each is
+// still a request.
+func TestAClientThatLeftDoesNotCountAgainstTheTarget(t *testing.T) {
+	store := memory.New()
+	svc := New(store.Repositories().Usage, store.Repositories().Health, quiet())
+	for range domain.EjectAfter {
+		svc.Record(context.Background(), Report{Prefix: "abc", Target: "https://a", Cut: domain.CutClientLeft})
+	}
+	if store.Failures["https://a"] != 0 {
+		t.Errorf("failures = %d, want 0 — the clients left, the upstream did not fail", store.Failures["https://a"])
+	}
+	if store.Usage["abc"]["request_count"] != domain.EjectAfter {
+		t.Errorf("request_count = %d, want %d", store.Usage["abc"]["request_count"], domain.EjectAfter)
+	}
+}
+
 // One unplaced model must not take an ingress out of rotation for every other model on it.
 func TestANoReplica503DoesNotCountAgainstTheTarget(t *testing.T) {
 	store := memory.New()

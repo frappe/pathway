@@ -39,6 +39,8 @@ type State struct {
 	UsageStart  string
 	Deployment  string
 	Reason      string
+	// Cut names who ended a response that did not finish; blank on one that did.
+	Cut string
 	// Denied is the status a stage refused with, for the access log. 0 means the request reached
 	// an upstream.
 	Denied       int

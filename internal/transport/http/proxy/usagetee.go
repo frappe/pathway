@@ -20,6 +20,7 @@ const carryLimit = 1 << 20
 type usageTee struct {
 	body   io.ReadCloser
 	stream bool
+	failed bool // a read ended in an error: the body broke off before its end
 	carry  []byte
 	first  []byte
 	line   []byte
@@ -36,6 +37,8 @@ func (t *usageTee) Read(p []byte) (int, error) {
 	}
 	if err == io.EOF {
 		t.flush()
+	} else if err != nil {
+		t.failed = true
 	}
 	return n, err
 }

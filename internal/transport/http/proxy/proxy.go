@@ -4,7 +4,9 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -35,11 +37,22 @@ type Outcome struct {
 	// Reason is an ingress's X-Grove-Reason. A no-replica 503 means the ingress answered correctly
 	// and must not count against it.
 	Reason string
+	// Cut names who ended a response that did not finish: one of domain's Cut values. Blank on a
+	// response that finished, and on a hop that never produced one.
+	Cut string
 }
+
+// statusClientClosed is what the access line shows for a client that left before the upstream
+// answered. Nobody receives it; it keeps those requests out of the 502s.
+const statusClientClosed = 499
+
+// errUpstreamIdle is why the hop was cancelled when the upstream went silent after its headers.
+var errUpstreamIdle = errors.New("the upstream sent nothing for the read timeout")
 
 // Options are the dials that used to be nginx directives.
 type Options struct {
-	// ReadTimeout bounds a whole generation. Long: a large completion legitimately takes minutes.
+	// ReadTimeout bounds the upstream's silence: the wait for its headers, and every wait for
+	// more of its body after them. Long: a model may think for minutes before its first token.
 	ReadTimeout time.Duration
 	DialTimeout time.Duration
 	// VerifyUpstream turns on certificate verification for engine and ingress hops. Per target here,
@@ -97,12 +110,18 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 		return
 	}
 
+	// The hop has a context of its own under the client's, so an upstream gone silent can be cut
+	// while the client is still there, and the two told apart afterwards.
+	hop, cancel := context.WithCancelCause(r.Context())
+	defer cancel(nil)
+
 	var tee *usageTee
 	defer func() {
 		if tee != nil {
 			outcome.Usage = tee.Usage()
 			outcome.UsageStart = tee.UsageStart()
 		}
+		outcome.Cut = cutBy(hop, r.Context(), tee)
 	}()
 
 	reverse := &httputil.ReverseProxy{
@@ -151,7 +170,8 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			if resp.StatusCode == http.StatusSwitchingProtocols {
 				return nil
 			}
-			tee = newUsageTee(resp.Body, isEventStream(resp))
+			idle := newIdleBody(resp.Body, p.readTimeout(), func() { cancel(errUpstreamIdle) })
+			tee = newUsageTee(idle, isEventStream(resp))
 			resp.Body = tee
 			if swap.active() {
 				// The tee stays innermost so usage is scraped off the raw upstream bytes. The two
@@ -163,9 +183,15 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// A client that left before the upstream answered: nobody is there to answer, and the
+			// hop says nothing about the upstream.
+			if r.Context().Err() != nil {
+				p.log.Debug("client left before the upstream answered", "target", target)
+				w.WriteHeader(statusClientClosed)
+				return
+			}
 			// Status stays 0, which is what marks the hop failed: the connection never got far
-			// enough to have one. A client that hung up lands here too, and is not worth
-			// distinguishing against a threshold of three consecutive failures.
+			// enough to have one.
 			p.log.Warn("upstream hop failed", "target", target, "err", err)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
@@ -177,7 +203,28 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 		},
 	}
 
-	reverse.ServeHTTP(w, r)
+	reverse.ServeHTTP(w, r.WithContext(hop))
+}
+
+// cutBy names who ended a response that did not finish, blank for one that did. In this order: a
+// silent upstream is cancelled by us, and a client that left cancels everything under it, so
+// either can also look like a body that broke off.
+func cutBy(hop, client context.Context, tee *usageTee) string {
+	switch {
+	case context.Cause(hop) == errUpstreamIdle:
+		return domain.CutUpstreamIdle
+	case client.Err() != nil:
+		return domain.CutClientLeft
+	case tee != nil && tee.failed:
+		return domain.CutUpstream
+	}
+	return ""
+}
+
+func (p *Proxy) readTimeout() time.Duration {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.opts.ReadTimeout
 }
 
 // isEventStream reports whether the upstream answered with server-sent events, which is what

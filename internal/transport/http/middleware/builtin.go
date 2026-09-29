@@ -109,6 +109,7 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.String("engine", or(state.Deployment, "-")),
 					slog.Int("upstream_status", state.UpstreamStatus),
 					slog.String("reason", or(state.DeniedReason, state.Reason)),
+					slog.String("cut", or(state.Cut, "-")),
 				)
 				access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
 			}()
@@ -337,6 +338,7 @@ func newMeter(deps Deps) (Middleware, error) {
 					Target:         state.Decision.EngineURL(),
 					UpstreamStatus: statusText(state.UpstreamStatus),
 					Reason:         state.Reason,
+					Cut:            state.Cut,
 				})
 			}()
 			next.ServeHTTP(w, r)

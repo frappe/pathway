@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
 )
@@ -202,5 +203,87 @@ func TestUsageIsReadOutOfTheTailOfALongPrintedBody(t *testing.T) {
 	}
 	if u, ok := domain.ParseUsage([]byte(tee.Usage())); !ok || u.Total != 9 || len(tee.Usage()) > carryLimit {
 		t.Errorf("got %+v ok=%v from %d bytes", u, ok, len(tee.Usage()))
+	}
+}
+
+// A client that leaves before the upstream answers is nobody's failure: the upstream is told to
+// stop, the line reads 499 and not 502, and the hop carries no status to count against anyone.
+func TestAClientThatLeavesBeforeTheAnswerIsNotAFailedHop(t *testing.T) {
+	told := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// A server only notices its peer closing once the request body has been read.
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+		close(told)
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, leave := context.WithCancel(context.Background())
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)).WithContext(ctx)
+	time.AfterFunc(50*time.Millisecond, leave)
+	recorder := httptest.NewRecorder()
+	var out Outcome
+	New(Options{}, quiet()).Forward(recorder, r, server.URL, false, ModelSwap{}, &out)
+
+	if out.Cut != domain.CutClientLeft || out.Status != 0 || recorder.Code != statusClientClosed {
+		t.Errorf("cut %q, upstream status %d, answered %d", out.Cut, out.Status, recorder.Code)
+	}
+	select {
+	case <-told:
+	case <-time.After(2 * time.Second):
+		t.Error("the upstream was never told to stop")
+	}
+}
+
+// The read timeout bounds silence, not length: a stream that keeps talking outlives it, one that
+// stops is cut and says so.
+func TestAnUpstreamGoneSilentIsCutAndASlowOneIsNot(t *testing.T) {
+	const limit = 200 * time.Millisecond
+	frame := `data: {"choices":[{"delta":{"content":"w"}}],"usage":null}` + "\n\n"
+	for name, tc := range map[string]struct {
+		frames int
+		silent bool
+		cut    string
+	}{
+		"slow":   {frames: 6, cut: ""},
+		"silent": {frames: 2, silent: true, cut: domain.CutUpstreamIdle},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "text/event-stream")
+			for range tc.frames {
+				_, _ = io.WriteString(w, frame)
+				w.(http.Flusher).Flush()
+				time.Sleep(limit / 3)
+			}
+			if tc.silent {
+				<-r.Context().Done()
+			}
+		}))
+		t.Cleanup(server.Close)
+
+		start := time.Now()
+		out := forward(New(Options{ReadTimeout: limit}, quiet()), server.URL, false)
+		if out.Cut != tc.cut || out.Status != http.StatusOK {
+			t.Errorf("%s: cut %q, status %d, want cut %q", name, out.Cut, out.Status, tc.cut)
+		}
+		if elapsed := time.Since(start); tc.silent && elapsed > 10*limit {
+			t.Errorf("%s: held for %s past a limit of %s", name, elapsed, limit)
+		}
+	}
+}
+
+// An upstream that answers 200 and then breaks off is marked, so the request can be found.
+func TestAnUpstreamThatBreaksOffIsMarked(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"content":"w"}}],"usage":null}`+"\n\n")
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	t.Cleanup(server.Close)
+
+	if out := forward(New(Options{}, quiet()), server.URL, false); out.Cut != domain.CutUpstream || out.Status != http.StatusOK {
+		t.Errorf("cut %q, status %d", out.Cut, out.Status)
 	}
 }

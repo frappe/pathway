@@ -10,25 +10,29 @@ func TestWhatCountsAsABrokenHop(t *testing.T) {
 		name           string
 		upstreamStatus string
 		reason         string
+		cut            string
 		broken         bool
 	}{
-		{"no response at all", "", "", true},
-		{"bad gateway", "502", "", true},
-		{"gateway timeout", "504", "", true},
-		{"ingress down", "503", "", true},
+		{"no response at all", "", "", "", true},
+		// Three impatient clients in a row must not retire an upstream that did nothing wrong.
+		{"the client left before any answer", "", "", CutClientLeft, false},
+		{"the client left, and the answer was a bad gateway", "502", "", CutClientLeft, true},
+		{"bad gateway", "502", "", "", true},
+		{"gateway timeout", "504", "", "", true},
+		{"ingress down", "503", "", "", true},
 		// The one that matters. A healthy ingress with no replica for this model answers 503 and
 		// says so; ejecting on it would take the ingress out for every OTHER model on it.
-		{"healthy ingress, unplaced model", "503", "no-replica", false},
-		{"served", "200", "", false},
-		{"client asked for nonsense", "400", "", false},
-		{"key refused downstream", "401", "", false},
-		{"engine at capacity", "429", "", false},
+		{"healthy ingress, unplaced model", "503", "no-replica", "", false},
+		{"served", "200", "", "", false},
+		{"client asked for nonsense", "400", "", "", false},
+		{"key refused downstream", "401", "", "", false},
+		{"engine at capacity", "429", "", "", false},
 		// vLLM's own 500 is the engine failing on one request, not the hop being unusable.
-		{"engine error", "500", "", false},
+		{"engine error", "500", "", "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := IsHopFailure(c.upstreamStatus, c.reason); got != c.broken {
-				t.Errorf("IsHopFailure(%q, %q) = %v, want %v", c.upstreamStatus, c.reason, got, c.broken)
+			if got := IsHopFailure(c.upstreamStatus, c.reason, c.cut); got != c.broken {
+				t.Errorf("IsHopFailure(%q, %q, %q) = %v, want %v", c.upstreamStatus, c.reason, c.cut, got, c.broken)
 			}
 		})
 	}
