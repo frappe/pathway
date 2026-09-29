@@ -1,7 +1,10 @@
 package transform
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +24,61 @@ func chain(t *testing.T, names ...string) *Chain {
 		t.Fatalf("NewChain(%v): %v", names, err)
 	}
 	return c
+}
+
+// logged runs `c` over `raw` for `ctx` and returns what it wrote to the process log.
+func logged(t *testing.T, c *Chain, ctx Context, raw string) string {
+	t.Helper()
+	var out bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&out, nil)))
+	defer slog.SetDefault(previous)
+	if _, err := c.Apply(ctx, decode(t, raw)); err != nil {
+		t.Fatal(err)
+	}
+	return out.String()
+}
+
+// Whatever a transform removes is said once per user and field, by name and by the transform that
+// did it, and never by value: nothing upstream errors on a field that is not there.
+func TestEveryDroppedFieldIsWarnedOncePerUser(t *testing.T) {
+	c := chain(t, "modelmap", "cachesalt", "servicetier")
+	vendor := Context{Path: "/v1/chat/completions", User: "u1", Provider: true, UpstreamModel: "upstream-m"}
+	const sent = `{"model":"m","cache_salt":"team-secret","service_tier":"priority"}`
+
+	first := logged(t, c, vendor, sent)
+	for _, want := range []string{
+		"level=WARN", "user=u1",
+		"field=cache_salt transform=cachesalt",
+		"field=service_tier transform=servicetier",
+	} {
+		if !strings.Contains(first, want) {
+			t.Errorf("first request logged %q, want %q in it", first, want)
+		}
+	}
+	if strings.Contains(first, "team-secret") || strings.Contains(first, "priority") {
+		t.Errorf("a caller's value reached the log: %q", first)
+	}
+	// Rewritten is not dropped: modelmap changed `model`, and says nothing.
+	if strings.Contains(first, "field=model") {
+		t.Errorf("a rewritten field was logged as dropped: %q", first)
+	}
+	if again := logged(t, c, vendor, sent); again != "" {
+		t.Errorf("the same user and fields logged twice: %q", again)
+	}
+	vendor.User = "u2"
+	if other := logged(t, c, vendor, sent); strings.Count(other, "user=u2") != 2 {
+		t.Errorf("another user logged %q, want both fields", other)
+	}
+}
+
+// A body nothing was taken from logs nothing, whatever else was rewritten on the way.
+func TestNothingDroppedLogsNothing(t *testing.T) {
+	c := chain(t, "modelmap", "streamusage", "cachesalt", "servicetier")
+	ctx := Context{Path: "/v1/chat/completions", User: "u1", UpstreamModel: "upstream-m"}
+	if out := logged(t, c, ctx, `{"model":"m","stream":true,"cache_salt":"team-a"}`); out != "" {
+		t.Errorf("logged %q", out)
+	}
 }
 
 // A misspelt name must stop the process. `priority` silently not running is the difference between

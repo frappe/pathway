@@ -6,6 +6,7 @@ package transform
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 )
@@ -64,7 +65,7 @@ func Registered() []string {
 
 // Default is what runs when nothing is configured. Order matters only in that a later transform
 // sees an earlier one's output.
-var Default = []string{"modelmap", "streamusage", "cachesalt"}
+var Default = []string{"modelmap", "streamusage", "cachesalt", "servicetier"}
 
 // Chain is an ordered, resolved set of transforms, replaceable in place under its own lock — the
 // middleware holds a pointer, and rebuilding the whole chain to change which rewrites run would be
@@ -72,6 +73,9 @@ var Default = []string{"modelmap", "streamusage", "cachesalt"}
 type Chain struct {
 	mu         sync.RWMutex
 	transforms []Request
+	// warned is each user and field already logged as dropped: an SDK that sends one on every
+	// request is a line, not a flood.
+	warned sync.Map
 }
 
 // NewChain resolves names to transforms. An unknown name is a startup error, not a warning: a
@@ -115,12 +119,17 @@ func resolveLocked(names []string) ([]Request, error) {
 	return resolved, nil
 }
 
-// Apply runs every transform whose endpoints match, and reports whether the body changed.
+// Apply runs every transform whose endpoints match, and reports whether the body changed. A field
+// the caller sent that a transform removed is logged here, so a transform only ever deletes.
 func (c *Chain) Apply(ctx Context, body Body) (bool, error) {
 	c.mu.RLock()
 	transforms := c.transforms
 	c.mu.RUnlock()
 
+	sent := make([]string, 0, len(body))
+	for field := range body {
+		sent = append(sent, field)
+	}
 	changed := false
 	for _, t := range transforms {
 		if !applies(t, ctx.Path) {
@@ -130,9 +139,28 @@ func (c *Chain) Apply(ctx Context, body Body) (bool, error) {
 		if err != nil {
 			return changed, fmt.Errorf("transform %s: %w", t.Name(), err)
 		}
+		if did {
+			c.warnDropped(ctx.User, t.Name(), sent, body)
+		}
 		changed = changed || did
 	}
 	return changed, nil
+}
+
+// warnDropped logs each field sent and no longer there, once per user and field: nothing upstream
+// errors on a missing field, so this line is the only sign the caller asked for it. The name
+// only, never the value — that is the caller's, and a cache salt is a secret.
+// ponytail: top-level fields only, and the seen set is bounded because transforms name what they
+// drop; one that strips whatever it does not know needs a cap here and a diff that recurses.
+func (c *Chain) warnDropped(user, transform string, sent []string, body Body) {
+	for _, field := range sent {
+		if _, kept := body[field]; kept {
+			continue
+		}
+		if _, seen := c.warned.LoadOrStore(user+"\x00"+field, true); !seen {
+			slog.Warn("request field dropped", "user", user, "field", field, "transform", transform)
+		}
+	}
 }
 
 // Names is what this chain will run, for the startup log.

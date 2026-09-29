@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -220,6 +221,13 @@ func TestAnAbsentListKeepsTheDefault(t *testing.T) {
 	}
 	if got := live.Get().Transforms; !SameList(got, Defaults().Transforms) {
 		t.Errorf("transforms = %v, want the default %v", got, Defaults().Transforms)
+	}
+}
+
+// Grove renders no transform list, so this default is what every box runs.
+func TestAnUnconfiguredBoxDropsTheServiceTier(t *testing.T) {
+	if !slices.Contains(Defaults().Transforms, "servicetier") {
+		t.Errorf("transforms = %v, want servicetier among them", Defaults().Transforms)
 	}
 }
 
