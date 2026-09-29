@@ -71,6 +71,10 @@ func newAccessLog(deps Deps) (Middleware, error) {
 				return
 			}
 			r, state := newState(r)
+			// Answered under both names — OpenAI SDKs read X-Request-Id, Anthropic SDKs Request-Id —
+			// and set before any stage can refuse, so a denial carries it as well as a completion.
+			w.Header().Set("X-Request-Id", state.RequestID)
+			w.Header().Set("Request-Id", state.RequestID)
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
 			// Deferred: a client hanging up mid-stream unwinds this stage through
@@ -98,8 +102,9 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.Int("attempts", 1),
 					slog.String("key", or(state.Identity.Prefix(), "-")),
 					slog.String("model", or(state.Model, "-")),
-					slog.String("rid", or(state.Decision.RequestID, "-")),
+					slog.String("rid", state.RequestID),
 					slog.String("upstream", or(state.Decision.EngineURL(), "-")),
+					slog.String("upstream_rid", or(state.UpstreamRID, "-")),
 					slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
 					slog.String("engine", or(state.Deployment, "-")),
 					slog.Int("upstream_status", state.UpstreamStatus),
@@ -289,6 +294,7 @@ func newRoute(deps Deps) (Middleware, error) {
 				MeterID:   state.Identity.MeterID,
 				KeyPrefix: state.Identity.Prefix(),
 				Path:      r.URL.Path,
+				RequestID: state.RequestID,
 			})
 			if err != nil {
 				deny(w, r, err)
@@ -296,10 +302,9 @@ func newRoute(deps Deps) (Middleware, error) {
 			}
 			state.Decision = decision
 
-			// Canonical, overriding any client-supplied value: vLLM adopts X-Request-Id as its own
-			// request id and OpenAI-aware tooling reads it back.
+			// Outbound: canonical over anything the client sent. vLLM adopts X-Request-Id as its own
+			// request id; an ingress carries it on unchanged.
 			r.Header.Set("X-Request-Id", decision.RequestID)
-			w.Header().Set("X-Request-Id", decision.RequestID)
 			next.ServeHTTP(w, r)
 		})
 	}, nil
@@ -401,8 +406,10 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 				// A vendor authenticates its own way, and would read our Bearer as a caller's
 				// credential leaking outward — so it is deleted, not overwritten. The scheme
 				// follows the front's dialect: an Anthropic front takes x-api-key and its version
-				// header, an OpenAI-compatible one takes the Bearer everyone else does.
+				// header, an OpenAI-compatible one takes the Bearer everyone else does. Our request
+				// id stays inside our network too: a vendor ignores it and mints its own.
 				r.Header.Del("Authorization")
+				r.Header.Del("X-Request-Id")
 				if route.Dialect != domain.DialectAnthropic {
 					if route.InternalKey != "" {
 						r.Header.Set("Authorization", "Bearer "+route.InternalKey)
@@ -466,13 +473,21 @@ func newPick(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
+			// The gateway's id, adopted over the one this box minted: one grep crosses both logs, and
+			// the caller is an authenticated gateway, not a client. Read first, so a refusal below is
+			// attributable too.
+			if rid := r.Header.Get("X-Request-Id"); rid != "" {
+				state.RequestID = rid
+				w.Header().Set("X-Request-Id", rid)
+				w.Header().Set("Request-Id", rid)
+			}
 			state.Model = r.Header.Get("X-Grove-Model")
 			if state.Model == "" {
 				failIngress(w, r, http.StatusBadRequest, "no-model")
 				return
 			}
 			sessionKey := r.Header.Get("X-Grove-Session-Key")
-			requestID := r.Header.Get("X-Request-Id")
+			requestID := state.RequestID
 
 			route, err := deps.Routing.PickReplica(r.Context(), state.Model, sessionKey, requestID)
 			if err != nil {

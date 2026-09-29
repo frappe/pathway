@@ -1,12 +1,17 @@
 package http
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
+	"github.com/phot0n/pathway/internal/config"
 	"github.com/phot0n/pathway/internal/domain"
 )
 
@@ -183,5 +188,37 @@ func TestAnEngineStillServesItsOwnExtraEndpoints(t *testing.T) {
 	}
 	if f.seen.path != "/e/md1/v1/rerank" {
 		t.Errorf("engine path = %q", f.seen.path)
+	}
+}
+
+// The request id is ours on both sides of a vendor hop. Ours never leaves our network — a vendor
+// ignores it and mints its own — and the vendor's never reaches the client: ReverseProxy would add
+// it as a second X-Request-Id, or hand an Anthropic SDK the vendor's request-id in place of ours.
+// It is kept on the access line instead, as the key a ticket to the vendor quotes.
+func TestAProviderRequestIDStaysOurs(t *testing.T) {
+	f := providerFixtureAnswering(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "req_vendor")
+		w.Header().Set("Request-Id", "req_vendor")
+		jsonEngine(`{`+usageObject+`}`)(w, r)
+	})
+	access := &bytes.Buffer{}
+	f.handler = buildHandler(t, f.store, config.Config{}, 0, func(s *Services) {
+		s.Access = slog.New(slog.NewJSONHandler(access, nil))
+	})
+	resp := f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
+
+	if f.seen.requestID != "" {
+		t.Errorf("our request id reached the vendor: %q", f.seen.requestID)
+	}
+	ours := resp.Header().Values("X-Request-Id")
+	if len(ours) != 1 || uuid.Validate(ours[0]) != nil || ours[0] == "req_vendor" {
+		t.Errorf("X-Request-Id = %v, want exactly our one id", ours)
+	}
+	if got := resp.Header().Values("Request-Id"); len(got) != 1 || got[0] != ours[0] {
+		t.Errorf("Request-Id = %v, want ours (%v) for the Anthropic SDK", got, ours)
+	}
+	line := jsonLine(t, access)
+	if line["rid"] != ours[0] || line["upstream_rid"] != "req_vendor" {
+		t.Errorf("access line rid=%v upstream_rid=%v, want ours + the vendor's", line["rid"], line["upstream_rid"])
 	}
 }

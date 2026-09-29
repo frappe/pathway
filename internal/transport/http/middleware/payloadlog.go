@@ -34,7 +34,7 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 			// are exactly the ones a support query about an abandoned request asks after.
 			defer func() {
 				deps.Payload.LogAttrs(r.Context(), slog.LevelInfo, "payload",
-					slog.String("rid", or(state.Decision.RequestID, "-")),
+					slog.String("rid", state.RequestID),
 					slog.String("key", or(state.Identity.Prefix(), "-")),
 					slog.String("user", state.Identity.Key.User),
 					slog.String("model", or(state.Model, "-")),

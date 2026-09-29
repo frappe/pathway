@@ -34,7 +34,7 @@ func accessFixture(t *testing.T, f *fixture) *bytes.Buffer {
 	}
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
 		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
-		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
+		Routing:      routing.New(repos, logs.Process, routing.Options{}),
 		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),

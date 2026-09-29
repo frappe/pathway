@@ -22,6 +22,9 @@ import (
 type Outcome struct {
 	Status int    // the upstream's status; 0 means the hop never produced one
 	Usage  string // the captured usage line, empty if the response carried none
+	// UpstreamRID is the upstream's own request id off x-request-id or request-id: what a ticket
+	// to a vendor quotes. Blank on our engines, which run without request-id headers.
+	UpstreamRID string
 	// Deployment is the placement an ingress chose, off its response header. On a direct route the
 	// gateway already knows; this is the only way usage reaches a placement it never picked.
 	Deployment string
@@ -123,6 +126,18 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			outcome.Status = resp.StatusCode
 			outcome.Deployment = resp.Header.Get("X-Grove-Engine")
 			outcome.Reason = resp.Header.Get("X-Grove-Reason")
+			// A vendor's id is kept for the access line; an engine or ingress only echoes ours. Either
+			// is taken off the response: ReverseProxy ADDS upstream headers onto the ones the edge
+			// set, so a vendor's x-request-id would give the client two values and its request-id
+			// would replace ours under the Anthropic SDK.
+			if external {
+				outcome.UpstreamRID = resp.Header.Get("X-Request-Id")
+				if outcome.UpstreamRID == "" {
+					outcome.UpstreamRID = resp.Header.Get("Request-Id")
+				}
+			}
+			resp.Header.Del("X-Request-Id")
+			resp.Header.Del("Request-Id")
 			// A 101 hands the connection to ReverseProxy, which needs the body to stay an
 			// io.ReadWriteCloser to write back to the engine. The tee is read-only and would fail
 			// the handshake — and a hijacked stream has no usage frame to scrape anyway.

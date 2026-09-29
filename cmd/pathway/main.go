@@ -50,7 +50,7 @@ func run() error {
 	// record, which is the whole reason the type exists.
 	level := new(slog.LevelVar)
 	log, closeLogs, err := observability.New(observability.Options{
-		Level:         level,
+		Level:          level,
 		AccessLogPath:  cfg.AccessLogPath,
 		ErrorLogPath:   cfg.ErrorLogPath,
 		PayloadLogPath: cfg.PayloadLogPath,
@@ -98,7 +98,6 @@ func run() error {
 	server := gatewayhttp.New(cfg, gatewayhttp.Services{
 		Admission: admission.New(store.Keys, store.Users, store.Groups),
 		Routing: routing.New(store, log.Process, routing.Options{
-			GatewayID:    cfg.GatewayID,
 			Region:       cfg.Region,
 			SyntheticTTL: func() time.Duration { return live.Get().SyntheticSessionTTL },
 		}),

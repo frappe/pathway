@@ -32,6 +32,7 @@ func (s *Server) proxyHandler() http.Handler {
 		var outcome proxy.Outcome
 		defer func() {
 			state.UpstreamStatus = outcome.Status
+			state.UpstreamRID = outcome.UpstreamRID
 			state.Usage = outcome.Usage
 			state.Reason = outcome.Reason
 			if outcome.Deployment != "" {

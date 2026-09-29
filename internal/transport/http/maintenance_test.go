@@ -42,7 +42,7 @@ func newMaintained(t *testing.T, store *memory.Store) *maintained {
 	on := new(atomic.Bool)
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
 		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
-		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
+		Routing:      routing.New(repos, logs.Process, routing.Options{}),
 		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/phot0n/pathway/internal/config"
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/observability"
@@ -89,7 +91,19 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 	return &fixture{t: t, store: store, engine: engine, seen: seen, handler: buildHandler(t, store, config.Config{}, 0)}
 }
 
-func buildHandler(t *testing.T, store *memory.Store, cfg config.Config, maxBody int64) http.Handler {
+// buildHandler is the data plane of newServer: the gateway chain, or the ingress chain when cfg
+// names an ingress, exactly as the real server picks.
+func buildHandler(t *testing.T, store *memory.Store, cfg config.Config, maxBody int64, wire ...func(*Services)) http.Handler {
+	t.Helper()
+	handler, err := newServer(t, store, cfg, maxBody, wire...).DataHandler(nil)
+	if err != nil {
+		t.Fatalf("DataHandler: %v", err)
+	}
+	return handler
+}
+
+// wire lets a test swap one Services field (a captured log, say) without re-stating the rest.
+func newServer(t *testing.T, store *memory.Store, cfg config.Config, maxBody int64, wire ...func(*Services)) *Server {
 	t.Helper()
 	logs := observability.Discard()
 	repos := store.Repositories()
@@ -98,9 +112,9 @@ func buildHandler(t *testing.T, store *memory.Store, cfg config.Config, maxBody 
 		t.Fatalf("transform chain: %v", err)
 	}
 	cfg.AdminToken = "admin-token"
-	server := New(cfg, Services{
+	services := Services{
 		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
-		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
+		Routing:      routing.New(repos, logs.Process, routing.Options{}),
 		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),
@@ -108,13 +122,11 @@ func buildHandler(t *testing.T, store *memory.Store, cfg config.Config, maxBody 
 		Proxy:        proxy.New(proxy.Options{}, logs.Process),
 		Access:       logs.Access,
 		MaxBodyBytes: func() int64 { return maxBody },
-	}, logs.Process)
-
-	handler, err := server.DataHandler(middleware.GatewayChain)
-	if err != nil {
-		t.Fatalf("DataHandler: %v", err)
 	}
-	return handler
+	for _, w := range wire {
+		w(&services)
+	}
+	return New(cfg, services, logs.Process)
 }
 
 func (f *fixture) post(path, body string, headers ...string) *httptest.ResponseRecorder {
@@ -160,7 +172,12 @@ func TestNonStreamingRequestIsMetered(t *testing.T) {
 // The engine's path is the route's base plus the path the client asked for, and the client's key
 // never reaches it.
 func TestTheEngineSeesTheRewrittenRequest(t *testing.T) {
-	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
+	// The engine echoes the id, as vLLM does with --enable-request-id-headers: the client must
+	// still see exactly one.
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", r.Header.Get("X-Request-Id"))
+		jsonEngine(`{`+usageObject+`}`)(w, r)
+	})
 	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
 
 	if f.seen.path != "/e/md1/v1/chat/completions" {
@@ -169,11 +186,11 @@ func TestTheEngineSeesTheRewrittenRequest(t *testing.T) {
 	if f.seen.authorization != "Bearer engine-key" {
 		t.Errorf("engine authorization = %q — the client's key must not reach an engine", f.seen.authorization)
 	}
-	if !strings.HasPrefix(f.seen.requestID, "gr-gw_test-MD_00007-abc123-") {
-		t.Errorf("engine X-Request-Id = %q", f.seen.requestID)
+	if uuid.Validate(f.seen.requestID) != nil {
+		t.Errorf("engine X-Request-Id = %q, want a uuid", f.seen.requestID)
 	}
-	if got := resp.Header().Get("X-Request-Id"); got != f.seen.requestID {
-		t.Errorf("client got rid %q, engine got %q — the correlation is broken", got, f.seen.requestID)
+	if got := resp.Header().Values("X-Request-Id"); len(got) != 1 || got[0] != f.seen.requestID {
+		t.Errorf("client got rid %v, engine got %q — the correlation is broken", got, f.seen.requestID)
 	}
 	if f.seen.forwardedFor == "" {
 		t.Error("X-Forwarded-For was not set")
@@ -529,7 +546,7 @@ func drainingHandler(t *testing.T, store *memory.Store) http.Handler {
 	transforms, _ := transform.NewChain(transform.Default)
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
 		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
-		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
+		Routing:      routing.New(repos, logs.Process, routing.Options{}),
 		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),

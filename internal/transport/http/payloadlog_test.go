@@ -10,15 +10,6 @@ import (
 	"testing"
 
 	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/observability"
-	"github.com/phot0n/pathway/internal/service/admission"
-	"github.com/phot0n/pathway/internal/service/catalog"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/provisioning"
-	"github.com/phot0n/pathway/internal/service/routing"
-	"github.com/phot0n/pathway/internal/service/transform"
-	"github.com/phot0n/pathway/internal/transport/http/middleware"
-	"github.com/phot0n/pathway/internal/transport/http/proxy"
 )
 
 // payloadFixture is newFixture with a payload log wired in and the test user's opt-in set as
@@ -31,37 +22,18 @@ func payloadFixture(t *testing.T, engineHandler http.HandlerFunc, optIn bool) (*
 	f.store.Users["test-user"] = user
 
 	buf := &bytes.Buffer{}
-	logs := observability.Discard()
-	repos := f.store.Repositories()
-	transforms, err := transform.NewChain(transform.Default)
-	if err != nil {
-		t.Fatalf("transform chain: %v", err)
-	}
-	server := New(config.Config{AdminToken: "admin-token"}, Services{
-		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
-		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
-		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
-		Catalog:      catalog.New(repos.Routes),
-		Provisioning: provisioning.New(repos, logs.Process),
-		Transform:    transforms,
-		Proxy:        proxy.New(proxy.Options{}, logs.Process),
-		Access:       logs.Access,
-		Payload:      slog.New(slog.NewJSONHandler(buf, nil)),
-		MaxBodyBytes: func() int64 { return 0 },
-	}, logs.Process)
-	handler, err := server.DataHandler(middleware.GatewayChain)
-	if err != nil {
-		t.Fatalf("DataHandler: %v", err)
-	}
-	f.handler = handler
+	f.handler = buildHandler(t, f.store, config.Config{}, 0, func(s *Services) {
+		s.Payload = slog.New(slog.NewJSONHandler(buf, nil))
+	})
 	return f, buf
 }
 
-func payloadLine(t *testing.T, buf *bytes.Buffer) map[string]any {
+// jsonLine decodes a log buffer that must hold exactly one line.
+func jsonLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 	t.Helper()
 	var line map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
-		t.Fatalf("payload log is not one JSON line: %v\n%s", err, buf)
+		t.Fatalf("log is not one JSON line: %v\n%s", err, buf)
 	}
 	return line
 }
@@ -74,7 +46,7 @@ func TestAnOptedInUsersPromptAndOutputAreLogged(t *testing.T) {
 
 	f.post("/v1/chat/completions", prompt)
 
-	line := payloadLine(t, buf)
+	line := jsonLine(t, buf)
 	if line["prompt"] != prompt {
 		t.Errorf("prompt = %q, want the body as sent", line["prompt"])
 	}
@@ -119,7 +91,7 @@ func TestAStreamIsCapturedWithoutBeingAltered(t *testing.T) {
 	if resp.Body.String() != frames {
 		t.Errorf("stream altered:\n got: %q\nwant: %q", resp.Body.String(), frames)
 	}
-	line := payloadLine(t, buf)
+	line := jsonLine(t, buf)
 	if line["output"] != frames {
 		t.Errorf("captured output = %q", line["output"])
 	}

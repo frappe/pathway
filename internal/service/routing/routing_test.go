@@ -51,7 +51,7 @@ func pick(t *testing.T, svc *Service, session string) Decision {
 // every time — that is the bug the whole least-in-flight path exists to fix.
 func TestAKeylessCallerIsBalanced(t *testing.T) {
 	store := twoEngines()
-	svc := serviceOver(store, Options{GatewayID: "gw"})
+	svc := serviceOver(store, Options{})
 
 	first := pick(t, svc, "")
 	second := pick(t, svc, "")
@@ -62,7 +62,7 @@ func TestAKeylessCallerIsBalanced(t *testing.T) {
 
 // A caller that names a session keeps its engine, so its prefix cache stays warm.
 func TestANamedSessionKeepsItsEngine(t *testing.T) {
-	svc := serviceOver(twoEngines(), Options{GatewayID: "gw"})
+	svc := serviceOver(twoEngines(), Options{})
 
 	first := pick(t, svc, "acme-bot")
 	for i := 0; i < 5; i++ {
@@ -76,7 +76,7 @@ func TestANamedSessionKeepsItsEngine(t *testing.T) {
 // fleet always did — even though the caller named no session of its own.
 func TestTheSyntheticSessionPinsAKeylessCaller(t *testing.T) {
 	store := twoEngines()
-	svc := serviceOver(store, Options{GatewayID: "gw", SyntheticTTL: fixedTTL(StickyTTL)})
+	svc := serviceOver(store, Options{SyntheticTTL: fixedTTL(StickyTTL)})
 
 	first := pick(t, svc, "")
 	for i := 0; i < 5; i++ {
@@ -89,7 +89,7 @@ func TestTheSyntheticSessionPinsAKeylessCaller(t *testing.T) {
 // Every admitted request claims a slot, and that claim is what the next pick balances against.
 func TestPickClaimsASlotAndReleaseGivesItBack(t *testing.T) {
 	store := twoEngines()
-	svc := serviceOver(store, Options{GatewayID: "gw"})
+	svc := serviceOver(store, Options{})
 
 	decision := pick(t, svc, "acme-bot")
 	if got := len(store.InFlight[decision.EngineURL()]); got != 1 {
@@ -111,7 +111,7 @@ func TestAFullStickyEngineIsAbandoned(t *testing.T) {
 	store.Sticky["acme-bot"] = "https://full"
 	store.InFlight["https://full"] = map[string]bool{"someone-else": true}
 
-	svc := serviceOver(store, Options{GatewayID: "gw"})
+	svc := serviceOver(store, Options{})
 	if got := pick(t, svc, "acme-bot").EngineURL(); got != "https://idle" {
 		t.Errorf("picked %s, want the idle replica", got)
 	}
@@ -122,7 +122,7 @@ func TestAnEjectedTargetIsNotChosen(t *testing.T) {
 	store := twoEngines()
 	store.Failures["https://a"] = domain.EjectAfter
 
-	svc := serviceOver(store, Options{GatewayID: "gw"})
+	svc := serviceOver(store, Options{})
 	for i := 0; i < 5; i++ {
 		if got := pick(t, svc, "").EngineURL(); got != "https://b" {
 			t.Fatalf("picked the ejected target %s", got)
@@ -136,7 +136,7 @@ func TestAnUnreadableHealthCounterStillRoutes(t *testing.T) {
 	store := twoEngines()
 	store.Fail["health"] = true
 
-	if got := pick(t, serviceOver(store, Options{GatewayID: "gw"}), "").EngineURL(); got == "" {
+	if got := pick(t, serviceOver(store, Options{}), "").EngineURL(); got == "" {
 		t.Error("a health-store failure refused a request the route table could serve")
 	}
 }
@@ -147,7 +147,7 @@ func TestUnreadableInFlightCountsStillRoute(t *testing.T) {
 	store := twoEngines()
 	store.Fail["inflight"] = true
 
-	if got := pick(t, serviceOver(store, Options{GatewayID: "gw"}), "").EngineURL(); got == "" {
+	if got := pick(t, serviceOver(store, Options{}), "").EngineURL(); got == "" {
 		t.Error("an in-flight-store failure refused a request the route table could serve")
 	}
 }
@@ -177,7 +177,7 @@ func TestPickRefusals(t *testing.T) {
 			if c.busy != nil {
 				store.InFlight["https://full"] = c.busy
 			}
-			_, err := serviceOver(store, Options{GatewayID: "gw"}).Pick(
+			_, err := serviceOver(store, Options{}).Pick(
 				context.Background(), Request{Model: "qwen3-4b", MeterID: "meter"})
 
 			var denial domain.Denial
@@ -229,7 +229,7 @@ func TestCanServe(t *testing.T) {
 		{"the store is unreadable", broken, ErrStoreUnreachable},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := serviceOver(c.store, Options{GatewayID: "gw"}).CanServe(context.Background())
+			got := serviceOver(c.store, Options{}).CanServe(context.Background())
 			if !errors.Is(got, c.want) {
 				t.Errorf("CanServe = %v, want %v", got, c.want)
 			}
@@ -245,7 +245,7 @@ func TestOnlyAnIngressRouteCarriesASessionKey(t *testing.T) {
 	ingress.Kind = "ingress"
 	store.Routes["qwen3-4b"] = []domain.Route{ingress}
 
-	decision := pick(t, serviceOver(store, Options{GatewayID: "gw"}), "acme-support-bot")
+	decision := pick(t, serviceOver(store, Options{}), "acme-support-bot")
 	if decision.SessionKey != domain.SHA256Hex("acme-support-bot") {
 		t.Errorf("session key = %q, want the hash", decision.SessionKey)
 	}
@@ -253,7 +253,7 @@ func TestOnlyAnIngressRouteCarriesASessionKey(t *testing.T) {
 		t.Error("the caller's own session string reached the infra plane")
 	}
 
-	direct := pick(t, serviceOver(twoEngines(), Options{GatewayID: "gw"}), "acme-support-bot")
+	direct := pick(t, serviceOver(twoEngines(), Options{}), "acme-support-bot")
 	if direct.SessionKey != "" {
 		t.Errorf("a direct route carried a session key (%q); vLLM has no use for one", direct.SessionKey)
 	}
@@ -262,7 +262,7 @@ func TestOnlyAnIngressRouteCarriesASessionKey(t *testing.T) {
 // The ingress tier: same rule, its own sticky key, and no region — every replica is in its own VPC.
 func TestPickReplicaPinsOnTheForwardedKey(t *testing.T) {
 	store := twoEngines()
-	svc := serviceOver(store, Options{GatewayID: "gw"})
+	svc := serviceOver(store, Options{})
 	const sessionKey = "opaque-hash"
 
 	first, err := svc.PickReplica(context.Background(), "qwen3-4b", sessionKey, "rid-1")
@@ -296,7 +296,7 @@ func TestAWrongSurfaceIsRefusedBeforeAnythingIsClaimed(t *testing.T) {
 	store.Routes["nemotron-asr"] = []domain.Route{{
 		EngineURL: "https://asr", Healthy: true, Deployment: "pod-1", Modality: "audio",
 	}}
-	svc := serviceOver(store, Options{GatewayID: "gw-test"})
+	svc := serviceOver(store, Options{})
 
 	_, err := svc.Pick(context.Background(), Request{
 		Model: "nemotron-asr", MeterID: "meter", KeyPrefix: "abc123",
@@ -321,7 +321,7 @@ func TestTheRightSurfaceStillRoutes(t *testing.T) {
 	store.Routes["nemotron-asr"] = []domain.Route{{
 		EngineURL: "https://asr", Healthy: true, Deployment: "pod-1", Modality: "audio",
 	}}
-	svc := serviceOver(store, Options{GatewayID: "gw-test"})
+	svc := serviceOver(store, Options{})
 
 	decision, err := svc.Pick(context.Background(), Request{
 		Model: "nemotron-asr", MeterID: "meter", KeyPrefix: "abc123",
@@ -337,7 +337,7 @@ func TestTheRightSurfaceStillRoutes(t *testing.T) {
 
 // A route pushed before modality existed carries none, and must keep serving what it always did.
 func TestARouteWithoutAModalityIsUnrestricted(t *testing.T) {
-	svc := serviceOver(twoEngines(), Options{GatewayID: "gw-test"})
+	svc := serviceOver(twoEngines(), Options{})
 
 	if _, err := svc.Pick(context.Background(), Request{
 		Model: "qwen3-4b", MeterID: "meter", KeyPrefix: "abc123",

@@ -13,9 +13,9 @@ type Route struct {
 	// The engine's --max-num-seqs: what it runs concurrently before vLLM starts queueing. 0 =
 	// unset on the placement, which means no cap here rather than a guess at vLLM's default.
 	Capacity int `json:"capacity"`
-	// Model Deployment / pod id — which placement this is, and the request-id's target part.
-	// One box can serve the same model from two deployments, so Server alone names neither.
-	// Empty on a route pushed before this field existed; BuildRequestID falls back.
+	// Model Deployment / pod id — which placement this is; the access line's `deployment`. One box
+	// can serve the same model from two deployments, so Server alone names neither. Empty on a
+	// route pushed before this field existed.
 	Deployment string `json:"deployment"`
 	Server     string `json:"server"` // inference-server / pod id — which box it is on
 	// "ingress" when this row is an Ingress Server that will pick a replica of its own, "direct"

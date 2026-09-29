@@ -27,6 +27,9 @@ type Request struct {
 	// Path is the surface being asked for, checked against the model's modality. An ASR model and
 	// a chat model are indistinguishable by name alone.
 	Path string
+	// RequestID was minted at the edge; the claim and the decision carry it. Blank is minted here
+	// rather than claimed as "" — a blank member would silently undercount the engine.
+	RequestID string
 }
 
 // Decision is the pick and everything downstream needs to act on it.
@@ -49,8 +52,7 @@ type Service struct {
 	health   repository.Health
 	log      *slog.Logger
 
-	gatewayID string
-	region    string
+	region string
 	// syntheticTTL is how long a caller naming no session is pinned to one engine; 0 balances every
 	// such request. A function, not a value, so turning it is an edit to the tunables file rather
 	// than a deploy.
@@ -68,8 +70,7 @@ func serving(table []domain.Route, path string) []domain.Route {
 }
 
 type Options struct {
-	GatewayID string
-	Region    string
+	Region string
 	// SyntheticTTL is read on every pick. Nil means no synthetic session at all.
 	SyntheticTTL func() time.Duration
 }
@@ -78,8 +79,8 @@ func New(store repository.Store, log *slog.Logger, opts Options) *Service {
 	return &Service{
 		routes: store.Routes, sessions: store.Sessions,
 		inFlight: store.InFlight, health: store.Health,
-		log:       log,
-		gatewayID: opts.GatewayID, region: opts.Region,
+		log:          log,
+		region:       opts.Region,
 		syntheticTTL: opts.SyntheticTTL,
 	}
 }
@@ -98,6 +99,10 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	if session == "" && synthetic > 0 {
 		session = domain.SHA256Hex(req.MeterID + "|" + req.Model)[:24]
 		ttl = synthetic
+	}
+
+	if req.RequestID == "" {
+		req.RequestID = domain.NewRequestID()
 	}
 
 	table, err := s.routes.Get(ctx, req.Model)
@@ -141,7 +146,7 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 
 	decision := Decision{
 		Route:     route,
-		RequestID: domain.BuildRequestID(s.gatewayID, route, req.KeyPrefix),
+		RequestID: req.RequestID,
 		Session:   session,
 	}
 	if route.IsIngress() && session != "" {

@@ -134,8 +134,8 @@ func RequireAdminToken(raw string) (string, error) {
 	return token, nil
 }
 
-// GatewayID names this gateway for request-ids: GROVE_GATEWAY_ID (set at deploy to the Gateway
-// Server name) else the host's short name, else "gw".
+// GatewayID names this gateway in its startup line: GROVE_GATEWAY_ID (set at deploy to the Gateway
+// Server name) else the host's short name, else "gw". Being set at all selects the tenant plane.
 func GatewayID() string {
 	if v := strings.TrimSpace(os.Getenv("GROVE_GATEWAY_ID")); v != "" {
 		return v
