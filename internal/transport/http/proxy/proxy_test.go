@@ -125,3 +125,47 @@ func TestUsageSurvivesAClientHangup(t *testing.T) {
 		t.Errorf("usage lost to the hangup: %q", out.Usage)
 	}
 }
+
+// An Anthropic stream reports the prompt on its first event and the output on its last, so both
+// lines reach the caller. A response with one usage line has no start.
+func TestTheFirstAndLastUsageLinesAreBothKept(t *testing.T) {
+	stream := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":66,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","usage":{"output_tokens":26}}` + "\n\n"
+	for name, tc := range map[string]struct{ body, start, last string }{
+		"split": {stream, `"input_tokens":66`, `"output_tokens":26`},
+		"whole": {`{"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`, "", `"total_tokens":9`},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, tc.body)
+		}))
+		t.Cleanup(server.Close)
+
+		out := forward(New(Options{}, quiet()), server.URL, false)
+		if !strings.Contains(out.Usage, tc.last) || (tc.start == "") != (out.UsageStart == "") ||
+			!strings.Contains(out.UsageStart, tc.start) {
+			t.Errorf("%s: start %q, last %q", name, out.UsageStart, out.Usage)
+		}
+	}
+}
+
+// A compressed body is one the tee cannot read, so the upstream is never offered the choice.
+func TestTheUpstreamIsNeverAskedToCompress(t *testing.T) {
+	var asked string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = r.Header.Get("Accept-Encoding")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(server.Close)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	r.Header.Set("Accept-Encoding", "gzip, br")
+	var out Outcome
+	New(Options{}, quiet()).Forward(httptest.NewRecorder(), r, server.URL, false, ModelSwap{}, &out)
+	if out.Status != http.StatusOK || asked != "" {
+		t.Errorf("status %d, upstream saw Accept-Encoding %q", out.Status, asked)
+	}
+}

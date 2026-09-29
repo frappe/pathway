@@ -291,3 +291,25 @@ func TestANoReplica503DoesNotCountAgainstTheTarget(t *testing.T) {
 		t.Errorf("failures = %d, want 0 — the ingress answered correctly", store.Failures["https://ingress"])
 	}
 }
+
+// The first usage line carries what the last one left out; one with nothing to read is ignored.
+func TestUsageFieldsMergesTheFirstUsageLine(t *testing.T) {
+	start := `data: {"type":"message_start","message":{"usage":{"input_tokens":66,"cache_read_input_tokens":2,` +
+		`"cache_creation_input_tokens":5,"cache_creation":{"ephemeral_1h_input_tokens":3},"output_tokens":1}}}`
+	last := `data: {"type":"message_delta","usage":{"output_tokens":26}}`
+	fields, _ := UsageFields(Report{Model: "claude", UsageStart: start, Usage: last})
+	for field, want := range map[string]int64{
+		"prompt_tokens": 73, "completion_tokens": 26, "total_tokens": 99, "input_tokens": 66,
+		"cached_tokens": 2, "cache_write_tokens": 2, "cache_write_1h_tokens": 3,
+	} {
+		if fields[field] != want {
+			t.Errorf("%s = %d, want %d", field, fields[field], want)
+		}
+	}
+
+	null := `data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}`
+	fields, _ = UsageFields(Report{Model: "gpt", UsageStart: null, Usage: "data: " + openAIUsage})
+	if fields["prompt_tokens"] != 100 || fields["total_tokens"] != 120 {
+		t.Errorf("a null first line moved the counts: %v", fields)
+	}
+}

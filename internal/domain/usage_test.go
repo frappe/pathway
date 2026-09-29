@@ -199,3 +199,27 @@ func TestParseUsageDurationDoesNotShadowTokens(t *testing.T) {
 		t.Fatal("usage found in a body with no usage")
 	}
 }
+
+// An Anthropic stream: the prompt and its cache buckets on message_start, the output on
+// message_delta. Merged, the request is whole.
+func TestMergeUsageOfASplitAnthropicStream(t *testing.T) {
+	start, _ := ParseUsage([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":66,` +
+		`"cache_read_input_tokens":2,"cache_creation_input_tokens":5,` +
+		`"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3},"output_tokens":1}}}`))
+	delta, _ := ParseUsage([]byte(`data: {"type":"message_delta","usage":{"output_tokens":26}}`))
+
+	want := Usage{Prompt: 73, Completion: 26, Total: 99, Cached: 2, CacheWrite: 5, CacheWrite1h: 3}
+	if got := MergeUsage(start, delta); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// OpenAI reports a cache write inside prompt_tokens, beside the cached read.
+func TestParseUsageOpenAICacheWrite(t *testing.T) {
+	raw := []byte(`{"usage":{"prompt_tokens":300,"completion_tokens":8,"total_tokens":308,` +
+		`"prompt_tokens_details":{"cached_tokens":200,"cache_write_tokens":80}}}`)
+	u, ok := ParseUsage(raw)
+	if !ok || u.Prompt != 300 || u.Cached != 200 || u.CacheWrite != 80 || u.CacheWrite1h != 0 || u.Total != 308 {
+		t.Fatalf("got %+v ok=%v (want CacheWrite=80 ⊆ Prompt=300)", u, ok)
+	}
+}

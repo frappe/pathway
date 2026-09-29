@@ -329,6 +329,7 @@ func newMeter(deps Deps) (Middleware, error) {
 					Model:          state.Model,
 					Deployment:     or(state.Deployment, state.Decision.Route.Deployment),
 					Usage:          state.Usage,
+					UsageStart:     state.UsageStart,
 					Pricing:        state.Decision.Route.Pricing,
 					User:           state.Identity.Key.User,
 					Prepaid:        state.Identity.User.Prepaid,

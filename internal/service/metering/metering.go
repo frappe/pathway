@@ -23,6 +23,8 @@ type Report struct {
 	// Usage is the raw JSON captured from the response — the final streaming frame or the whole
 	// non-streaming body. May be empty.
 	Usage string
+	// UsageStart is the first usage line of a response that carried more than one. May be empty.
+	UsageStart string
 	// What it cost and whom it cost: the pricing that charges it (nil = unpriced), and the holder
 	// whose lifetime spend moves, with the amount they loaded that their balance is reported against.
 	// Only a prepaid holder is charged: a free one's spend never moves, so turning them prepaid
@@ -108,6 +110,10 @@ func UsageFields(rep Report) (fields map[string]int64, trusted bool) {
 
 	bump("request_count", 1)
 	u, ok := domain.ParseUsage([]byte(rep.Usage))
+	// A first line with nothing to read (OpenAI's "usage":null chunks) is ignored.
+	if start, split := domain.ParseUsage([]byte(rep.UsageStart)); split {
+		u, ok = domain.MergeUsage(start, u), true
+	}
 	if !ok {
 		return fields, true
 	}

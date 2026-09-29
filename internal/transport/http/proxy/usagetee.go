@@ -11,11 +11,14 @@ import (
 const carryLimit = 1 << 20
 
 // usageTee keeps the last newline-delimited line containing "usage" — the final frame of a stream,
-// or a whole non-streaming body. It reads what it is already copying and writes nothing back, so
-// the stream reaches the client byte-for-byte and on time. That property is the contract.
+// or a whole non-streaming body — and the first, when there is more than one: an Anthropic stream
+// reports the prompt on its first event and the output on its last. It reads what it is already
+// copying and writes nothing back, so the stream reaches the client byte-for-byte and on time.
+// That property is the contract.
 type usageTee struct {
 	body  io.ReadCloser
 	carry []byte
+	first []byte
 	line  []byte
 }
 
@@ -41,6 +44,9 @@ func (t *usageTee) Close() error {
 
 // Usage is the captured line, or empty if the response never carried one.
 func (t *usageTee) Usage() string { return string(t.line) }
+
+// UsageStart is the first usage-bearing line, empty when Usage is the only one.
+func (t *usageTee) UsageStart() string { return string(t.first) }
 
 func (t *usageTee) scan(chunk []byte) {
 	data := chunk
@@ -68,8 +74,13 @@ func (t *usageTee) flush() {
 	t.carry = nil
 }
 
+// ponytail: first and last only. Per-event merge if a vendor ever splits its counts three ways.
 func (t *usageTee) keep(line []byte) {
-	if bytes.Contains(line, []byte(`"usage"`)) {
-		t.line = append([]byte(nil), line...)
+	if !bytes.Contains(line, []byte(`"usage"`)) {
+		return
 	}
+	if t.first == nil {
+		t.first = t.line
+	}
+	t.line = append([]byte(nil), line...)
 }

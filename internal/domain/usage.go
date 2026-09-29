@@ -19,6 +19,7 @@ type Usage struct {
 	Cached int
 	// CacheWrite is every prompt token written to the cache, CacheWrite1h the part of it written
 	// with the hour TTL (Anthropic prices the two apart). Both ⊆ Prompt, CacheWrite1h ⊆ CacheWrite.
+	// Already inside prompt_tokens on the OpenAI shape, like Cached.
 	CacheWrite   int
 	CacheWrite1h int
 	// Audio = prompt tokens that were audio, priced apart from text. ⊆ Prompt, OpenAI shape only.
@@ -46,6 +47,24 @@ func ParseUsage(raw []byte) (Usage, bool) {
 		}
 	}
 	return lastUsage(raw)
+}
+
+// MergeUsage folds two usage reports of one request into one: the larger of each field, because
+// counts only grow within a request, then Total raised to Prompt + Completion. An Anthropic stream
+// reports the prompt on its first event and the output on its last.
+func MergeUsage(a, b Usage) Usage {
+	u := Usage{
+		Prompt:       max(a.Prompt, b.Prompt),
+		Completion:   max(a.Completion, b.Completion),
+		Total:        max(a.Total, b.Total),
+		Cached:       max(a.Cached, b.Cached),
+		CacheWrite:   max(a.CacheWrite, b.CacheWrite),
+		CacheWrite1h: max(a.CacheWrite1h, b.CacheWrite1h),
+		Audio:        max(a.Audio, b.Audio),
+		Seconds:      max(a.Seconds, b.Seconds),
+	}
+	u.Total = max(u.Total, u.Prompt+u.Completion)
+	return u
 }
 
 // lastUsage recovers usage from a line the tee cut at the front — no longer a document, but the
@@ -122,6 +141,7 @@ func usageFrom(m map[string]json.RawMessage) (Usage, bool) {
 		// is under prompt_tokens_details.cached_tokens (nested — parse out of band).
 		u.Prompt = p
 		u.Cached = nestedInt(m, "prompt_tokens_details", "cached_tokens")
+		u.CacheWrite = nestedInt(m, "prompt_tokens_details", "cache_write_tokens")
 		// A chat names the details prompt_tokens_details, a transcription input_token_details.
 		u.Audio = nestedInt(m, "prompt_tokens_details", "audio_tokens") +
 			nestedInt(m, "input_token_details", "audio_tokens")

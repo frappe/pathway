@@ -36,6 +36,7 @@ type State struct {
 	// UpstreamRID is the upstream's own request id: a vendor's ticket key, blank on our engines.
 	UpstreamRID string
 	Usage       string
+	UsageStart  string
 	Deployment  string
 	Reason      string
 	// Denied is the status a stage refused with, for the access log. 0 means the request reached

@@ -34,6 +34,7 @@ func (s *Server) proxyHandler() http.Handler {
 			state.UpstreamStatus = outcome.Status
 			state.UpstreamRID = outcome.UpstreamRID
 			state.Usage = outcome.Usage
+			state.UsageStart = outcome.UsageStart
 			state.Reason = outcome.Reason
 			if outcome.Deployment != "" {
 				// An ingress picked the replica and said so. The only way usage reaches a placement

@@ -22,6 +22,9 @@ import (
 type Outcome struct {
 	Status int    // the upstream's status; 0 means the hop never produced one
 	Usage  string // the captured usage line, empty if the response carried none
+	// UsageStart is the first usage line of a response that carried more than one: where an
+	// Anthropic stream reports its prompt.
+	UsageStart string
 	// UpstreamRID is the upstream's own request id off x-request-id or request-id: what a ticket
 	// to a vendor quotes. Blank on our engines, which run without request-id headers.
 	UpstreamRID string
@@ -97,6 +100,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	defer func() {
 		if tee != nil {
 			outcome.Usage = tee.Usage()
+			outcome.UsageStart = tee.UsageStart()
 		}
 	}()
 
@@ -108,6 +112,8 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 			// SNI and virtual hosts: the target's name, not the one the client asked us for.
 			pr.Out.Host = base.Host
+			// The tee reads the body as it passes, so the upstream is never asked to compress it.
+			pr.Out.Header.Del("Accept-Encoding")
 			// ReverseProxy drops inbound X-Forwarded-* whenever Rewrite is set, so a rewrite cannot
 			// carry a spoofed header. Ours are not the client's — upstreamauth just wrote them from
 			// the peer address — so they go back explicitly, not via SetXForwarded, which appends.
