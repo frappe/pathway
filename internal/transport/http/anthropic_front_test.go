@@ -233,6 +233,25 @@ func TestTheRootModelListOmitsAnthropicOnlyModels(t *testing.T) {
 	}
 }
 
+// A chat body POSTed at the list used to fall through to the proxy, which named the MODEL as the
+// thing that does not serve the path. The method is what is wrong, on either surface.
+func TestAPostToTheModelListIsAMethodError(t *testing.T) {
+	f := openaiVendorFixture(t)
+	body := `{"model":"deepseek/chat","messages":[]}`
+	for path, envelope := range map[string]string{
+		"/v1/models":           `{"error":{`,
+		"/anthropic/v1/models": `{"error":{"message":"POST /anthropic/v1/models is not allowed: the model list is GET only","type":"invalid_request_error"},"type":"error"}`,
+	} {
+		w := f.post(path, body)
+		if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != http.MethodGet {
+			t.Errorf("%s: status = %d Allow = %q, want 405 GET", path, w.Code, w.Header().Get("Allow"))
+		}
+		if got := w.Body.String(); !strings.Contains(got, envelope) || strings.Contains(got, "does not serve") {
+			t.Errorf("%s: body = %s", path, got)
+		}
+	}
+}
+
 // The Anthropic model list refuses in Anthropic's shape, like every other answer under the prefix.
 func TestAnAnthropicModelListRefusalSpeaksAnthropic(t *testing.T) {
 	f := providerFixtureAnswering(t, jsonEngine(anthropicMessage))

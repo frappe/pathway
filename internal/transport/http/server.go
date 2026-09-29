@@ -127,10 +127,14 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 	// Exact match, so it wins over the /v1/ proxy and is never forwarded to an engine — an engine
 	// only knows its own model. Outside the data chain: it needs no route and claims no slot.
 	mux.Handle("GET /v1/models", drain(http.HandlerFunc(s.handleModels)))
+	// Any other method. Left to the proxy it reads a model out of the body and answers that the
+	// MODEL does not serve the path, which sends the caller looking at the wrong thing.
+	mux.Handle("/v1/models", drain(http.HandlerFunc(modelListIsGetOnly)))
 	mux.Handle("/v1/", openaiRoot(&s.chain))
 	// Anthropic clients live under the provider convention they arrive with,
 	// ANTHROPIC_BASE_URL=<base>/anthropic, their SDK appending /v1/*. Root is the OpenAI surface.
 	mux.Handle("GET /anthropic/v1/models", drain(http.HandlerFunc(s.handleAnthropicModels)))
+	mux.Handle("/anthropic/v1/models", drain(http.HandlerFunc(modelListIsGetOnly)))
 	mux.Handle("/anthropic/v1/", anthropicAlias(&s.chain))
 	mux.Handle("GET /{$}", drain(http.HandlerFunc(root)))
 	// The whole surface behind recover+accesslog, so the routes the mux answers itself — the model

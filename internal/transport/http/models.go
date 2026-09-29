@@ -35,6 +35,13 @@ func (s *Server) handleAnthropicModels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// A body sent to the list is a request meant for an inference path, so the answer names the method.
+func modelListIsGetOnly(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Allow", http.MethodGet)
+	respond.TypedErrorFor(w, r, http.StatusMethodNotAllowed, "invalid_request_error",
+		r.Method+" "+r.URL.Path+" is not allowed: the model list is GET only")
+}
+
 // modelsForCaller resolves the caller to the models they may see, writing the refusal itself
 // when there are none to show.
 func (s *Server) modelsForCaller(w http.ResponseWriter, r *http.Request) ([]string, bool) {
