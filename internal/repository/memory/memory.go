@@ -34,8 +34,10 @@ type Store struct {
 	// Drained is every counter set aside, drain id → prefix → counters; Unacked the "<id>:<prefix>"
 	// pairs not yet acknowledged; Retained how long each acknowledged pair is kept. Adjusted is
 	// every spend adjustment id already applied.
-	Drained  map[string]map[string]map[string]int64
-	Unacked  map[string]bool
+	Drained map[string]map[string]map[string]int64
+	Unacked map[string]bool
+	// Accrued is the request ids a replay has landed, the memory twin of accrued:<id>.
+	Accrued  map[string]bool
 	Retained map[string]time.Duration
 	Adjusted map[string]bool
 
@@ -53,7 +55,7 @@ func New() *Store {
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, Usage: map[string]map[string]int64{},
 		Hashes: map[string]string{}, Fail: map[string]bool{},
-		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{},
+		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{}, Accrued: map[string]bool{},
 		Retained: map[string]time.Duration{}, Adjusted: map[string]bool{},
 	}
 }
@@ -352,6 +354,27 @@ func (u usage) Accrue(_ context.Context, a repository.Accrual) error {
 	}
 	u.accrue(a)
 	return nil
+}
+
+// Replay matches the real one: once per request id.
+func (u usage) Replay(_ context.Context, a repository.Accrual) (bool, error) {
+	u.s.mu.Lock()
+	defer u.s.mu.Unlock()
+	if err := u.s.failed("usage"); err != nil {
+		return false, err
+	}
+	if u.s.Accrued[a.ID] {
+		return false, nil
+	}
+	u.s.Accrued[a.ID] = true
+	u.accrue(a)
+	return true, nil
+}
+
+func (u usage) Ping(_ context.Context) error {
+	u.s.mu.Lock()
+	defer u.s.mu.Unlock()
+	return u.s.failed("ping")
 }
 
 func (u usage) accrue(a repository.Accrual) {

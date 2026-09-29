@@ -324,6 +324,7 @@ func newMeter(deps Deps) (Middleware, error) {
 				ctx := withoutCancel(r.Context())
 				deps.Routing.Release(ctx, state.Decision.EngineURL(), state.Decision.RequestID)
 				deps.Metering.Record(ctx, metering.Report{
+					RequestID:      state.RequestID,
 					Prefix:         state.Identity.Prefix(),
 					Model:          state.Model,
 					Deployment:     or(state.Deployment, state.Decision.Route.Deployment),

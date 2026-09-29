@@ -38,6 +38,11 @@ type Dynamic struct {
 	// it expires — what a control plane restored from backup could read back.
 	UsageRetention string `json:"usage_retention"`
 
+	// UsageSpool is the file a request's usage is appended to when the store is down, replayed
+	// once it answers; UsageSpoolMaxBytes caps it, past which usage is logged and dropped.
+	UsageSpool         string `json:"usage_spool"`
+	UsageSpoolMaxBytes int64  `json:"usage_spool_max_bytes"`
+
 	// Maintenance refuses new requests with a 503 while in-flight ones finish. In the file, not
 	// behind an endpoint, so a box restarted while in maintenance comes back still in it.
 	Maintenance bool `json:"maintenance"`
@@ -60,6 +65,9 @@ type Resolved struct {
 
 	UsageRetention time.Duration
 
+	UsageSpool         string
+	UsageSpoolMaxBytes int64
+
 	Maintenance bool
 }
 
@@ -77,6 +85,8 @@ func Defaults() Resolved {
 		LameDuck:            5 * time.Second,
 		UpgradeTimeout:      30 * time.Second,
 		UsageRetention:      7 * 24 * time.Hour,
+		UsageSpool:          "/var/lib/pathway/usage-spool.jsonl",
+		UsageSpoolMaxBytes:  1 << 30,
 	}
 }
 
@@ -124,6 +134,15 @@ func (d Dynamic) Resolve(base Resolved) (Resolved, error) {
 			return Resolved{}, errors.New("max_body_bytes must be positive")
 		}
 		out.MaxBodyBytes = d.MaxBodyBytes
+	}
+	if path := strings.TrimSpace(d.UsageSpool); path != "" {
+		out.UsageSpool = path
+	}
+	if d.UsageSpoolMaxBytes != 0 {
+		if d.UsageSpoolMaxBytes < 0 {
+			return Resolved{}, errors.New("usage_spool_max_bytes must be positive")
+		}
+		out.UsageSpoolMaxBytes = d.UsageSpoolMaxBytes
 	}
 	if d.UpstreamTLSVerify != nil {
 		out.UpstreamTLSVerify = *d.UpstreamTLSVerify

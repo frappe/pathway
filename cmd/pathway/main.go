@@ -95,13 +95,22 @@ func run() error {
 		return err
 	}
 
+	meter := metering.New(store.Usage, store.Health, log.Process)
+	if !cfg.IsIngress() {
+		// What the store refuses while it is down waits on disk and is replayed once it answers.
+		meter.Spool = metering.NewSpool(store.Usage, log.Process,
+			func() string { return live.Get().UsageSpool },
+			func() int64 { return live.Get().UsageSpoolMaxBytes })
+		go meter.Spool.Run(context.Background(), 5*time.Second)
+	}
+
 	server := gatewayhttp.New(cfg, gatewayhttp.Services{
 		Admission: admission.New(store.Keys, store.Users, store.Groups),
 		Routing: routing.New(store, log.Process, routing.Options{
 			Region:       cfg.Region,
 			SyntheticTTL: func() time.Duration { return live.Get().SyntheticSessionTTL },
 		}),
-		Metering:       metering.New(store.Usage, store.Health, log.Process),
+		Metering:       meter,
 		Catalog:        catalog.New(store.Routes),
 		Provisioning:   provisioning.New(store, log.Process),
 		Transform:      rebuilt.chain,

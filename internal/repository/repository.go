@@ -82,6 +82,11 @@ type Usage interface {
 	// Ack marks (drain id → prefixes) recorded: each is kept for retention, then expires. A pair
 	// that is not unacknowledged is a no-op. → how many pairs moved.
 	Ack(ctx context.Context, acks map[string][]string, retention time.Duration) (int, error)
+	// Replay lands a spooled accrual exactly as Accrue would, once per ID: a second replay of the
+	// same ID (a crash mid-pass) moves nothing. → whether it landed now.
+	Replay(ctx context.Context, accrual Accrual) (bool, error)
+	// Ping reports whether the store answers — the spool replays only while it does.
+	Ping(ctx context.Context) error
 }
 
 // Drains is drain id → bare prefix → counters, as the control plane receives them.
@@ -140,13 +145,15 @@ type GroupUpsert struct {
 // Accrual is one metered request. Fields already carry the cost beside the counters; Cost is
 // repeated so the store can move the holder's lifetime spend without reading the map back.
 type Accrual struct {
-	Prefix string
-	Fields map[string]int64
-	Cost   int64
+	// ID is the request id: what makes a spooled accrual's replay land once.
+	ID     string           `json:"id"`
+	Prefix string           `json:"prefix"`
+	Fields map[string]int64 `json:"fields"`
+	Cost   int64            `json:"cost"`
 	// User names whose spend moves; blank moves nobody's. Budget is what the holder's balance is
 	// reported against, so the drain carries this store's own view of it.
-	User   string
-	Budget int64
+	User   string `json:"user"`
+	Budget int64  `json:"budget"`
 }
 
 // The state-push shapes (plan_agent_state_sync.md). A nil section is untouched; a present one is

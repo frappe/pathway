@@ -76,6 +76,8 @@ func diff(previous, next Resolved) []string {
 	add("lame_duck", previous.LameDuck != next.LameDuck)
 	add("upgrade_timeout", previous.UpgradeTimeout != next.UpgradeTimeout)
 	add("usage_retention", previous.UsageRetention != next.UsageRetention)
+	add("usage_spool", previous.UsageSpool != next.UsageSpool)
+	add("usage_spool_max_bytes", previous.UsageSpoolMaxBytes != next.UsageSpoolMaxBytes)
 	add("maintenance", previous.Maintenance != next.Maintenance)
 	return changed
 }

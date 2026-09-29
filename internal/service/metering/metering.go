@@ -14,8 +14,9 @@ import (
 
 // Report is one finished request, as the proxy saw it.
 type Report struct {
-	Prefix string // API Key doc name — which bucket this accrues to
-	Model  string // from the request body; buckets per-model usage
+	RequestID string // the id the gateway stamped: what makes a spooled replay land once
+	Prefix    string // API Key doc name — which bucket this accrues to
+	Model     string // from the request body; buckets per-model usage
 	// Deployment is which placement actually served it. On a direct route the gateway already
 	// knows; on an ingress route only the ingress does, and it says so in a response header.
 	Deployment string
@@ -42,6 +43,8 @@ type Service struct {
 	health repository.Health
 	log    *slog.Logger
 	warned sync.Map // models whose cache buckets were once seen exceeding the prompt
+	// Spool keeps what the store refused, for replay once it answers. Nil keeps nothing.
+	Spool *Spool
 }
 
 func New(usage repository.Usage, health repository.Health, log *slog.Logger) *Service {
@@ -64,12 +67,15 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 		}
 	}
 	cost := PricedFields(fields, rep.Pricing)
-	accrual := repository.Accrual{Prefix: rep.Prefix, Fields: fields, Cost: cost}
+	accrual := repository.Accrual{ID: rep.RequestID, Prefix: rep.Prefix, Fields: fields, Cost: cost}
 	if rep.Prepaid {
 		accrual.User, accrual.Budget = rep.User, rep.Budget
 	}
 	if err := s.usage.Accrue(ctx, accrual); err != nil {
-		s.log.Error("usage not recorded", "prefix", rep.Prefix, "model", rep.Model, "err", err)
+		s.log.Error("usage not recorded; spooled", "prefix", rep.Prefix, "model", rep.Model, "err", err)
+		if s.Spool != nil {
+			s.Spool.Add(accrual)
+		}
 	}
 }
 

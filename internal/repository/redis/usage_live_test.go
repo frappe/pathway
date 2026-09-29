@@ -198,3 +198,35 @@ func TestAdjustSpentOnRealRedis(t *testing.T) {
 		t.Error("user:GU-ghost was created")
 	}
 }
+
+// A replay lands like an accrue, once per request id: the second replay of the same id moves nothing.
+func TestReplayLandsOncePerRequestAgainstRealRedis(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	bucket := domain.BucketOf("GU-1")
+	push := repository.StatePush{Users: map[string]repository.UserBucket{bucket: {
+		Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Prepaid: true, Budget: 1_000}},
+	}}}
+	if _, err := state.Apply(ctx, push); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	usage := client.Store().Usage
+	if err := usage.Ping(ctx); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	accrual := liveAccrual("replayed", "GU-1", 250)
+	accrual.ID = "rid-live-1"
+	for i, want := range []bool{true, false} {
+		landed, err := usage.Replay(ctx, accrual)
+		if err != nil || landed != want {
+			t.Fatalf("replay %d = %v, %v; want %v", i, landed, err, want)
+		}
+	}
+	h, _ := client.rdb.HGetAll(ctx, "usage:replayed").Result()
+	if h["request_count"] != "1" || h["user_spent"] != "250" {
+		t.Errorf("usage:replayed = %v, want one request and 250 spent", h)
+	}
+	if ttl, _ := client.rdb.TTL(ctx, "accrued:rid-live-1").Result(); ttl <= 0 {
+		t.Errorf("marker ttl = %v, want a week", ttl)
+	}
+}

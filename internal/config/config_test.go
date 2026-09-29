@@ -235,5 +235,7 @@ func sameResolved(a, b Resolved) bool {
 		a.DrainTimeout == b.DrainTimeout &&
 		a.LameDuck == b.LameDuck &&
 		a.UpgradeTimeout == b.UpgradeTimeout &&
-		a.UsageRetention == b.UsageRetention
+		a.UsageRetention == b.UsageRetention &&
+		a.UsageSpool == b.UsageSpool &&
+		a.UsageSpoolMaxBytes == b.UsageSpoolMaxBytes
 }

@@ -46,6 +46,18 @@ end
 // KEYS[1] usage:<prefix>, KEYS[2] user:<name> (absent = no holder)
 var accrueScript = redis.NewScript(accrueBody + `return accrue(KEYS[1], KEYS[2])`)
 
+// replayScript is accrue behind a once-per-request marker, kept a week: a spool pass that dies
+// after landing a line lands it again next pass, and the marker makes that a no-op. → -1 when
+// the marker was already there.
+//
+// KEYS[1] accrued:<request id>, KEYS[2] usage:<prefix>, KEYS[3] user:<name> (absent = no holder)
+var replayScript = redis.NewScript(accrueBody + `
+if not redis.call('SET', KEYS[1], '1', 'NX', 'EX', 604800) then
+  return -1
+end
+accrue(KEYS[2], KEYS[3])
+return 1`)
+
 func accrueArgs(a repository.Accrual) []any {
 	args := []any{a.Cost, a.Budget}
 	for field, n := range a.Fields {
@@ -64,6 +76,20 @@ func (u usage) Accrue(ctx context.Context, a repository.Accrual) error {
 	}
 	return accrueScript.Run(ctx, u.rdb, keys, accrueArgs(a)...).Err()
 }
+
+func (u usage) Replay(ctx context.Context, a repository.Accrual) (bool, error) {
+	if a.Prefix == "" || len(a.Fields) == 0 {
+		return false, nil
+	}
+	keys := []string{"accrued:" + a.ID, "usage:" + a.Prefix}
+	if a.User != "" {
+		keys = append(keys, "user:"+a.User)
+	}
+	landed, err := replayScript.Run(ctx, u.rdb, keys, accrueArgs(a)...).Int()
+	return landed == 1, err
+}
+
+func (u usage) Ping(ctx context.Context) error { return u.rdb.Ping(ctx).Err() }
 
 // A counter set aside lives under drained:<id>:<prefix>, and "<id>:<prefix>" sits in drain:unacked
 // until the control plane acknowledges it. A drain id carries no ':', so the first ':' splits it.

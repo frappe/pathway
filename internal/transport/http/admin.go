@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"github.com/phot0n/pathway/internal/service/metering"
 	"net/http"
 	"strings"
 
@@ -253,15 +254,21 @@ func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusInternalServerError, "usage store error")
 		return
 	}
-	respond.JSON(w, map[string]any{"drains": drains})
+	answer := map[string]any{"drains": drains}
+	if spool := s.spool(); spool != nil {
+		// Lines the store kept refusing, for the control plane to land or record as stuck.
+		answer["dead"], answer["spool"] = spool.Dead(), spool.Stats()
+	}
+	respond.JSON(w, answer)
 }
 
-// POST /grove-admin/usage/ack {"acks": {"<drain id>": ["<prefix>", ...]}} — the control plane has
-// committed these keys. Each is kept for the retention window, then expires. A pair not waiting
+// POST /grove-admin/usage/ack {"acks": {"<drain id>": ["<prefix>", ...]}, "dead": ["<request id>"]}
+// — the control plane has committed these keys, and recorded these dead spool lines. Each is kept for the retention window, then expires. A pair not waiting
 // is a no-op, so a retried ack is harmless.
 func (s *Server) handleAdminUsageAck(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Acks map[string][]string `json:"acks"`
+		Dead []string            `json:"dead"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -270,6 +277,14 @@ func (s *Server) handleAdminUsageAck(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "usage store error")
 		return
+	}
+	if spool := s.spool(); spool != nil && len(body.Dead) > 0 {
+		forgot, err := spool.Forget(body.Dead)
+		if err != nil {
+			respond.Error(w, http.StatusInternalServerError, "usage spool error")
+			return
+		}
+		count += forgot
 	}
 	respond.JSON(w, map[string]any{"ok": true, "count": count})
 }
@@ -335,4 +350,12 @@ func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
 		return false
 	}
 	return true
+}
+
+// spool is the usage spool, or nil on a box that keeps none.
+func (s *Server) spool() *metering.Spool {
+	if s.metering == nil {
+		return nil
+	}
+	return s.metering.Spool
 }
