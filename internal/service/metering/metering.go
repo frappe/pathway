@@ -84,9 +84,10 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 // UsageFields is the whole accounting rule, pure so it is testable without a store. Each metric is
 // written flat and, when known, as m:<metric>:<model> and m:<metric>:<deployment> in the SAME hash,
 // so one drain carries aggregate and breakdown. Zero values are skipped. Beside the display fields
-// it emits the seven counters the control plane prices, the prompt split into plain, cached,
-// written and audio. trusted is false when the cache buckets exceeded the prompt: the whole prompt is then
-// plain, since cache credit is the one thing such a response cannot be trusted on.
+// it emits the counters the control plane prices, the prompt split into plain, cached, written and
+// audio. A prompt above 272k tokens is counted under the above-272k counters instead, whatever
+// the pricing. trusted is false when the cache buckets exceeded the prompt: the whole prompt is
+// then plain, since cache credit is the one thing such a response cannot be trusted on.
 func UsageFields(rep Report) (fields map[string]int64, trusted bool) {
 	model := strings.TrimSpace(rep.Model)
 	deployment := strings.TrimSpace(rep.Deployment)
@@ -123,12 +124,18 @@ func UsageFields(rep Report) (fields map[string]int64, trusted bool) {
 	}
 	// Audio is billed out of what the cache left: a cached audio token is credited, not billed twice.
 	audio := max(0, min(u.Audio, u.Prompt-u.Cached-u.CacheWrite))
+	counter := func(base, longContext string) string {
+		if u.Prompt > domain.LongContextTokens {
+			return longContext
+		}
+		return base
+	}
 	bump("prompt_tokens", int64(u.Prompt))
-	bump("completion_tokens", int64(u.Completion))
+	bump(counter("completion_tokens", "completion_tokens_above_272k"), int64(u.Completion))
 	bump("total_tokens", int64(u.Total))
-	bump("input_tokens", int64(u.Prompt-u.Cached-u.CacheWrite-audio))
-	bump("cached_tokens", int64(u.Cached))
-	bump("cache_write_tokens", int64(u.CacheWrite-u.CacheWrite1h))
+	bump(counter("input_tokens", "input_tokens_above_272k"), int64(u.Prompt-u.Cached-u.CacheWrite-audio))
+	bump(counter("cached_tokens", "cached_tokens_above_272k"), int64(u.Cached))
+	bump(counter("cache_write_tokens", "cache_write_tokens_above_272k"), int64(u.CacheWrite-u.CacheWrite1h))
 	bump("cache_write_1h_tokens", int64(u.CacheWrite1h))
 	bump("audio_tokens", int64(audio))
 	bump("audio_seconds", int64(u.Seconds))

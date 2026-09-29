@@ -292,6 +292,76 @@ func TestANoReplica503DoesNotCountAgainstTheTarget(t *testing.T) {
 	}
 }
 
+const longUsage = `{"usage":{"prompt_tokens":300000,"completion_tokens":1000,"total_tokens":301000,` +
+	`"prompt_tokens_details":{"cached_tokens":280000}}}`
+
+// A prompt above 272k is counted under the above-272k counters and not the base ones, and charged
+// at their rates.
+func TestAPromptAbove272kIsCountedAndChargedApart(t *testing.T) {
+	pricing := &domain.Pricing{ID: "a1b2c3", Rates: map[string]int64{
+		"input_tokens": 2.5e9, "cached_tokens": 0.25e9, "completion_tokens": 15e9,
+		"input_tokens_above_272k": 5e9, "cached_tokens_above_272k": 0.5e9, "completion_tokens_above_272k": 22.5e9,
+	}}
+	fields, _ := UsageFields(Report{Model: "gpt", Usage: longUsage, Pricing: pricing})
+	if cost := PricedFields(fields, pricing); cost != 262_500_000 {
+		t.Errorf("cost = %d, want 262500000", cost)
+	}
+	for field, want := range map[string]int64{
+		"prompt_tokens": 300000, "total_tokens": 301000,
+		"input_tokens_above_272k": 20000, "m:cached_tokens_above_272k:gpt": 280000,
+		"p:a1b2c3:input_tokens_above_272k": 20000, "p:a1b2c3:cached_tokens_above_272k": 280000,
+		"p:a1b2c3:completion_tokens_above_272k": 1000,
+		"p:a1b2c3:request_count":                1, "p:a1b2c3:cost": 262_500_000,
+	} {
+		if fields[field] != want {
+			t.Errorf("%s = %d, want %d", field, fields[field], want)
+		}
+	}
+	for _, base := range []string{"input_tokens", "cached_tokens", "completion_tokens"} {
+		for _, field := range []string{base, "m:" + base + ":gpt", "p:a1b2c3:" + base} {
+			if _, present := fields[field]; present {
+				t.Errorf("%s written for a prompt above 272k", field)
+			}
+		}
+	}
+}
+
+// The counters do not depend on the pricing: with no above-272k rates they are charged at the
+// base rates, and an unpriced route counts them the same.
+func TestAbove272kIsChargedAtTheBaseRatesWithoutItsOwn(t *testing.T) {
+	pricing := &domain.Pricing{ID: "base", Rates: map[string]int64{
+		"input_tokens": 2.5e9, "cached_tokens": 0.25e9, "completion_tokens": 15e9,
+	}}
+	fields, _ := UsageFields(Report{Model: "gpt", Usage: longUsage, Pricing: pricing})
+	if cost := PricedFields(fields, pricing); cost != 135_000_000 {
+		t.Errorf("cost = %d, want 135000000", cost)
+	}
+	if fields["p:base:input_tokens_above_272k"] != 20000 || fields["p:base:cached_tokens_above_272k"] != 280000 {
+		t.Errorf("tags = %v", fields)
+	}
+	unpriced, _ := UsageFields(Report{Model: "gpt", Usage: longUsage})
+	for _, got := range []map[string]int64{fields, unpriced} {
+		if got["input_tokens_above_272k"] != 20000 || got["completion_tokens_above_272k"] != 1000 {
+			t.Errorf("counters = %v", got)
+		}
+		if _, present := got["input_tokens"]; present {
+			t.Error("input_tokens written for a prompt above 272k")
+		}
+	}
+}
+
+// Strictly past: a prompt of exactly 272k is counted under the base counters.
+func TestAPromptOfExactly272kIsNotAbove(t *testing.T) {
+	usage := `{"usage":{"prompt_tokens":272000,"completion_tokens":10,"total_tokens":272010}}`
+	fields, _ := UsageFields(Report{Model: "gpt", Usage: usage})
+	if fields["input_tokens"] != 272000 || fields["completion_tokens"] != 10 {
+		t.Errorf("counters = %v", fields)
+	}
+	if _, present := fields["input_tokens_above_272k"]; present {
+		t.Error("counted above 272k at exactly 272k")
+	}
+}
+
 // The first usage line carries what the last one left out; one with nothing to read is ignored.
 func TestUsageFieldsMergesTheFirstUsageLine(t *testing.T) {
 	start := `data: {"type":"message_start","message":{"usage":{"input_tokens":66,"cache_read_input_tokens":2,` +
@@ -311,5 +381,32 @@ func TestUsageFieldsMergesTheFirstUsageLine(t *testing.T) {
 	fields, _ = UsageFields(Report{Model: "gpt", UsageStart: null, Usage: "data: " + openAIUsage})
 	if fields["prompt_tokens"] != 100 || fields["total_tokens"] != 120 {
 		t.Errorf("a null first line moved the counts: %v", fields)
+	}
+}
+
+// A cache write is part of the prompt that decides, and has an above-272k counter of its own.
+func TestAPromptAbove272kCountsItsCacheWritesApart(t *testing.T) {
+	usage := `{"usage":{"prompt_tokens":300000,"completion_tokens":1000,"total_tokens":301000,` +
+		`"prompt_tokens_details":{"cached_tokens":200000,"cache_write_tokens":80000}}}`
+	pricing := &domain.Pricing{ID: "w1", Rates: map[string]int64{
+		"input_tokens": 2.5e9, "cached_tokens": 0.25e9, "cache_write_tokens": 3.125e9, "completion_tokens": 15e9,
+		"input_tokens_above_272k": 5e9, "cached_tokens_above_272k": 0.5e9,
+		"cache_write_tokens_above_272k": 6.25e9, "completion_tokens_above_272k": 22.5e9,
+	}}
+	fields, trusted := UsageFields(Report{Model: "gpt", Usage: usage, Pricing: pricing})
+	if cost := PricedFields(fields, pricing); !trusted || cost != 722_500_000 {
+		t.Errorf("trusted %v, cost = %d, want 722500000", trusted, cost)
+	}
+	for field, want := range map[string]int64{
+		"cache_write_tokens_above_272k": 80000, "m:cache_write_tokens_above_272k:gpt": 80000,
+		"p:w1:input_tokens_above_272k": 20000, "p:w1:cached_tokens_above_272k": 200000,
+		"p:w1:cache_write_tokens_above_272k": 80000,
+	} {
+		if fields[field] != want {
+			t.Errorf("%s = %d, want %d", field, fields[field], want)
+		}
+	}
+	if _, present := fields["cache_write_tokens"]; present {
+		t.Error("cache_write_tokens written for a prompt above 272k")
 	}
 }

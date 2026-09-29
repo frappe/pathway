@@ -49,3 +49,45 @@ func TestPricedCountersMatchTheDivisors(t *testing.T) {
 		}
 	}
 }
+
+// An above-272k counter is charged at its own rate, or at its base counter's when the pricing
+// holds none for it.
+func TestRate(t *testing.T) {
+	rates := map[string]int64{
+		"input_tokens": 2.5e9, "input_tokens_above_272k": 5e9, "cached_tokens": 0.25e9,
+		"completion_tokens": 15e9, "completion_tokens_above_272k": 0,
+	}
+	cases := []struct {
+		name    string
+		counter string
+		rates   map[string]int64
+		want    int64
+	}{
+		{"its own rate", "input_tokens_above_272k", rates, 5e9},
+		{"none of its own: its base counter's", "cached_tokens_above_272k", rates, 0.25e9},
+		{"a rate of 0 is a rate", "completion_tokens_above_272k", rates, 0},
+		{"a base counter has nothing to fall back to", "audio_tokens", rates, 0},
+		{"no rates at all", "input_tokens_above_272k", nil, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Rate(tc.counter, tc.rates); got != tc.want {
+				t.Fatalf("Rate = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// Input and completion at their above-272k rates; cached has none, so at its base rate.
+func TestCostAbove272k(t *testing.T) {
+	rates := map[string]int64{
+		"input_tokens": 2.5e9, "cached_tokens": 0.25e9, "completion_tokens": 15e9,
+		"input_tokens_above_272k": 5e9, "completion_tokens_above_272k": 22.5e9,
+	}
+	counts := map[string]int64{
+		"input_tokens_above_272k": 20000, "cached_tokens_above_272k": 280000, "completion_tokens_above_272k": 1000,
+	}
+	if got := Cost(counts, rates); got != 100_000_000+70_000_000+22_500_000 {
+		t.Errorf("Cost = %d", got)
+	}
+}
