@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -150,7 +151,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			if resp.StatusCode == http.StatusSwitchingProtocols {
 				return nil
 			}
-			tee = newUsageTee(resp.Body)
+			tee = newUsageTee(resp.Body, isEventStream(resp))
 			resp.Body = tee
 			if swap.active() {
 				// The tee stays innermost so usage is scraped off the raw upstream bytes. The two
@@ -177,6 +178,13 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	}
 
 	reverse.ServeHTTP(w, r)
+}
+
+// isEventStream reports whether the upstream answered with server-sent events, which is what
+// decides how the usage is read out of the body.
+func isEventStream(resp *http.Response) bool {
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	return mediaType == "text/event-stream"
 }
 
 // transportFor keeps one transport per target host and verification setting, so connections are

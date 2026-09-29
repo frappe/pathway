@@ -5,24 +5,29 @@ import (
 	"io"
 )
 
-// carryLimit bounds the partial line held across reads — a single huge non-streaming body. Past it
-// the tail is kept, because the usage object is at the end of it and domain.ParseUsage reads it out
-// of a line cut at the front. scan re-copies the carry on every Read, so raise this only after that.
+// carryLimit bounds what is held across reads — a partial line of a stream, or a body that is one
+// document. Past it the tail is kept, because the usage object is at the end of it and
+// domain.ParseUsage reads it out of a document cut at the front. scan re-copies the carry on every
+// Read, so raise this only after that.
 const carryLimit = 1 << 20
 
-// usageTee keeps the last newline-delimited line containing "usage" — the final frame of a stream,
-// or a whole non-streaming body — and the first, when there is more than one: an Anthropic stream
-// reports the prompt on its first event and the output on its last. It reads what it is already
-// copying and writes nothing back, so the stream reaches the client byte-for-byte and on time.
-// That property is the contract.
+// usageTee keeps what a response says about usage, read two ways. An event stream is read by the
+// line: the last line containing "usage", and the first when there is more than one, since an
+// Anthropic stream reports the prompt on its first event and the output on its last. Any other
+// body is one document and is kept whole: a vendor may print it over many lines, and the line that
+// names "usage" then holds none of it. It reads what it is already copying and writes nothing
+// back, so the response reaches the client byte-for-byte and on time. That property is the contract.
 type usageTee struct {
-	body  io.ReadCloser
-	carry []byte
-	first []byte
-	line  []byte
+	body   io.ReadCloser
+	stream bool
+	carry  []byte
+	first  []byte
+	line   []byte
 }
 
-func newUsageTee(body io.ReadCloser) *usageTee { return &usageTee{body: body} }
+func newUsageTee(body io.ReadCloser, stream bool) *usageTee {
+	return &usageTee{body: body, stream: stream}
+}
 
 func (t *usageTee) Read(p []byte) (int, error) {
 	n, err := t.body.Read(p)
@@ -54,7 +59,7 @@ func (t *usageTee) scan(chunk []byte) {
 		data = append(t.carry, chunk...)
 		t.carry = nil
 	}
-	for {
+	for t.stream {
 		newline := bytes.IndexByte(data, '\n')
 		if newline < 0 {
 			break

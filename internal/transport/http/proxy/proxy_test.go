@@ -78,13 +78,13 @@ func (deadClient) Write([]byte) (int, error) { return 0, errors.New("client gone
 
 func (d deadClient) Unwrap() http.ResponseWriter { return d.ResponseRecorder }
 
-// A non-streaming body is one line, and past carryLimit the tee keeps only its tail. The usage
-// object is in that tail, so the request must still meter — under the limit and over it.
+// Past carryLimit the tee keeps only the tail of a body. The usage object is in that tail, so the
+// request must still meter — under the limit and over it.
 func TestUsageSurvivesABodyPastTheCarryLimit(t *testing.T) {
 	for name, padding := range map[string]int{"under": carryLimit / 2, "over": carryLimit * 2} {
 		body := `{"choices":[{"text":"` + strings.Repeat("a", padding) +
 			`"}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`
-		tee := newUsageTee(io.NopCloser(strings.NewReader(body)))
+		tee := newUsageTee(io.NopCloser(strings.NewReader(body)), false)
 		if _, err := io.Copy(io.Discard, tee); err != nil {
 			t.Fatal(err)
 		}
@@ -135,11 +135,12 @@ func TestTheFirstAndLastUsageLinesAreBothKept(t *testing.T) {
 		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
 		"event: message_delta\n" +
 		`data: {"type":"message_delta","usage":{"output_tokens":26}}` + "\n\n"
-	for name, tc := range map[string]struct{ body, start, last string }{
-		"split": {stream, `"input_tokens":66`, `"output_tokens":26`},
-		"whole": {`{"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`, "", `"total_tokens":9`},
+	for name, tc := range map[string]struct{ contentType, body, start, last string }{
+		"split": {"text/event-stream; charset=utf-8", stream, `"input_tokens":66`, `"output_tokens":26`},
+		"whole": {"application/json", `{"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`, "", `"total_tokens":9`},
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", tc.contentType)
 			_, _ = io.WriteString(w, tc.body)
 		}))
 		t.Cleanup(server.Close)
@@ -167,5 +168,39 @@ func TestTheUpstreamIsNeverAskedToCompress(t *testing.T) {
 	New(Options{}, quiet()).Forward(httptest.NewRecorder(), r, server.URL, false, ModelSwap{}, &out)
 	if out.Status != http.StatusOK || asked != "" {
 		t.Errorf("status %d, upstream saw Accept-Encoding %q", out.Status, asked)
+	}
+}
+
+// OpenAI prints a body that is not streamed over many lines, as measured on the wire: the line
+// that names "usage" holds none of it. The body is one document and is read as one.
+func TestUsageIsReadOutOfABodyPrintedOverManyLines(t *testing.T) {
+	body := "{\n  \"id\": \"chatcmpl-1\",\n  \"object\": \"chat.completion\",\n  \"choices\": [\n    {\n" +
+		"      \"message\": {\n        \"content\": \"the \\\"usage\\\" of a word\"\n      }\n    }\n  ],\n" +
+		"  \"usage\": {\n    \"prompt_tokens\": 2328,\n    \"completion_tokens\": 16,\n    \"total_tokens\": 2344,\n" +
+		"    \"prompt_tokens_details\": {\n      \"cached_tokens\": 0,\n      \"cache_write_tokens\": 2325\n    }\n  },\n" +
+		"  \"system_fingerprint\": null\n}\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(server.Close)
+
+	out := forward(New(Options{}, quiet()), server.URL, false)
+	u, ok := domain.ParseUsage([]byte(out.Usage))
+	if !ok || u.Prompt != 2328 || u.Completion != 16 || u.CacheWrite != 2325 || out.UsageStart != "" {
+		t.Errorf("got %+v ok=%v start=%q", u, ok, out.UsageStart)
+	}
+}
+
+// The same printed body, too long to hold whole: its tail still carries the usage.
+func TestUsageIsReadOutOfTheTailOfALongPrintedBody(t *testing.T) {
+	body := "{\n  \"choices\": [\n    {\n      \"text\": \"" + strings.Repeat("a\\n", carryLimit) + "\"\n    }\n  ],\n" +
+		"  \"usage\": {\n    \"prompt_tokens\": 7,\n    \"completion_tokens\": 2,\n    \"total_tokens\": 9\n  }\n}\n"
+	tee := newUsageTee(io.NopCloser(strings.NewReader(body)), false)
+	if _, err := io.Copy(io.Discard, tee); err != nil {
+		t.Fatal(err)
+	}
+	if u, ok := domain.ParseUsage([]byte(tee.Usage())); !ok || u.Total != 9 || len(tee.Usage()) > carryLimit {
+		t.Errorf("got %+v ok=%v from %d bytes", u, ok, len(tee.Usage()))
 	}
 }
