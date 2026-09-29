@@ -19,8 +19,8 @@ never registered, so no handler on that box could read a key store even if one w
 
 1. Terminates TLS on `:443` with the fleet wildcard, reloading it from disk when it changes, and
    redirects `:80`.
-2. Resolves the caller — bearer → key → user → groups — and refuses on the credential, the monthly
-   budget, or the model grant.
+2. Resolves the caller — bearer → key → user → groups — and refuses on the credential, the credit
+   balance, or the model grant.
 3. Picks an engine: region tier, capacity gate, session stickiness, least in flight.
 4. Rewrites the request body where the endpoint's schema allows it, and swaps the client's key for
    the engine's own.
@@ -44,8 +44,8 @@ about to change something, skip to *How to do things* and *Things worth knowing*
                     │  Grove (Frappe control plane)                │
                     │  keys · users · groups · models · placements │
                     └───────┬──────────────────────────▲───────────┘
-   POST /grove-admin/state  │                          │  GET /grove-admin/usage
-   every 2 min (hash-gated) │                          │  every 2 min (drain)
+   POST /grove-admin/state  │                          │  GET /grove-admin/usage + ack
+   every 2 min (hash-gated) │                          │  hourly (drain)
                             ▼                          │
    client ──► latency DNS ──► ┌───────────────────────────────────┐
               api.<zone>      │  GATEWAY SERVER   (tenant plane)  │
@@ -274,13 +274,13 @@ proxy ──► engine (or ingress ──► engine)
 | Stage | Does |
 |---|---|
 | `recover` | panic → 500, so nothing below can drop a connection |
-| `accesslog` | times the request, writes the one durable line per request |
+| `accesslog` | mints the request id, times the request, writes the one durable line per request |
 | `drain` | while shutting down: 503 + `Retry-After` + "gateway is restarting" |
 | `auth` | bearer → key → user → groups, once, into the request state |
-| `quota` | the monthly budget flag the control plane pushed → 429 |
+| `quota` | the credit flag the control plane pushed, or a prepaid balance spent → 402 |
 | `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here |
 | `modelaccess` | `CanUse` → 403 |
-| `route` | sticky / region / capacity / least-in-flight; claims an in-flight slot; mints the request id |
+| `route` | sticky / region / capacity / least-in-flight; claims an in-flight slot |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |
 | `transform` | the registered body rewrites; re-encodes only if one changed something |
 | `upstreamauth` | swaps in the engine's internal key, sets the forwarding and ingress headers |
@@ -350,7 +350,7 @@ What each layer contributes, for one `POST /v1/chat/completions`:
 | 6 | `middleware/body` | bounded read, JSON decode, model out |
 | 7 | `service/routing` | `Pick` — sticky read, in-flight counts, health |
 | 8 | `domain` | `PickRoute` — pure again; the whole selection rule |
-| 9 | `service/routing` | claim the slot, mint the request id |
+| 9 | `service/routing` | claim the slot |
 | 10 | `middleware/transform` | body rewrites, re-encode if changed |
 | 11 | `transport/http/proxy` | forward, stream back, scrape the usage frame |
 | 12 | `middleware/meter` (deferred) | release the slot, record usage and outcome |
@@ -409,6 +409,15 @@ is broken. A 503 carrying `X-Grove-Reason: no-replica` means an ingress answered
 one model has nowhere to go behind it — counting that would let a single unplaced model pull an
 ingress out of rotation for every other model on it.
 
+A client that left before the upstream answered is not a failure either. The hop has no status,
+which would otherwise read as a dead connection, and three impatient clients in a row would take
+a healthy model away from everyone for a minute. It moves the count in neither direction.
+
+An upstream that answered and then did not finish is a failure, whatever status it had sent: its
+body broke off (`cut=upstream`), or it went silent for the read timeout (`cut=upstream_idle`). A
+client leaving in the middle of a good answer is not, and clears the count like any served request.
+One that ends a stream early but cleanly cannot be told from one that finished, and counts as served.
+
 This is cheaper than active probing and strictly better informed: a probe tests a path no customer
 is on.
 
@@ -429,7 +438,7 @@ that person holds.
 | Gate | Status | Why in this position |
 |---|---|---|
 | key is `active` | 401 | Checked first: a revoked key is 401 even for a holder who is also over quota, because the key is the thing that is wrong |
-| holder not over budget | 429 | A pushed flag, not a counter — the gateway keeps no usage state of its own |
+| holder has credit | 402 | `limited` is a pushed flag; `prepaid && spent >= budget` is this Redis's own counter against the amount the user loaded. Either → 402 |
 | `CanUse(model)` | 403 | |
 
 `CanUse` is the whole access rule and fails closed:
@@ -445,10 +454,10 @@ something the inference path would refuse.
 
 ### Rate limiting
 
-There is exactly one limiter, and it is not in this process: a per-user **monthly token budget**.
-The control plane sums `total_tokens - cached_tokens` when it pulls usage, flips `limited` on the
-user, and pushes it. The gateway honours the flag and keeps no counters. Prefix caching is why the
-subtraction exists — billing flat tokens when most of a prompt was a cache hit is a lie.
+Two credit gates, both read off the user record before the body is, both answering 402
+`credit balance exhausted`. The control plane's: its own balance priced from the pull, flipped as
+`limited` and pushed. This box's own: `prepaid && spent >= budget`, where `spent` is the one counter
+this process keeps (see *The records themselves*). A client cannot tell which one refused it.
 
 ---
 
@@ -457,11 +466,27 @@ subtraction exists — billing flat tokens when most of a prompt was a cache hit
 One usage record per request, written in a single transaction so a control-plane drain never sees
 half of one.
 
-**Where the numbers come from.** The response's last newline-delimited line containing `"usage"` —
-the final frame of an OpenAI stream, or the whole of a non-streaming body. Streaming requests only
-have one because the `streamusage` transform forces `stream_options.include_usage` on the way in.
-A line past 1 MiB is held by its tail only, which is no longer a document, so `ParseUsage` falls
-back to the last `"usage":` object in it — a long body, or one carrying logprobs, still meters.
+**Where the numbers come from.** The response body, read one of two ways by its `Content-Type`:
+
+- **An event stream** (`text/event-stream`) is read by the line: the last line containing
+  `"usage"`, the final frame of an OpenAI stream. Streaming requests only have one because the
+  `streamusage` transform forces `stream_options.include_usage` on the way in.
+- **Any other body** is one document and is kept whole. It is never split into lines: OpenAI
+  prints a body that is not streamed over many lines, and the line that names `"usage"` is then
+  `  "usage": {` and holds none of it.
+
+Either way, what is held past 1 MiB is its tail only, which is no longer a document, so
+`ParseUsage` falls back to the last `"usage":` object in it — a long body, or one carrying
+logprobs, still meters.
+
+The first such line is kept beside the last, because an Anthropic stream splits its counts:
+`message_start` carries the prompt and its cache buckets, `message_delta` the output. The two are
+merged field by field, the larger winning (`domain.MergeUsage`), and `Total` is raised to
+`Prompt + Completion`. A first line with nothing to read, such as OpenAI's `"usage":null` chunks,
+is ignored. First and last only: a vendor that splits three ways needs a per-event merge.
+
+The upstream is never asked to compress: `Accept-Encoding` is dropped on the way out, since a
+gzip body is one the tee cannot read and the request would meter as zero tokens.
 
 **Two engine shapes, one meaning.** vLLM answers OpenAI-shaped on `/v1/chat/completions` and
 Anthropic-shaped on `/v1/messages`, and they disagree about what "input tokens" means:
@@ -471,6 +496,7 @@ Anthropic-shaped on `/v1/messages`, and they disagree about what "input tokens" 
 | prompt | `prompt_tokens` — **includes** cache | `input_tokens` — **excludes** it |
 | cached | `prompt_tokens_details.cached_tokens` | `cache_read_input_tokens` |
 | total | `total_tokens` | absent |
+| written | `prompt_tokens_details.cache_write_tokens` — **inside** the prompt | `cache_creation_input_tokens`, the hour part under `cache_creation.ephemeral_1h_input_tokens` |
 
 Both are normalised to: `Prompt` = the full input processed, `Total` = `Prompt + Completion`,
 `Cached ⊆ Prompt`. Cache **creation** is a write, so it lands in `Prompt` but not in `Cached`.
@@ -483,15 +509,60 @@ Billable is then `Total - Cached` on either shape.
 `m:<metric>:<deployment>` — so one drain carries the aggregate and both breakdowns. Zero values are
 skipped entirely; a field that never moved should not appear.
 
+**What gets priced.** Beside the display fields, eleven counters the control plane has a rate for:
+`input_tokens` (prompt − cached − written − audio), `cached_tokens`, `cache_write_tokens` (the
+five-minute writes on the Anthropic shape, every write on the OpenAI one), `cache_write_1h_tokens`,
+`completion_tokens`, `audio_tokens`, `request_count`, and the four above-272k counters below.
+`audio_tokens` is the audio part of the prompt — `prompt_tokens_details.audio_tokens`
+on a chat, `input_token_details.audio_tokens` on a token-shaped transcription — taken out of
+`input_tokens`, and out of what the cache left, so a token bills once. `audio_seconds` is a display
+field, not priced: a transcription's `{"type":"duration","seconds":N}` usage, or the top-level
+`duration` of a `verbose_json` body, which carries no usage at all. A duration-shaped
+transcription, a translation and a realtime session therefore bill `request_count` only. Cache buckets
+that exceed the prompt cannot be credited: the whole prompt bills as plain, logged once per model.
+
+**Above 272k.** A vendor may charge the whole request more once the prompt passes 272 000 tokens.
+Two rules, one on each side, and neither knows the other:
+
+- **Counting.** A request whose prompt — plain, cached, written and audio together — is strictly
+  past `domain.LongContextTokens` is counted under `input_tokens_above_272k`,
+  `cached_tokens_above_272k`, `cache_write_tokens_above_272k` and `completion_tokens_above_272k`
+  **instead of** the four base counters, flat, per model and per pricing alike. The pricing is not
+  consulted. `prompt_tokens` and `total_tokens` hold every request.
+- **Charging** (`domain.Rate`). A counter is charged at its own rate. An above-272k counter the
+  pricing holds no rate for is charged at its base counter's: no `input_tokens_above_272k` rate
+  means the `input_tokens` rate. So a pricing without those rates charges as it always did.
+
+The control plane holds the same table and the same fallback, so both sides price the same
+amounts at the same rates.
+
+**Cost lands with its counters, tagged by the pricing that charged it.** The route carries the
+pricing in force; a price change lands with the push that carries it, and a request is charged by
+the pricing its gateway held. One Lua script per request: HINCRBY every counter, each priced counter again as `p:<pricing id>:<counter>`,
+then `cost` and `p:<pricing id>:cost` — Σ counter × rate, nano-USD, truncated per counter, 0 on an
+unpriced route — then, for a prepaid holder only, `HINCRBY user:<u> spent cost` and `HSET user_spent
+user_balance` (`budget − spent`, negative once overspent; last writer wins) on the usage hash. A free
+holder's usage is counted and priced the same, but their `spent` never moves and the drain carries no
+balance for them, so turning them prepaid later starts them at what they load. The pull prices each
+`p:<pricing id>` group with that same pricing's table, so the two sides can only disagree when they
+hold different rates for one pricing id. A drain therefore never sees a counter without its cost, or a cost without the spend it
+moved. The spend moves only on a holder the control plane has pushed.
+
 ### Correlation
 
-Every admitted request gets `gr-<gateway>-<deployment>-<key prefix>-<32 hex>`, canonical and
-overriding whatever the client sent. vLLM adopts `X-Request-Id` as its own request id and
-OpenAI-aware tooling reads it back, so one grep for it crosses the gateway log, the ingress log and
-the engine log.
+Every request — admitted or refused, a health probe, a scrape, an admin call — gets a `uuid v7`
+where the access line starts: time-ordered, opaque, canonical and overriding whatever the client
+sent. It is answered under both `X-Request-Id` and `Request-Id`, so an OpenAI SDK's and an Anthropic
+SDK's `_request_id` are both ours whatever the route. An ingress adopts the gateway's id rather than
+minting one, and vLLM adopts `X-Request-Id` as its own request id, so one grep for it crosses the
+gateway log, the ingress log and the engine log.
 
-The target names the **Model Deployment**, not the box: one box can serve the same model from two
-deployments, and naming the box makes those two requests indistinguishable.
+Where it went — key, model, deployment, engine, upstream — is on the access line under `rid`, not
+in the id. So is how it ended, as `cut`: `-` for a response that finished, else who ended it —
+`client_left`, `upstream_idle` (silent for the read timeout) or `upstream` (its body broke off).
+An upstream that ends a stream early but cleanly cannot be told from one that finished, and reads
+`-`. On a provider route the vendor's own id is `upstream_rid` on that line and never reaches
+the client; ours never reaches the vendor.
 
 ---
 
@@ -541,6 +612,21 @@ func (alias) Apply(ctx Context, body Body) (bool, error) { … }  // bool = "I c
 Each transform declares its own endpoint gate, so adding one for `/v1/messages` does not mean
 editing a shared check. Return `false` when nothing changed — a body no transform touched is
 forwarded byte-for-byte rather than re-encoded.
+
+Registered is not running: a transform runs only while the `transforms` list names it, and the
+default list is `config.Defaults()`.
+
+**A dropped field is logged for you.** A transform that removes a field just deletes it; the chain
+compares what the caller sent with what is left and writes one Warn per user and field —
+`request field dropped user=… field=… transform=…` — since nothing upstream errors on a field that
+is not there. The name only, never the value. Top-level fields; a rewritten one is not a drop.
+
+| transform | what it does |
+|---|---|
+| `modelmap` | rewrites `model` to the route's `upstream_model` |
+| `streamusage` | forces `stream_options.include_usage` on a streaming completion |
+| `servicetier` | drops a caller's `service_tier` on every hop: it picks the vendor's price class, which is never the caller's to choose |
+| `cachesalt` | prefixes a caller's `cache_salt` with their tenant, strips it on a vendor hop. Not in the default list |
 
 ### Add a storage backend
 
@@ -602,6 +688,9 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
   "drain_timeout": "630s",
   "lame_duck": "5s",
   "upgrade_timeout": "30s",
+  "usage_retention": "168h",
+  "usage_spool": "/var/lib/pathway/usage-spool.jsonl",
+  "usage_spool_max_bytes": 1073741824,
   "maintenance": false
 }
 ```
@@ -612,6 +701,10 @@ Every field is optional; an omitted one keeps its default, and a missing file is
 middleware name → one error line and the running configuration is kept, applied whole or not at all.
 Parsing is strict on purpose: a knob that silently became its default is a knob the operator
 believes they turned.
+
+`upstream_read_timeout` bounds an upstream's silence, not a request's length: the wait for its
+headers, and every wait for more of its body after them. A model that thinks for ten minutes before
+its first token needs it raised; a stream that talks for an hour does not.
 
 `synthetic_session_ttl` is the one worth knowing. `0s` balances every caller that names no session
 of its own; `30m` pins each API key to one engine, which is what a single-placement fleet always
@@ -672,11 +765,15 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | Key | Type | Written by |
 |---|---|---|
 | `key:<sha256(secret)>` | hash | state push, `keys` section |
-| `user:<Grove User>` | hash | state push, `users` section |
+| `user:<Grove User>` | hash | state push, `users` section; `spent` by the gateway |
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
-| `usage:<key prefix>` | hash | the gateway; drained by `GET /grove-admin/usage` |
+| `usage:<key prefix>` | hash | the gateway; set aside by `GET /grove-admin/usage` |
+| `drained:<drain id>:<key prefix>` | hash, kept `usage_retention` once acked | `GET /grove-admin/usage` renames a live counter here |
+| `drain:unacked` | set of `<drain id>:<key prefix>` | every counter set aside and not yet acked |
+| `adjust:<id>` | string, 7 days | `POST /grove-admin/spend-adjust` — ids already applied |
+| `accrued:<request id>` | string, 7 days | the spool's replay — requests already landed from it |
 | `sticky:<session>` | string, 30m | the gateway |
 | `inflight:<engine>` | sorted set, member = request id | the gateway |
 | `health:<target>` | counter, 60s | the gateway |
@@ -706,22 +803,70 @@ Every admin endpoint is gated on `X-Grove-Admin-Token`, compared in constant tim
 `GET /grove-admin/in-flight` is read-only: `{"maintenance": bool, "in_flight": n}`, where
 `in_flight` counts data requests past the `drain` stage, realtime sessions until they close.
 
-`GET /grove-admin/usage` **reads and deletes** in one step. The returned snapshot is the only copy,
-so it never double-counts and a control-plane crash loses at most one cycle.
+`GET /grove-admin/usage[?keys=p1,p2]` answers `{"drains": {"<drain id>": {prefix: hash}}}` and
+deletes nothing. Each live `usage:<prefix>` — every one, or only the listed prefixes, with no SCAN —
+is RENAMEd to `drained:<id>:<prefix>` under a new drain id and added to `drain:unacked`, in one Lua
+call, so a request metered mid-drain lands wholly in the drain or wholly on a fresh counter. The
+answer is every pair still in `drain:unacked` (only the listed prefixes' when `keys` is given),
+old drains included. `POST /grove-admin/usage/ack {"acks": {"<drain id>": [prefix, ...]}}` takes
+the pairs the control plane recorded out of `drain:unacked` and keeps them for `usage_retention`
+(default a week), answering `{"ok": true, "count": n}`; a pair not waiting is a no-op. A key it never
+acks is answered again, under its own id, on every pull, while the rest move on: a control plane
+that failed to record one user loses nothing and holds nobody else back, and one that recorded it
+but lost the ack dedupes on the (drain id, prefix) pair. Nothing live and nothing waiting answers
+`{"drains": {}}`.
+
+**The spool.** A request that finishes while the store is down (new ones already 503 at admission)
+cannot land its usage. It is appended as one JSON line — `{"id": "<request id>", "prefix", "fields",
+"cost", "user", "budget", "at"}` — to `usage_spool` and fsynced. At start and every 5 s while it is
+non-empty the gateway PINGs the store; once it answers, each line is replayed through the accrue
+script behind `SET accrued:<request id> NX EX 604800`, so a pass that dies half way lands nothing
+twice, and the file is rewritten (tmp + rename) with only the lines still failing. A line that fails
+five passes while the store answers is set aside in `<usage_spool>.dead` as `{"id", "line",
+"error"}`; one that does not parse goes there at once. Past `usage_spool_max_bytes` (1 GiB) usage is
+logged and dropped. A store still down counts no tries. Only losing the box's disk loses spooled
+usage.
+
+The pull hands the dead lines over: `GET /grove-admin/usage` also answers `"dead": [{"id", "line",
+"error"}]` and `"spool": {"depth", "replayed", "dropped", "dead"}` (lines waiting now, and counts
+since the process started). The control plane lands or records each dead line and names it in the
+ack — `"dead": ["<request id>", ...]` beside `"acks"` — which removes it; `count` includes them.
+
+`POST /grove-admin/spend-adjust {"user", "delta", "id"}` corrects one holder's `spent` on this store
+by `delta` nano-USD, once per `id` — a retry answers `{"spent", "applied": false}` and moves
+nothing. A holder this store does not hold is a 404; nothing is invented.
 
 ### The records themselves
 
 ```
 key:<sha256(secret)>       status  user  prefix
-user:<Grove User>          email  group (comma list)  allow  deny  limited
+user:<Grove User>          email  group (comma list)  allow  deny  limited  log_payloads  geography
+                           prepaid  budget  spent
 model_group:<Model Group>  models
-usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens
-                           cached_tokens  m:<metric>:<model>  m:<metric>:<deployment>
+usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
+                           input_tokens  cache_write_tokens  cache_write_1h_tokens  audio_tokens
+                           input_tokens_above_272k  cached_tokens_above_272k
+                           cache_write_tokens_above_272k  completion_tokens_above_272k
+                           audio_seconds
+                           cost  user_spent  user_balance
+                           m:<metric>:<model>  m:<metric>:<deployment>
+                           p:<pricing id>:<priced counter>  p:<pricing id>:cost
 ```
 
 `group` / `allow` / `deny` / `models` are comma lists; blank parses to a map that answers false
 to everything, which is the fail-closed default. `group` holds every group the user is in, so a
 name containing a comma would split — Grove refuses one.
+
+`prepaid` / `budget` / `spent` are the credit gate. `budget` is the amount the user loaded — Σ
+their credits, nano-USD — and the same number on every store. `spent` is this Redis's own lifetime
+counter: every metered request of a prepaid holder moves it, a push never does (the push is an HSET
+of the fields it names), and only `spend-adjust` corrects it. This box's balance is `budget − spent`; Grove keeps its
+own from the same credits and audits the two every pull. `prepaid && spent >= budget` → 402 `credit balance exhausted` (`billing_error` on the Anthropic surface), at
+`quota` before the body is read, and `/v1/models` refuses through the same `Evaluate`. `limited`
+is the control plane's verdict and refuses alike. The gate is exact within one store — every
+gateway on it moves the one counter — and eventual across stores, where each box sees only its own
+spend and `limited` from the pull is what stops the rest; the overspend that window allows lands as a
+negative balance on the control plane.
 
 `deploy:<model>` is a JSON array, replaced whole:
 
@@ -734,12 +879,16 @@ name containing a comma would split — Grove refuses one.
   "capacity":     1024,
   "deployment":   "MD-00007",
   "server":       "INF-1",
-  "kind":         "direct"
+  "kind":         "direct",
+  "pricing":      {"id": "mp-a1", "rates": {"input_tokens": 3000000000, "completion_tokens": 15000000000}}
 }]
 ```
 
 `engine_url` is a **base**; the path the client asked for is appended to it. `in_flight` is
 computed here and never pushed — the control plane has no view of what is running right now.
+`pricing` is the Model Pricing in force — its id and its sell price per counter, nano-USD per unit
+(Mtok, minute, request) — stamped on every row of the model. Absent on an unpriced model, and such
+a request costs 0.
 
 A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries three
 more fields:
@@ -802,6 +951,7 @@ closed set we already know, so `ServesRoute` holds it to its dialect's chat path
 | `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` and `/v1/messages/count_tokens` only, keyed by `x-api-key` or a Bearer |
 | `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
+| any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
 | `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |
 
@@ -819,8 +969,12 @@ was unreadable turns one broken dependency into an outage.
 | in-flight counts unreadable | every count reads 0, so the pick degrades to first-healthy. Balancing is an optimisation on a table that is already correct |
 | health counters unreadable | every route stays as the control plane pushed it. Ejection is an optimisation too |
 | sticky read/write fails | one cold prefix cache, not a wrong answer |
-| usage write fails | logged; the request already succeeded and failing it retroactively helps nobody |
+| usage write fails | the request already succeeded, so it is not failed retroactively: its usage goes to the **spool** (below) and lands once the store answers. `spent` did not move either, so the gate runs loose by that request until then |
 | the engine is dead | **502**, and the hop counts against the target — three in a row and it leaves rotation |
+| the client leaves before the upstream answers | the upstream call is cancelled at once; the access line reads **499** `cut=client_left`, and the hop does not count against the target |
+| the client leaves in the middle of a response | the upstream call is cancelled at once; `cut=client_left`. What the upstream had reported by then is metered, the rest is not |
+| the upstream goes silent after its headers | cut after `upstream_read_timeout` of silence, `cut=upstream_idle`; the client's connection is dropped, and the hop counts against the target. A stream that keeps talking is never cut, however long it runs |
+| the upstream's body breaks off | the client's connection is dropped; `cut=upstream`, and the hop counts against the target |
 | every replica is full | **429**, distinct from 503 on purpose: the model is up |
 | the model has no placement | **503** |
 | the control plane is down | nothing happens. The gateway serves the last table it was pushed, indefinitely |
@@ -841,7 +995,9 @@ Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except
 | 401 | no key, unknown key, revoked key | fix the credential |
 | 403 | the key exists but may not use this model | ask for access |
 | 413 | body over `max_body_bytes` | send less |
-| 429 | over monthly budget, **or** every replica at capacity | back off and retry |
+| 402 | out of prepaid credit | top up; nothing to retry |
+| 429 | every replica at capacity | back off and retry |
+| 499 | the client left before the upstream answered. Only ever in the access line: nobody is there to receive it | – |
 | 502 | the engine could not be reached or failed the hop | retry; another replica may take it |
 | 503 | the model has no healthy placement, a store is unreadable, or the gateway is draining or in maintenance | retry with backoff — `Retry-After` is set when draining or in maintenance |
 
