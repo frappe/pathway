@@ -18,9 +18,11 @@ func TestServes(t *testing.T) {
 		{"embedding", "/v1/embeddings", true, ""},
 		{"audio", "/v1/audio/transcriptions", true, ""},
 		{"audio", "/v1/audio/translations", true, ""},
+		{"multimodal", "/v1/audio/transcriptions", true, "a multimodal model takes every input surface"},
+		{"multimodal", "/v1/audio/translations", true, ""},
+		{"multimodal", "/v1/embeddings", true, ""},
 
 		{"text", "/v1/audio/transcriptions", false, "a chat engine would 404 this after a round trip"},
-		{"multimodal", "/v1/audio/transcriptions", false, "multimodal is images, not audio uploads"},
 		{"audio", "/v1/chat/completions", false, "an ASR box cannot hold a conversation"},
 		{"embedding", "/v1/chat/completions", false, ""},
 		{"text", "/v1/embeddings", false, ""},

@@ -6,9 +6,9 @@ var endpointModalities = map[string]map[string]bool{
 	"/v1/chat/completions":     {"text": true, "multimodal": true},
 	"/v1/messages":             {"text": true, "multimodal": true},
 	"/v1/completions":          {"text": true, "multimodal": true},
-	"/v1/embeddings":           {"embedding": true},
-	"/v1/audio/transcriptions": {"audio": true},
-	"/v1/audio/translations":   {"audio": true},
+	"/v1/embeddings":           {"embedding": true, "multimodal": true},
+	"/v1/audio/transcriptions": {"audio": true, "multimodal": true},
+	"/v1/audio/translations":   {"audio": true, "multimodal": true},
 }
 
 // knownModalities is what this build understands. A value outside it comes from a control plane
