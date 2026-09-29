@@ -296,6 +296,22 @@ func TestAClientThatLeftDoesNotCountAgainstTheTarget(t *testing.T) {
 	}
 }
 
+// An upstream that answers 200 and then breaks off or goes silent counts against the target, and
+// does not clear a streak the way a served request does.
+func TestAnUpstreamThatBreaksItsAnswerCountsAgainstTheTarget(t *testing.T) {
+	for _, cut := range []string{domain.CutUpstream, domain.CutUpstreamIdle} {
+		store := memory.New()
+		store.Failures["https://a"] = 1
+		New(store.Repositories().Usage, store.Repositories().Health, quiet()).Record(
+			context.Background(),
+			Report{Prefix: "abc", Target: "https://a", UpstreamStatus: "200", Cut: cut},
+		)
+		if store.Failures["https://a"] != 2 {
+			t.Errorf("%s: failures = %d, want 2", cut, store.Failures["https://a"])
+		}
+	}
+}
+
 // One unplaced model must not take an ingress out of rotation for every other model on it.
 func TestANoReplica503DoesNotCountAgainstTheTarget(t *testing.T) {
 	store := memory.New()

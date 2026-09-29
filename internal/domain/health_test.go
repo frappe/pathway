@@ -17,6 +17,10 @@ func TestWhatCountsAsABrokenHop(t *testing.T) {
 		// Three impatient clients in a row must not retire an upstream that did nothing wrong.
 		{"the client left before any answer", "", "", CutClientLeft, false},
 		{"the client left, and the answer was a bad gateway", "502", "", CutClientLeft, true},
+		{"the client left in the middle of an answer", "200", "", CutClientLeft, false},
+		// A 200 is a promise. An upstream that breaks it is broken, whatever it had sent.
+		{"answered, then broke off", "200", "", CutUpstream, true},
+		{"answered, then went silent", "200", "", CutUpstreamIdle, true},
 		{"bad gateway", "502", "", "", true},
 		{"gateway timeout", "504", "", "", true},
 		{"ingress down", "503", "", "", true},

@@ -31,11 +31,16 @@ const (
 // and one model has nowhere to go, and counting it would eject the ingress for every other model.
 // Nor is a hop the client walked away from before the upstream answered: that says nothing about
 // the upstream, and three impatient clients in a row would otherwise retire a healthy one.
+// An upstream that answered and then broke off or went silent is: the status it had sent by
+// then was a promise it did not keep.
 func IsHopFailure(upstreamStatus, reason, cut string) bool {
 	// A no-replica 503 is the ingress working correctly. Checked before the status, because the
 	// status alone cannot tell it from an ingress that is down.
 	if strings.TrimSpace(reason) == "no-replica" {
 		return false
+	}
+	if cut == CutUpstream || cut == CutUpstreamIdle {
+		return true
 	}
 	status := firstStatus(upstreamStatus)
 	// Blank: no response was recorded. The connection failed or timed out, which is the target's
