@@ -7,7 +7,7 @@ package redis
 
 import (
 	"context"
-	"flag"
+	goflag "flag"
 	"fmt"
 	"testing"
 
@@ -29,11 +29,11 @@ func sibling(t *testing.T, id string) string {
 	return ""
 }
 
-var redisAddr = flag.String("redis", "localhost:6390", "address of a THROWAWAY redis — the test flushes it")
+var redisAddr = goflag.String("redis", "localhost:6390", "address of a THROWAWAY redis — the test flushes it")
 
 func liveStore(t *testing.T) (*Client, repository.State) {
 	t.Helper()
-	client := New(*redisAddr)
+	client := New(*redisAddr, "")
 	ctx := context.Background()
 	if err := client.Ping(ctx); err != nil {
 		t.Skipf("no redis at %s: %v", *redisAddr, err)
