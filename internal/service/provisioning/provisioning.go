@@ -4,7 +4,10 @@ package provisioning
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
+	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/repository"
@@ -88,11 +91,28 @@ func (s *Service) staleModels(ctx context.Context, keep map[string][]domain.Rout
 	return stale, nil
 }
 
-// DrainUsage atomically reads and deletes every live counter, so the snapshot returned is the only
-// copy. No second round trip: a failed insert control-plane-side drops that cycle rather than
-// double-counting it.
-func (s *Service) DrainUsage(ctx context.Context) (map[string]map[string]string, error) {
-	return s.store.Usage.Drain(ctx)
+// DrainUsage sets live counters aside under a new id (only keys' when given) and answers every
+// counter not yet acknowledged. Nothing is deleted until AckUsage, so a key the control plane fails
+// to record comes back under its own id on its next pull.
+func (s *Service) DrainUsage(ctx context.Context, keys []string) (repository.Drains, error) {
+	return s.store.Usage.Drain(ctx, NewDrainID(time.Now()), keys)
+}
+
+// AckUsage says these (drain, prefix) pairs are recorded: kept for retention, then expired.
+func (s *Service) AckUsage(ctx context.Context, acks map[string][]string, retention time.Duration) (int, error) {
+	return s.store.Usage.Ack(ctx, acks, retention)
+}
+
+// AdjustSpent corrects a holder's lifetime spend on this store, once per id.
+func (s *Service) AdjustSpent(ctx context.Context, user, id string, delta int64) (int64, bool, bool, error) {
+	return s.store.Users.AdjustSpent(ctx, user, id, delta)
+}
+
+// NewDrainID is sortable by when the drain started, and unique across boxes on one store.
+func NewDrainID(now time.Time) string {
+	suffix := make([]byte, 4)
+	_, _ = rand.Read(suffix)
+	return now.UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(suffix)
 }
 
 // StateHashes is what this box holds, per section/bucket — the control plane diffs its desired

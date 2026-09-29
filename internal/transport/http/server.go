@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/phot0n/pathway/internal/config"
 	"github.com/phot0n/pathway/internal/domain"
@@ -46,6 +47,15 @@ type Server struct {
 
 	adminToken string
 	isIngress  bool
+	retention  func() time.Duration
+}
+
+// usageRetention is the configured window, or a week on a server built without one (tests).
+func (s *Server) usageRetention() time.Duration {
+	if s.retention == nil {
+		return 7 * 24 * time.Hour
+	}
+	return s.retention()
 }
 
 // Services is what New needs. A struct rather than eight positional arguments, so adding one does
@@ -64,13 +74,15 @@ type Services struct {
 	// MaxBodyBytes and Maintenance are read per request, so a reload moves them.
 	MaxBodyBytes func() int64
 	Maintenance  func() bool
+	// UsageRetention is how long an acknowledged drain is kept, read per ack.
+	UsageRetention func() time.Duration
 }
 
 func New(cfg config.Config, svc Services, log *slog.Logger) *Server {
 	server := &Server{
 		admission: svc.Admission, routing: svc.Routing, metering: svc.Metering,
 		catalog: svc.Catalog, provisioning: svc.Provisioning, proxy: svc.Proxy,
-		log: log, drain: svc.Drain, maintenance: svc.Maintenance,
+		log: log, drain: svc.Drain, maintenance: svc.Maintenance, retention: svc.UsageRetention,
 		deps: middleware.Deps{
 			Admission: svc.Admission, Routing: svc.Routing, Metering: svc.Metering,
 			Transform: svc.Transform, Drain: svc.Drain, Maintenance: svc.Maintenance,
@@ -205,6 +217,8 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("/grove-admin/users", adminAuth(s.adminToken, s.handleAdminUsers))
 	mux.HandleFunc("/grove-admin/groups", adminAuth(s.adminToken, s.handleAdminGroups))
 	mux.HandleFunc("/grove-admin/usage", adminAuth(s.adminToken, s.handleAdminUsage))
+	mux.HandleFunc("POST /grove-admin/usage/ack", adminAuth(s.adminToken, s.handleAdminUsageAck))
+	mux.HandleFunc("POST /grove-admin/spend-adjust", adminAuth(s.adminToken, s.handleAdminSpendAdjust))
 	return mux
 }
 

@@ -62,6 +62,8 @@ func AnthropicErrorType(status int) string {
 		return "not_found_error"
 	case 413:
 		return "request_too_large"
+	case 402:
+		return "billing_error"
 	case 429:
 		return "rate_limit_error"
 	case 503, 529:

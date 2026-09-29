@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/redis/go-redis/v9"
@@ -95,6 +96,9 @@ func (u users) Get(ctx context.Context, name string) (domain.UserRecord, bool, e
 		Limited:     strings.TrimSpace(h["limited"]) == "1",
 		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
 		Geography:   strings.TrimSpace(h["geography"]),
+		Prepaid:     strings.TrimSpace(h["prepaid"]) == "1",
+		Budget:      int64Field(h, "budget"),
+		Spent:       int64Field(h, "spent"),
 	}, true, nil
 }
 
@@ -103,23 +107,68 @@ func (u users) Upsert(ctx context.Context, records []repository.UserUpsert) erro
 		if rec.Name == "" {
 			continue
 		}
-		if err := u.rdb.HSet(ctx, "user:"+rec.Name, map[string]any{
-			"email":        rec.Email,
-			"group":        rec.Groups, // comma list of group names
-			"allow":        rec.Allow,
-			"deny":         rec.Deny,
-			"limited":      flag(rec.Limited),
-			"log_payloads": flag(rec.LogPayloads),
-			"geography":    rec.Geography,
-		}).Err(); err != nil {
+		if err := u.rdb.HSet(ctx, "user:"+rec.Name, userFields(rec)).Err(); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// userFields is what a push writes. `spent` is not among them: it is this box's own counter, and
+// an HSET here never clears a field it does not name.
+func userFields(rec repository.UserUpsert) map[string]any {
+	return map[string]any{
+		"email":        rec.Email,
+		"group":        rec.Groups, // comma list of group names
+		"allow":        rec.Allow,
+		"deny":         rec.Deny,
+		"limited":      flag(rec.Limited),
+		"log_payloads": flag(rec.LogPayloads),
+		"geography":    rec.Geography,
+		"prepaid":      flag(rec.Prepaid),
+		"budget":       strconv.FormatInt(rec.Budget, 10),
+	}
+}
+
+// int64Field reads a decimal field, 0 when absent — a record from before the field existed.
+func int64Field(h map[string]string, field string) int64 {
+	n, _ := strconv.ParseInt(strings.TrimSpace(h[field]), 10, 64)
+	return n
+}
+
 func (u users) Delete(ctx context.Context, ids []string) (int, error) {
 	return deletePrefixed(ctx, u.rdb, "user:", ids)
+}
+
+// adjustScript moves one holder's spend once per adjustment id. Replies {spent, code}: code 1
+// applied, 0 already applied, -1 no such holder. The id is kept a week: a retry comes within
+// minutes, and the control plane names each adjustment after its own row, so ids never recur.
+//
+// KEYS[1] adjust:<id>, KEYS[2] user:<name>; ARGV[1] delta, ARGV[2] seconds to keep the id
+var adjustScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[2]) == 0 then
+  return {'0', -1}
+end
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return {redis.call('HGET', KEYS[2], 'spent') or '0', 0}
+end
+local spent = redis.call('HINCRBY', KEYS[2], 'spent', ARGV[1])
+redis.call('SET', KEYS[1], '1', 'EX', ARGV[2])
+return {tostring(spent), 1}
+`)
+
+const adjustKeep = 7 * 24 * 60 * 60
+
+func (u users) AdjustSpent(ctx context.Context, name, id string, delta int64) (int64, bool, bool, error) {
+	res, err := adjustScript.Run(ctx, u.rdb, []string{"adjust:" + id, "user:" + name},
+		strconv.FormatInt(delta, 10), adjustKeep).Slice()
+	if err != nil || len(res) != 2 {
+		return 0, false, false, err
+	}
+	text, _ := res[0].(string)
+	code, _ := res[1].(int64)
+	spent, _ := strconv.ParseInt(text, 10, 64)
+	return spent, code == 1, code != -1, nil
 }
 
 func flag(b bool) string {

@@ -124,12 +124,12 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 	conn.Close()
 	var drained map[string]map[string]string
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		snapshot, err := store.Repositories().Usage.Drain(context.Background())
+		snapshot, err := store.Repositories().Usage.Drain(context.Background(), "d", nil)
 		if err != nil {
 			t.Fatalf("Drain: %v", err)
 		}
-		if len(snapshot) > 0 {
-			drained = snapshot
+		if len(snapshot["d"]) > 0 {
+			drained = snapshot["d"]
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

@@ -121,7 +121,7 @@ func TestAuthorizeGates(t *testing.T) {
 		model string
 		want  int
 	}{
-		{"over budget", domain.UserRecord{Groups: domain.ModelSet("acme"), Limited: true}, "qwen3-4b", 429},
+		{"out of credit", domain.UserRecord{Groups: domain.ModelSet("acme"), Limited: true}, "qwen3-4b", 402},
 		{"model the group does not grant", domain.UserRecord{Groups: domain.ModelSet("acme")}, "secret-model", 403},
 		{"deny beats the group's grant",
 			domain.UserRecord{Groups: domain.ModelSet("acme"), Deny: domain.ModelSet("qwen3-4b")}, "qwen3-4b", 403},

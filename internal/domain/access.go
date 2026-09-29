@@ -1,5 +1,7 @@
 package domain
 
+import "errors"
+
 import "strings"
 
 // KeyRecord is key:<sha256(secret)>, deliberately thin: a credential's only fact of its own is
@@ -22,7 +24,7 @@ type LegacyKey struct {
 	Group    string          //
 	Allow    map[string]bool //
 	Deny     map[string]bool //
-	Limited  bool            // the monthly-budget flag, which used to ride on Status
+	Limited  bool            // the control plane's credit-exhausted flag, which used to ride on Status
 	Models   map[string]bool // pre-group: access already resolved to one flat set
 }
 
@@ -41,13 +43,20 @@ type UserRecord struct {
 	Groups  map[string]bool // Model Group names; empty = ungrouped (grants nothing by itself)
 	Allow   map[string]bool // models this user may call on top of their groups'
 	Deny    map[string]bool // models this user may not call, whatever granted them
-	Limited bool            // over their monthly token budget → 429
+	Limited bool            // the control plane's verdict that their credit is spent → 402
 	// LogPayloads opts this user's prompts and outputs into the payload log — the one piece of
 	// customer CONTENT the platform may retain, so it is off unless the control plane says
 	// otherwise, and a record from before the field existed reads as off.
 	LogPayloads bool
 	// Geography pins this user's keys to one geography's gateways; blank serves anywhere.
 	Geography string
+	// Prepaid bills this user against a balance. Budget is the amount the user loaded (Σ their
+	// credits, nano-USD), the same number on every store; Spent is this store's own lifetime
+	// counter, moved by every metered request and never by a push. This box's balance is
+	// Budget − Spent. The control plane keeps its own from the same credits and audits the two.
+	Prepaid bool
+	Budget  int64
+	Spent   int64
 
 	// Set only by SynthUser off a pre-group key, where the control plane had already resolved
 	// access down to one model set. Nothing read from Redis sets it.
@@ -74,6 +83,20 @@ func SynthUser(rec KeyRecord) UserRecord {
 	}
 }
 
+// Exhausted reports whether the holder has run out: the control plane's verdict, or this box's own
+// view of a prepaid balance.
+func (u UserRecord) Exhausted() bool { return u.Limited || (u.Prepaid && u.Spent >= u.Budget) }
+
+// ExhaustedDenial is the 402 for an exhausted holder, nil otherwise. The control plane's verdict and
+// this box's own balance answer alike: a client cannot tell, and should not need to, which side
+// noticed first.
+func ExhaustedDenial(usr UserRecord) error {
+	if usr.Exhausted() {
+		return Deny(402, "credit balance exhausted")
+	}
+	return nil
+}
+
 // CanUse is the access decision: the grant of every group the user is in, plus their own Allow,
 // minus their Deny. The union is already merged into grp by the time it gets here. Deny wins over
 // every grant. Fails closed — no group and no Allow reaches nothing.
@@ -87,15 +110,17 @@ func CanUse(usr UserRecord, grp GroupRecord, model string) bool {
 	return grp.Models[model] || usr.Allow[model]
 }
 
-// Evaluate is the pure admission decision: an HTTP status (200 admits) and a reason. The only limit
-// is a monthly token budget the control plane flags on the USER; the gateway keeps no counters. The
+// Evaluate is the pure admission decision: an HTTP status (200 admits) and a reason. The limits are
+// on the USER — the control plane's credit flag and the prepaid balance this box keeps. The
 // credential is checked first, so a revoked key is 401 even for someone also over quota.
 func Evaluate(rec KeyRecord, usr UserRecord, grp GroupRecord, model string) (int, string) {
 	if rec.Status != "active" {
 		return 401, "key revoked or inactive"
 	}
-	if usr.Limited {
-		return 429, "monthly token quota exhausted"
+	if err := ExhaustedDenial(usr); err != nil {
+		var denial Denial
+		errors.As(err, &denial)
+		return denial.Status, denial.Reason
 	}
 	if !CanUse(usr, grp, model) {
 		return 403, "access not allowed for model " + model

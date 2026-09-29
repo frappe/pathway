@@ -35,6 +35,17 @@ type Route struct {
 	// row we run — vLLM answers both surfaces natively — and NOTHING on a provider: a vendor row
 	// without a dialect is malformed, so it serves no path rather than a guessed one.
 	Dialect string `json:"dialect"`
+	// Pricing is the sell price in force, stamped on every row of the model. Absent on an unpriced
+	// model: such a request costs 0, and the control plane's pull is where that shows up.
+	Pricing *Pricing `json:"pricing,omitempty"`
+}
+
+// Pricing is one Model Pricing as the control plane pushed it: its id, which tags every counter it
+// charged so the pull prices them with the same table, and its rates per counter in nano-USD per
+// unit (see Cost).
+type Pricing struct {
+	ID    string           `json:"id"`
+	Rates map[string]int64 `json:"rates"`
 }
 
 // SpeaksDialect reports whether this upstream answers requests of this dialect.

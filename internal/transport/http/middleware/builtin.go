@@ -179,17 +179,18 @@ func newAuth(deps Deps) (Middleware, error) {
 	}, nil
 }
 
-// quota honours the geography pin and the monthly token budget the control plane pushed. The
-// gateway keeps no counters of its own — it reads flags someone else computed.
+// quota honours the geography pin, the credit flag the control plane pushed, and the prepaid
+// balance this box keeps — all read off the user record, before the body is.
 func newQuota(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := domain.GeographyDenial(From(r).Identity.User, deps.Geography); err != nil {
+			usr := From(r).Identity.User
+			if err := domain.GeographyDenial(usr, deps.Geography); err != nil {
 				deny(w, r, err)
 				return
 			}
-			if From(r).Identity.User.Limited {
-				deny(w, r, domain.Deny(http.StatusTooManyRequests, "monthly token quota exhausted"))
+			if err := domain.ExhaustedDenial(usr); err != nil {
+				deny(w, r, err)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -327,6 +328,10 @@ func newMeter(deps Deps) (Middleware, error) {
 					Model:          state.Model,
 					Deployment:     or(state.Deployment, state.Decision.Route.Deployment),
 					Usage:          state.Usage,
+					Pricing:        state.Decision.Route.Pricing,
+					User:           state.Identity.Key.User,
+					Prepaid:        state.Identity.User.Prepaid,
+					Budget:         state.Identity.User.Budget,
 					Target:         state.Decision.EngineURL(),
 					UpstreamStatus: statusText(state.UpstreamStatus),
 					Reason:         state.Reason,

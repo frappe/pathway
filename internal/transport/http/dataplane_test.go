@@ -563,7 +563,7 @@ func drainingHandler(t *testing.T, store *memory.Store) http.Handler {
 }
 
 // A chain naming a stage that does not exist must stop the process. A misspelt `quota` that merely
-// warned would silently stop enforcing the monthly budget.
+// warned would silently stop enforcing the budget.
 func TestAnUnknownMiddlewareRefusesToStart(t *testing.T) {
 	store := memory.New()
 	logs := observability.Discard()

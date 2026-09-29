@@ -34,6 +34,10 @@ type Dynamic struct {
 	LameDuck       string `json:"lame_duck"`
 	UpgradeTimeout string `json:"upgrade_timeout"`
 
+	// UsageRetention is how long a drain the control plane has acknowledged stays in Redis before
+	// it expires — what a control plane restored from backup could read back.
+	UsageRetention string `json:"usage_retention"`
+
 	// Maintenance refuses new requests with a 503 while in-flight ones finish. In the file, not
 	// behind an endpoint, so a box restarted while in maintenance comes back still in it.
 	Maintenance bool `json:"maintenance"`
@@ -54,6 +58,8 @@ type Resolved struct {
 	LameDuck       time.Duration
 	UpgradeTimeout time.Duration
 
+	UsageRetention time.Duration
+
 	Maintenance bool
 }
 
@@ -70,6 +76,7 @@ func Defaults() Resolved {
 		DrainTimeout:        630 * time.Second,
 		LameDuck:            5 * time.Second,
 		UpgradeTimeout:      30 * time.Second,
+		UsageRetention:      7 * 24 * time.Hour,
 	}
 }
 
@@ -101,6 +108,7 @@ func (d Dynamic) Resolve(base Resolved) (Resolved, error) {
 		{"drain_timeout", d.DrainTimeout, &out.DrainTimeout},
 		{"lame_duck", d.LameDuck, &out.LameDuck},
 		{"upgrade_timeout", d.UpgradeTimeout, &out.UpgradeTimeout},
+		{"usage_retention", d.UsageRetention, &out.UsageRetention},
 	} {
 		if strings.TrimSpace(field.raw) == "" {
 			continue

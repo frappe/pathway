@@ -22,6 +22,9 @@ type Users interface {
 	Get(ctx context.Context, name string) (domain.UserRecord, bool, error)
 	Upsert(ctx context.Context, records []UserUpsert) error
 	Delete(ctx context.Context, ids []string) (int, error)
+	// AdjustSpent moves a holder's lifetime spend by delta nano-USD, once per id: a repeated id
+	// answers the current spend with applied=false. found=false when the holder is not here.
+	AdjustSpent(ctx context.Context, name, id string, delta int64) (spent int64, applied, found bool, err error)
 }
 
 // Groups holds what a Model Group grants everyone in it.
@@ -69,12 +72,20 @@ type Health interface {
 // Usage accrues token counters per API key prefix. The field names are the service's business —
 // this only adds numbers to them.
 type Usage interface {
-	// Add applies every field in one atomic step, so a drain never sees half a request.
-	Add(ctx context.Context, prefix string, fields map[string]int64) error
-	// Drain atomically reads and deletes every live counter, keyed by bare prefix. Read-and-delete
-	// in one step: the snapshot is the only copy once it returns, which never double-counts.
-	Drain(ctx context.Context) (map[string]map[string]string, error)
+	// Accrue lands one request in one atomic step — its counters, its cost, and the holder's
+	// spend — so a drain never sees half a request, and never a counter without its cost.
+	Accrue(ctx context.Context, accrual Accrual) error
+	// Drain sets live counters aside under newID — every one, or only these prefixes when keys is
+	// non-empty — and answers every counter not yet acknowledged, old drains included, so one the
+	// control plane failed to record comes back under its own id. Nothing is deleted here.
+	Drain(ctx context.Context, newID string, keys []string) (Drains, error)
+	// Ack marks (drain id → prefixes) recorded: each is kept for retention, then expires. A pair
+	// that is not unacknowledged is a no-op. → how many pairs moved.
+	Ack(ctx context.Context, acks map[string][]string, retention time.Duration) (int, error)
 }
+
+// Drains is drain id → bare prefix → counters, as the control plane receives them.
+type Drains map[string]map[string]map[string]string
 
 // State is the desired-state push: apply what the payload names, delete what it does not, and
 // store the hashes it carried — all in one transaction, so the hashes never claim state that
@@ -117,11 +128,25 @@ type UserUpsert struct {
 	Limited     bool
 	LogPayloads bool
 	Geography   string
+	Prepaid     bool
+	Budget      int64 // nano-USD
 }
 
 type GroupUpsert struct {
 	Name   string
 	Models string // comma list
+}
+
+// Accrual is one metered request. Fields already carry the cost beside the counters; Cost is
+// repeated so the store can move the holder's lifetime spend without reading the map back.
+type Accrual struct {
+	Prefix string
+	Fields map[string]int64
+	Cost   int64
+	// User names whose spend moves; blank moves nobody's. Budget is what the holder's balance is
+	// reported against, so the drain carries this store's own view of it.
+	User   string
+	Budget int64
 }
 
 // The state-push shapes (plan_agent_state_sync.md). A nil section is untouched; a present one is

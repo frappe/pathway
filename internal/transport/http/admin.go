@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/repository"
@@ -32,6 +33,17 @@ type adminUser struct {
 	// control plane's push, which decodes false — off.
 	LogPayloads bool   `json:"log_payloads"`
 	Geography   string `json:"geography"` // blank = unpinned, as an older push decodes
+	// Prepaid gates this user on Budget, a nano-USD ceiling. Absent on an older push: no gate.
+	Prepaid bool  `json:"prepaid"`
+	Budget  int64 `json:"budget"`
+}
+
+func (u adminUser) upsert() repository.UserUpsert {
+	return repository.UserUpsert{
+		Name: u.Name, Email: u.Email, Groups: u.Group,
+		Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
+		Geography: u.Geography, Prepaid: u.Prepaid, Budget: u.Budget,
+	}
 }
 
 type adminGroup struct {
@@ -80,11 +92,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	records := make([]repository.UserUpsert, 0, len(body.Users))
 	for _, u := range body.Users {
-		records = append(records, repository.UserUpsert{
-			Name: u.Name, Email: u.Email, Groups: u.Group,
-			Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
-			Geography: u.Geography,
-		})
+		records = append(records, u.upsert())
 	}
 	if err := s.provisioning.UpsertUsers(r.Context(), records); err != nil {
 		respond.Error(w, http.StatusServiceUnavailable, "user store error")
@@ -200,11 +208,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 		for label, bucket := range body.Users.Buckets {
 			records := make([]repository.UserUpsert, 0, len(bucket.Records))
 			for _, u := range bucket.Records {
-				records = append(records, repository.UserUpsert{
-					Name: u.Name, Email: u.Email, Groups: u.Group,
-					Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
-					Geography: u.Geography,
-				})
+				records = append(records, u.upsert())
 			}
 			push.Users[label] = repository.UserBucket{Hash: bucket.Hash, Records: records}
 		}
@@ -233,16 +237,67 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"counts": counts})
 }
 
-// GET /admin/usage — pull: atomically read-and-delete every live counter. Mutating, and there is no
-// second round trip, so a failed insert control-plane-side drops that cycle's delta rather than
-// double-counting it.
+// GET /grove-admin/usage[?keys=p1,p2] — pull: live counters set aside under a new drain id (only
+// the listed prefixes when keys is given), answered with every counter not yet acknowledged,
+// grouped by drain id. Nothing is deleted here, so a key the control plane failed to record is
+// answered again on the next pull under its own id, while the rest move on.
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
-	usages, err := s.provisioning.DrainUsage(r.Context())
+	var keys []string
+	for _, key := range strings.Split(r.URL.Query().Get("keys"), ",") {
+		if key = strings.TrimSpace(key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	drains, err := s.provisioning.DrainUsage(r.Context(), keys)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "usage store error")
 		return
 	}
-	respond.JSON(w, map[string]any{"usages": usages})
+	respond.JSON(w, map[string]any{"drains": drains})
+}
+
+// POST /grove-admin/usage/ack {"acks": {"<drain id>": ["<prefix>", ...]}} — the control plane has
+// committed these keys. Each is kept for the retention window, then expires. A pair not waiting
+// is a no-op, so a retried ack is harmless.
+func (s *Server) handleAdminUsageAck(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Acks map[string][]string `json:"acks"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	count, err := s.provisioning.AckUsage(r.Context(), body.Acks, s.usageRetention())
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "usage store error")
+		return
+	}
+	respond.JSON(w, map[string]any{"ok": true, "count": count})
+}
+
+// POST /grove-admin/spend-adjust {"user", "delta", "id"} — correct one holder's lifetime spend on
+// this store by delta nano-USD, once per id: a retry answers applied=false and moves nothing.
+func (s *Server) handleAdminSpendAdjust(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		User  string `json:"user"`
+		Delta int64  `json:"delta"`
+		ID    string `json:"id"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if body.User == "" || body.ID == "" {
+		http.Error(w, "user and id are required", http.StatusBadRequest)
+		return
+	}
+	spent, applied, found, err := s.provisioning.AdjustSpent(r.Context(), body.User, body.ID, body.Delta)
+	switch {
+	case err != nil:
+		respond.Error(w, http.StatusInternalServerError, "user store error")
+	case !found:
+		respond.Error(w, http.StatusNotFound, "no such user on this store")
+	default:
+		respond.JSON(w, map[string]any{"spent": spent, "applied": applied})
+	}
 }
 
 func (s *Server) deleteRecords(w http.ResponseWriter, r *http.Request, remove func(context.Context, []string) (int, error)) {

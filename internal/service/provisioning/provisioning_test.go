@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/repository/memory"
@@ -79,23 +80,41 @@ func TestAnEmptyListRetiresThatModel(t *testing.T) {
 	assertModels(t, store, []string{"b"})
 }
 
-// Drain hands the counters over and clears them in one step. A second pull must find nothing, or
-// the control plane would insert the same delta twice.
-func TestUsageDrainsOnce(t *testing.T) {
+// A key is answered again until it is acknowledged, so a control plane that failed to record it
+// gets the same delta under the same id; after the ack nothing is left to pull.
+func TestUsageDrainsUntilAcked(t *testing.T) {
 	store := memory.New()
 	store.Usage["key-1"] = map[string]int64{"total_tokens": 42}
 	svc := New(store.Repositories(), quiet())
+	ctx := context.Background()
 
-	first, err := svc.DrainUsage(context.Background())
-	if err != nil || first["key-1"]["total_tokens"] != "42" {
-		t.Fatalf("first drain = %v, %v", first, err)
+	first, err := svc.DrainUsage(ctx, nil)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first drain = %+v, %v", first, err)
 	}
-	second, err := svc.DrainUsage(context.Background())
-	if err != nil {
-		t.Fatalf("second drain: %v", err)
+	var id string
+	for id = range first {
 	}
-	if len(second) != 0 {
-		t.Errorf("second drain returned %v — the same delta would be counted twice", second)
+	if first[id]["key-1"]["total_tokens"] != "42" {
+		t.Fatalf("first drain = %+v", first)
+	}
+	if again, _ := svc.DrainUsage(ctx, nil); again[id]["key-1"]["total_tokens"] != "42" || len(again) != 1 {
+		t.Fatalf("unacked drain = %+v, want %s again", again, id)
+	}
+	if n, err := svc.AckUsage(ctx, map[string][]string{id: {"key-1"}}, time.Hour); err != nil || n != 1 {
+		t.Fatalf("AckUsage = %d, %v", n, err)
+	}
+	if after, _ := svc.DrainUsage(ctx, nil); len(after) != 0 {
+		t.Errorf("after ack = %+v — the same delta would be counted twice", after)
+	}
+}
+
+// Drain ids sort by when they started and do not collide.
+func TestDrainIDs(t *testing.T) {
+	at := time.Date(2026, 9, 26, 10, 4, 5, 0, time.UTC)
+	a, b := NewDrainID(at), NewDrainID(at)
+	if a[:17] != "20260926T100405Z-" || len(a) != 25 || a == b {
+		t.Errorf("ids = %q %q", a, b)
 	}
 }
 
