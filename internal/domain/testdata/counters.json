@@ -1,0 +1,63 @@
+[
+ {
+  "name": "prompt_tokens",
+  "divisor": 1000000
+ },
+ {
+  "name": "cached_tokens",
+  "divisor": 1000000,
+  "part_of": "prompt_tokens"
+ },
+ {
+  "name": "cache_write_tokens",
+  "divisor": 1000000,
+  "part_of": "prompt_tokens"
+ },
+ {
+  "name": "cache_write_1h_tokens",
+  "divisor": 1000000,
+  "part_of": "prompt_tokens"
+ },
+ {
+  "name": "audio_tokens",
+  "divisor": 1000000,
+  "part_of": "prompt_tokens"
+ },
+ {
+  "name": "completion_tokens",
+  "divisor": 1000000
+ },
+ {
+  "name": "completion_audio_tokens",
+  "divisor": 1000000,
+  "part_of": "completion_tokens"
+ },
+ {
+  "name": "request_count",
+  "divisor": 1
+ },
+ {
+  "name": "prompt_tokens_above_272k",
+  "divisor": 1000000,
+  "base": "prompt_tokens",
+  "min_prompt_tokens": 272000
+ },
+ {
+  "name": "cached_tokens_above_272k",
+  "divisor": 1000000,
+  "base": "cached_tokens",
+  "min_prompt_tokens": 272000
+ },
+ {
+  "name": "cache_write_tokens_above_272k",
+  "divisor": 1000000,
+  "base": "cache_write_tokens",
+  "min_prompt_tokens": 272000
+ },
+ {
+  "name": "completion_tokens_above_272k",
+  "divisor": 1000000,
+  "base": "completion_tokens",
+  "min_prompt_tokens": 272000
+ }
+]

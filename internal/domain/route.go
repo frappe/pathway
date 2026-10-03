@@ -41,11 +41,12 @@ type Route struct {
 }
 
 // Pricing is one Model Pricing as the control plane pushed it: its id, which tags every counter it
-// charged so the pull prices them with the same table, and its rates per counter in nano-USD per
-// unit (see Cost).
+// charged so the pull prices them with the same table, its rates per counter in nano-USD per unit
+// (see CounterTable.Cost), and the counter table itself, so both sides count under the same rows.
 type Pricing struct {
-	ID    string           `json:"id"`
-	Rates map[string]int64 `json:"rates"`
+	ID       string           `json:"id"`
+	Rates    map[string]int64 `json:"rates"`
+	Counters CounterTable     `json:"counters,omitempty"`
 }
 
 // SpeaksDialect reports whether this upstream answers requests of this dialect.

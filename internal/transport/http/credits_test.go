@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/phot0n/pathway/internal/domain"
@@ -73,12 +74,30 @@ func TestThePrepaidGateSpeaksAnthropic(t *testing.T) {
 	}
 }
 
+// counters is the control plane's table as the catalog ships it, the way every pushed pricing
+// carries it.
+func counters(t *testing.T) domain.CounterTable {
+	t.Helper()
+	raw, err := os.ReadFile("../../domain/testdata/counters.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table domain.CounterTable
+	if err := json.Unmarshal(raw, &table); err != nil {
+		t.Fatal(err)
+	}
+	return table
+}
+
 // A served request is priced off its route's pricing and moves the holder's spend, and the next
 // request sees the new balance — the gate is exact within one store.
 func TestAServedRequestSpendsTheBalance(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
 	f.store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme"), Prepaid: true, Budget: 400_000}
-	f.store.Routes["qwen3-4b"][0].Pricing = &domain.Pricing{ID: "mp1", Rates: map[string]int64{"input_tokens": 3e9, "cached_tokens": 3e8, "completion_tokens": 15e9}}
+	f.store.Routes["qwen3-4b"][0].Pricing = &domain.Pricing{
+		ID: "mp1", Rates: map[string]int64{"prompt_tokens": 3e9, "cached_tokens": 3e8, "completion_tokens": 15e9},
+		Counters: counters(t),
+	}
 
 	if resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
@@ -87,7 +106,7 @@ func TestAServedRequestSpendsTheBalance(t *testing.T) {
 	usage := f.store.Usage["abc123"]
 	for field, want := range map[string]int64{
 		"cost": cost, "p:mp1:cost": cost, "user_spent": cost, "user_balance": 400_000 - cost,
-		"input_tokens": 20, "cached_tokens": 80, "completion_tokens": 20,
+		"prompt_tokens": 100, "cached_tokens": 80, "completion_tokens": 20,
 	} {
 		if usage[field] != want {
 			t.Errorf("usage[%s] = %d, want %d", field, usage[field], want)
@@ -106,13 +125,13 @@ func TestAServedRequestSpendsTheBalance(t *testing.T) {
 }
 
 // The users section of a state push, as the control plane sends it: prepaid and budget land,
-// spent — this box's own counter — does not move.
+// spent — this box's own counter, never on the wire — does not move.
 func TestAUsersPushCarriesTheCeilingAndLeavesSpentAlone(t *testing.T) {
 	store := memory.New()
 	store.Users["GU-1"] = domain.UserRecord{Spent: 700}
 	handler := adminFixture(t, store)
 	body := fmt.Sprintf(`{"users": {"buckets": {"%s": {"hash": "uh", "records": [
-		{"name": "GU-1", "email": "a@b", "group": "acme", "prepaid": true, "budget": 5000000, "spent": 0}]}}}}`,
+		{"name": "GU-1", "email": "a@b", "group": "acme", "prepaid": true, "budget": 5000000}]}}}}`,
 		domain.BucketOf("GU-1"))
 	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body); w.Code != http.StatusOK {
 		t.Fatalf("POST state = %d: %s", w.Code, w.Body)

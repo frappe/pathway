@@ -24,6 +24,9 @@ type Usage struct {
 	CacheWrite1h int
 	// Audio = prompt tokens that were audio, priced apart from text. ⊆ Prompt, OpenAI shape only.
 	Audio int
+	// CompletionAudio = completion tokens that were audio, priced apart from text. ⊆ Completion,
+	// OpenAI shape only.
+	CompletionAudio int
 	// Seconds of audio processed — all a duration-shaped transcription reports. Display only.
 	Seconds int
 }
@@ -54,14 +57,15 @@ func ParseUsage(raw []byte) (Usage, bool) {
 // reports the prompt on its first event and the output on its last.
 func MergeUsage(a, b Usage) Usage {
 	u := Usage{
-		Prompt:       max(a.Prompt, b.Prompt),
-		Completion:   max(a.Completion, b.Completion),
-		Total:        max(a.Total, b.Total),
-		Cached:       max(a.Cached, b.Cached),
-		CacheWrite:   max(a.CacheWrite, b.CacheWrite),
-		CacheWrite1h: max(a.CacheWrite1h, b.CacheWrite1h),
-		Audio:        max(a.Audio, b.Audio),
-		Seconds:      max(a.Seconds, b.Seconds),
+		Prompt:          max(a.Prompt, b.Prompt),
+		Completion:      max(a.Completion, b.Completion),
+		Total:           max(a.Total, b.Total),
+		Cached:          max(a.Cached, b.Cached),
+		CacheWrite:      max(a.CacheWrite, b.CacheWrite),
+		CacheWrite1h:    max(a.CacheWrite1h, b.CacheWrite1h),
+		Audio:           max(a.Audio, b.Audio),
+		CompletionAudio: max(a.CompletionAudio, b.CompletionAudio),
+		Seconds:         max(a.Seconds, b.Seconds),
 	}
 	u.Total = max(u.Total, u.Prompt+u.Completion)
 	return u
@@ -145,6 +149,7 @@ func usageFrom(m map[string]json.RawMessage) (Usage, bool) {
 		// A chat names the details prompt_tokens_details, a transcription input_token_details.
 		u.Audio = nestedInt(m, "prompt_tokens_details", "audio_tokens") +
 			nestedInt(m, "input_token_details", "audio_tokens")
+		u.CompletionAudio = nestedInt(m, "completion_tokens_details", "audio_tokens")
 		if tok {
 			u.Total = t
 		} else {

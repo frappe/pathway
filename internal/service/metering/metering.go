@@ -46,7 +46,7 @@ type Service struct {
 	usage  repository.Usage
 	health repository.Health
 	log    *slog.Logger
-	warned sync.Map // models whose cache buckets were once seen exceeding the prompt
+	warned sync.Map // models whose cache buckets were once seen exceeding the prompt; pricings pushed without a table
 	// Spool keeps what the store refused, for replay once it answers. Nil keeps nothing.
 	Spool *Spool
 }
@@ -70,7 +70,14 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 			s.log.Warn("cache buckets exceed the prompt; counted as plain", "model", rep.Model)
 		}
 	}
-	cost := PricedFields(fields, rep.Pricing)
+	if rep.Pricing != nil && len(rep.Pricing.Counters) == 0 {
+		// The control plane always pushes one; a pricing without it prices nothing, which the pull
+		// would read as a free request. Say so, once per pricing.
+		if _, seen := s.warned.LoadOrStore("pricing:"+rep.Pricing.ID, true); !seen {
+			s.log.Error("pricing carries no counter table; nothing priced", "pricing", rep.Pricing.ID, "model", rep.Model)
+		}
+	}
+	cost := PricedFields(fields, rep.Pricing, rep.Prepaid)
 	accrual := repository.Accrual{ID: rep.RequestID, Prefix: rep.Prefix, Fields: fields, Cost: cost}
 	if rep.Prepaid {
 		accrual.User, accrual.Budget = rep.User, rep.Budget
@@ -86,10 +93,12 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 // UsageFields is the whole accounting rule, pure so it is testable without a store. Each metric is
 // written flat and, when known, as m:<metric>:<model> and m:<metric>:<deployment> in the SAME hash,
 // so one drain carries aggregate and breakdown. Zero values are skipped. Beside the display fields
-// it emits the counters the control plane prices, the prompt split into plain, cached, written and
-// audio. A prompt above 272k tokens is counted under the above-272k counters instead, whatever
-// the pricing. trusted is false when the cache buckets exceeded the prompt: the whole prompt is
-// then plain, since cache credit is the one thing such a response cannot be trusted on.
+// it emits the counters the control plane prices: the root buckets the response fills — the prompt
+// and the completion whole, and the parts of each that have a rate of their own (cached, written,
+// audio) — each landed under its derived counter when the pricing's table holds one for this
+// prompt size, whatever the pricing's rates. trusted is false when the cache buckets exceeded the
+// prompt: the whole prompt is then plain, since cache credit is the one thing such a response
+// cannot be trusted on.
 func UsageFields(rep Report) (fields map[string]int64, trusted bool) {
 	model := strings.TrimSpace(rep.Model)
 	deployment := strings.TrimSpace(rep.Deployment)
@@ -126,37 +135,76 @@ func UsageFields(rep Report) (fields map[string]int64, trusted bool) {
 	}
 	// Audio is billed out of what the cache left: a cached audio token is credited, not billed twice.
 	audio := max(0, min(u.Audio, u.Prompt-u.Cached-u.CacheWrite))
-	counter := func(base, longContext string) string {
-		if u.Prompt > domain.LongContextTokens {
-			return longContext
-		}
-		return base
+	completionAudio := max(0, min(u.CompletionAudio, u.Completion))
+	buckets := map[string]int64{
+		"prompt_tokens": int64(u.Prompt), "cached_tokens": int64(u.Cached),
+		"cache_write_tokens": int64(u.CacheWrite - u.CacheWrite1h), "cache_write_1h_tokens": int64(u.CacheWrite1h),
+		"audio_tokens": int64(audio), "completion_tokens": int64(u.Completion), "completion_audio_tokens": int64(completionAudio),
 	}
-	bump("prompt_tokens", int64(u.Prompt))
-	bump(counter("completion_tokens", "completion_tokens_above_272k"), int64(u.Completion))
+	for counter, n := range landed(buckets, rep.Pricing.Table(), int64(u.Prompt)) {
+		bump(counter, n)
+	}
 	bump("total_tokens", int64(u.Total))
-	bump(counter("input_tokens", "input_tokens_above_272k"), int64(u.Prompt-u.Cached-u.CacheWrite-audio))
-	bump(counter("cached_tokens", "cached_tokens_above_272k"), int64(u.Cached))
-	bump(counter("cache_write_tokens", "cache_write_tokens_above_272k"), int64(u.CacheWrite-u.CacheWrite1h))
-	bump("cache_write_1h_tokens", int64(u.CacheWrite1h))
-	bump("audio_tokens", int64(audio))
 	bump("audio_seconds", int64(u.Seconds))
 	return fields, trusted
 }
 
-// PricedFields prices the request and tags what it charged with the pricing's id: each priced
+// landed moves each root bucket to the counter it is counted under for a prompt this size. A part
+// goes to its variant when the table holds one that applies, else stays. A container's variant
+// takes what is left after the parts that stayed, which keep their place in the base container:
+// hour writes and audio have one rate at any prompt size, so a long request's are counted in
+// prompt_tokens and only the rest above the threshold.
+func landed(buckets map[string]int64, table domain.CounterTable, prompt int64) map[string]int64 {
+	out := map[string]int64{}
+	for counter, n := range buckets {
+		if len(table.Parts(counter)) > 0 {
+			continue // a container: placed once its parts are known
+		}
+		if variant := table.Variant(counter, prompt); variant != "" {
+			out[variant] += n
+		} else {
+			out[counter] += n
+		}
+	}
+	for counter, n := range buckets {
+		parts := table.Parts(counter)
+		if len(parts) == 0 {
+			continue
+		}
+		var stayed int64
+		for _, part := range parts {
+			if table.Variant(part, prompt) == "" {
+				stayed += buckets[part]
+			}
+		}
+		if variant := table.Variant(counter, prompt); variant != "" {
+			out[variant] += n - stayed
+			out[counter] += stayed
+		} else {
+			out[counter] += n
+		}
+	}
+	return out
+}
+
+// PricedFields prices the request and tags what it priced with the pricing's id: each priced
 // counter again as p:<id>:<counter>, and the cost as p:<id>:cost beside the flat one. The pull prices
 // each p:<id> group with that same pricing's table, so a switch mid-drain never reads as drift.
+// A request that is not charged is tagged f: instead, so the pull bills exactly what moved a spend.
 // → the cost in nano-USD.
-func PricedFields(fields map[string]int64, pricing *domain.Pricing) int64 {
+func PricedFields(fields map[string]int64, pricing *domain.Pricing, charged bool) int64 {
 	if pricing == nil || pricing.ID == "" {
 		return 0
 	}
-	cost := domain.Cost(fields, pricing.Rates)
-	tag := "p:" + pricing.ID + ":"
-	for _, counter := range domain.PricedCounters {
-		if n := fields[counter]; n > 0 {
-			fields[tag+counter] = n
+	table := pricing.Table()
+	cost := table.Cost(fields, pricing.Rates)
+	tag := "f:" + pricing.ID + ":"
+	if charged {
+		tag = "p:" + pricing.ID + ":"
+	}
+	for _, counter := range table {
+		if n := fields[counter.Name]; n > 0 {
+			fields[tag+counter.Name] = n
 		}
 	}
 	if cost != 0 {

@@ -20,10 +20,10 @@ func spoolFixture(t *testing.T, maxBytes int64) (*memory.Store, *Service, string
 	return store, svc, path
 }
 
-func record(svc *Service, id string) {
+func record(t *testing.T, svc *Service, id string) {
 	svc.Record(context.Background(), Report{
 		RequestID: id, Prefix: "K-1", Model: "m", User: "GU-1", Prepaid: true, Budget: 1_000,
-		Pricing: &domain.Pricing{ID: "mp1", Rates: map[string]int64{"request_count": 7}},
+		Pricing: priced(t, "mp1", map[string]int64{"request_count": 7}),
 	})
 }
 
@@ -41,7 +41,7 @@ func lines(t *testing.T, path string) int {
 func TestAFailedAccrualIsSpooledThenReplayedOnce(t *testing.T) {
 	store, svc, path := spoolFixture(t, 1<<20)
 	store.Fail["usage"] = true
-	record(svc, "rid-1")
+	record(t, svc, "rid-1")
 	if lines(t, path) != 1 || store.Usage["K-1"] != nil {
 		t.Fatalf("spooled %d lines, usage %v: want one line and nothing landed", lines(t, path), store.Usage["K-1"])
 	}
@@ -65,7 +65,7 @@ func TestAFailedAccrualIsSpooledThenReplayedOnce(t *testing.T) {
 func TestAStoreStillDownKeepsTheLineWithoutATry(t *testing.T) {
 	store, svc, path := spoolFixture(t, 1<<20)
 	store.Fail["usage"], store.Fail["ping"] = true, true
-	record(svc, "rid-1")
+	record(t, svc, "rid-1")
 	for range maxTries + 1 {
 		svc.Spool.Replay(context.Background())
 	}
@@ -79,7 +79,7 @@ func TestAStoreStillDownKeepsTheLineWithoutATry(t *testing.T) {
 func TestALineRefusedFiveTimesIsDeadUntilAcked(t *testing.T) {
 	store, svc, path := spoolFixture(t, 1<<20)
 	store.Fail["usage"] = true
-	record(svc, "rid-1")
+	record(t, svc, "rid-1")
 	for i := range maxTries {
 		if len(svc.Spool.Dead()) != 0 {
 			t.Fatalf("dead after %d tries, want %d", i, maxTries)
@@ -112,7 +112,7 @@ func TestPastTheCapUsageIsDropped(t *testing.T) {
 	if err := appendLine(path, []byte("0123456789")); err != nil {
 		t.Fatal(err)
 	}
-	record(svc, "rid-1")
+	record(t, svc, "rid-1")
 	if lines(t, path) != 1 || svc.Spool.Stats().Dropped != 1 {
 		t.Errorf("%d lines, stats %+v: want the new line dropped", lines(t, path), svc.Spool.Stats())
 	}
@@ -122,7 +122,7 @@ func TestPastTheCapUsageIsDropped(t *testing.T) {
 func TestARestartReplaysFromDisk(t *testing.T) {
 	store, svc, path := spoolFixture(t, 1<<20)
 	store.Fail["usage"] = true
-	record(svc, "rid-1")
+	record(t, svc, "rid-1")
 	delete(store.Fail, "usage")
 	fresh := NewSpool(store.Repositories().Usage, quiet(), func() string { return path }, func() int64 { return 1 << 20 })
 	if fresh.Stats().Depth != 1 {

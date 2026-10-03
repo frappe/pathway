@@ -509,32 +509,53 @@ Billable is then `Total - Cached` on either shape.
 `m:<metric>:<deployment>` — so one drain carries the aggregate and both breakdowns. Zero values are
 skipped entirely; a field that never moved should not appear.
 
-**What gets priced.** Beside the display fields, eleven counters the control plane has a rate for:
-`input_tokens` (prompt − cached − written − audio), `cached_tokens`, `cache_write_tokens` (the
-five-minute writes on the Anthropic shape, every write on the OpenAI one), `cache_write_1h_tokens`,
-`completion_tokens`, `audio_tokens`, `request_count`, and the four above-272k counters below.
+**What gets priced.** Beside the display fields, the counters the control plane's table names.
+The table rides inside every pricing (`pricing.counters`, `domain.CounterTable`): a **root** row is a
+bucket the response fills — `prompt_tokens` (the whole prompt), `cached_tokens`, `cache_write_tokens`
+(the five-minute writes on the Anthropic shape, every write on the OpenAI one),
+`cache_write_1h_tokens`, `audio_tokens`, `completion_tokens` (the whole completion),
+`completion_audio_tokens`, `request_count` — and a **derived** row is a root plus a prompt-size
+threshold (`base`, `min_prompt_tokens`), today the four `*_above_272k` counters. The bucket → root
+mapping is code (`metering.UsageFields`); everything else about a counter is the pushed row. A
+pricing pushed without a table, or no pricing at all, is an empty table: every bucket is counted
+under its root and nothing is priced — the control plane always pushes one, so a pricing without
+it is logged once as an error.
+
+Counting records what the vendor reports; charging subtracts (`CounterTable.Cost`). A counter's rate
+is charged on what its parts left of it, and each part at its own rate, so a token bills once. A root
+row's `part_of` names its container (`cached_tokens`, `cache_write_tokens`, `cache_write_1h_tokens`
+and `audio_tokens` are parts of `prompt_tokens`; `completion_audio_tokens` of `completion_tokens`); a
+derived row's parts are its base's parts at the same threshold.
+
 `audio_tokens` is the audio part of the prompt — `prompt_tokens_details.audio_tokens`
-on a chat, `input_token_details.audio_tokens` on a token-shaped transcription — taken out of
-`input_tokens`, and out of what the cache left, so a token bills once. `audio_seconds` is a display
+on a chat, `input_token_details.audio_tokens` on a token-shaped transcription — capped at what the
+cache left. `completion_audio_tokens` is the audio part of the completion,
+`completion_tokens_details.audio_tokens`, capped at the completion. `audio_seconds` is a display
 field, not priced: a transcription's `{"type":"duration","seconds":N}` usage, or the top-level
 `duration` of a `verbose_json` body, which carries no usage at all. A duration-shaped
 transcription, a translation and a realtime session therefore bill `request_count` only. Cache buckets
 that exceed the prompt cannot be credited: the whole prompt bills as plain, logged once per model.
 
-**Above 272k.** A vendor may charge the whole request more once the prompt passes 272 000 tokens.
-Two rules, one on each side, and neither knows the other:
+**Above a threshold.** A vendor may charge the whole request more once the prompt passes some size
+(OpenAI: 272 000 tokens). Two rules, one on each side, and neither knows the other:
 
-- **Counting.** A request whose prompt — plain, cached, written and audio together — is strictly
-  past `domain.LongContextTokens` is counted under `input_tokens_above_272k`,
-  `cached_tokens_above_272k`, `cache_write_tokens_above_272k` and `completion_tokens_above_272k`
-  **instead of** the four base counters, flat, per model and per pricing alike. The pricing is not
-  consulted. `prompt_tokens` and `total_tokens` hold every request.
-- **Charging** (`domain.Rate`). A counter is charged at its own rate. An above-272k counter the
-  pricing holds no rate for is charged at its base counter's: no `input_tokens_above_272k` rate
-  means the `input_tokens` rate. So a pricing without those rates charges as it always did.
+- **Counting** (`metering.landed`). For a request whose prompt — plain, cached, written and audio
+  together — is strictly past a derived row's threshold, each root bucket lands under its derived
+  row at the highest such threshold, **instead of** the root, flat, per model and per pricing alike.
+  The pricing's rates are not consulted, only its table. A root with no derived row at that
+  threshold stays where it is: a container's derived row takes what is left after the parts that
+  stayed. Hour writes and audio have one rate at any prompt size and no derived row, so a long
+  request's stay with the base counters: its hour writes and prompt audio are counted in
+  `prompt_tokens`, its audio output in `completion_tokens`, and only the rest above 272k. A 300 000
+  prompt with 10 000 hour writes is `prompt_tokens_above_272k` 290 000 and `prompt_tokens` 10 000.
+  `total_tokens` holds every request.
+- **Charging** (`CounterTable.Rate`). A counter is charged at its own rate. A derived counter the
+  pricing holds no rate for is charged at its base counter's: no `prompt_tokens_above_272k` rate
+  means the `prompt_tokens` rate. So a pricing without those rates charges as it always did.
 
-The control plane holds the same table and the same fallback, so both sides price the same
-amounts at the same rates.
+The control plane prices a drain from the same table and the same fallback, so both sides price
+the same amounts at the same rates. A new bracket is rows in the push, not a release here; a new
+root (a vendor fee reported in `usage`) is one parser line that fills its bucket, plus its row.
 
 **Cost lands with its counters, tagged by the pricing that charged it.** The route carries the
 pricing in force; a price change lands with the push that carries it, and a request is charged by
@@ -542,9 +563,11 @@ the pricing its gateway held. One Lua script per request: HINCRBY every counter,
 then `cost` and `p:<pricing id>:cost` — Σ counter × rate, nano-USD, truncated per counter, 0 on an
 unpriced route — then, for a prepaid holder only, `HINCRBY user:<u> spent cost` and `HSET user_spent
 user_balance` (`budget − spent`, negative once overspent; last writer wins) on the usage hash. A free
-holder's usage is counted and priced the same, but their `spent` never moves and the drain carries no
-balance for them, so turning them prepaid later starts them at what they load. The pull prices each
-`p:<pricing id>` group with that same pricing's table, so the two sides can only disagree when they
+holder's usage is counted and priced the same, but tagged `f:<pricing id>:` instead of `p:`; their
+`spent` never moves and the drain carries no balance for them, so turning them prepaid later starts
+them at what they load. The tag is set per request, so a drain that spans a flip carries both and the
+pull bills only the `p:` part. The pull prices each
+`p:<pricing id>` or `f:<pricing id>` group with that same pricing's table, so the two sides can only disagree when they
 hold different rates for one pricing id. A drain therefore never sees a counter without its cost, or a cost without the spend it
 moved. The spend moves only on a holder the control plane has pushed.
 
@@ -844,8 +867,8 @@ user:<Grove User>          email  group (comma list)  allow  deny  limited  log_
                            prepaid  budget  spent
 model_group:<Model Group>  models
 usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
-                           input_tokens  cache_write_tokens  cache_write_1h_tokens  audio_tokens
-                           input_tokens_above_272k  cached_tokens_above_272k
+                           cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
+                           prompt_tokens_above_272k  cached_tokens_above_272k
                            cache_write_tokens_above_272k  completion_tokens_above_272k
                            audio_seconds
                            cost  user_spent  user_balance
@@ -880,7 +903,7 @@ negative balance on the control plane.
   "deployment":   "MD-00007",
   "server":       "INF-1",
   "kind":         "direct",
-  "pricing":      {"id": "mp-a1", "rates": {"input_tokens": 3000000000, "completion_tokens": 15000000000}}
+  "pricing":      {"id": "mp-a1", "rates": {"prompt_tokens": 3000000000, "completion_tokens": 15000000000}}
 }]
 ```
 
