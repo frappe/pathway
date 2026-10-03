@@ -344,9 +344,14 @@ func adminAuth(token string, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// decodeBody refuses a field this binary does not know. A push the box cannot keep whole is an
+// error the control plane must see — a row stored without the field, under the hash of the full
+// payload, is drift no later push would notice.
 func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
-	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(into); err != nil {
+		http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
 		return false
 	}
 	return true

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -35,6 +36,31 @@ func adminCall(t *testing.T, handler http.Handler, method, path, body string) *h
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 	return w
+}
+
+// A field this binary does not know is refused by name, never stored without. The row the
+// control plane keeps then says which field, and the hash is never written — so the next tick
+// pushes again instead of reading "in sync" off a lossy copy.
+func TestAPushWithAFieldTheBinaryDoesNotKnowIsRefused(t *testing.T) {
+	store := memory.New()
+	handler := adminFixture(t, store)
+
+	w := adminCall(t, handler, http.MethodPost, "/grove-admin/routes",
+		`{"routes":{"m":[{"engine_url":"http://e","healthy":true,"keyring_v2":[]}]}}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `unknown field "keyring_v2"`) {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	if len(store.Routes) != 0 {
+		t.Errorf("a refused push was stored: %v", store.Routes)
+	}
+	w = adminCall(t, handler, http.MethodPost, "/grove-admin/state",
+		`{"groups":{"hash":"h","records":[{"name":"g","models":"m","expires_at":"never"}]}}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `unknown field "expires_at"`) {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	if hashes, _ := store.Repositories().State.Hashes(context.Background()); len(hashes) != 0 {
+		t.Errorf("a refused push stored its hash: %v", hashes)
+	}
 }
 
 func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {

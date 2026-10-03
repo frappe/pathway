@@ -877,6 +877,13 @@ record, DEL every record in a pushed section the payload does not name, then sto
 that did not arrive. Only `model_group:/user:/key:/deploy:` are ever pruned; usage,
 sticky, inflight and health keys are the gateway's own.
 
+Every admin body is decoded strictly: a field this binary does not know is a 400 naming it
+(`bad body: json: unknown field "credentials"`), nothing is stored and no hash is written, so the
+Pathway Sync row says which field and the next tick pushes again. The alternative — keep the
+record without the field under the hash of the full payload — is drift no later push would see,
+which is what happened once. Consequence: a new route field ships in the binary before Grove
+pushes it.
+
 `GET /grove-admin/state-hash` returns that stored map. Grove diffs its computed hashes against it
 every 2 minutes and pushes only what differs — an in-sync box costs one GET. `users` and `keys`
 are split into 256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
