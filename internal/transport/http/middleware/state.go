@@ -28,6 +28,9 @@ type State struct {
 	// is decoded and later mutated by transforms, so it cannot testify to what the customer wrote.
 	// Nil on the bodyless paths (upgrade, multipart).
 	Raw []byte
+	// Form is what a multipart body said before its model field — the text fields, and a stand-in
+	// naming each file — for the payload log. Never the file itself. Nil on every other path.
+	Form map[string]string
 
 	Decision routing.Decision
 

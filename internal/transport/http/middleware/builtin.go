@@ -236,12 +236,12 @@ func newBody(deps Deps) (Middleware, error) {
 					deny(w, r, domain.Deny(http.StatusRequestEntityTooLarge, "request body too large"))
 					return
 				}
-				model, session, err := readMultipart(w, r, boundary, maxBytes, deps.Log)
+				model, session, form, err := readMultipart(w, r, boundary, maxBytes, deps.Log)
 				if err != nil {
 					denyUnreadableBody(w, r, err)
 					return
 				}
-				state.Model, state.Session = model, session
+				state.Model, state.Session, state.Form = model, session, form
 				applySessionHeader(r, state)
 				next.ServeHTTP(w, r)
 				return

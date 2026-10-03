@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -57,7 +58,7 @@ func parse(t *testing.T, body []byte, contentType string, limit int64) (string, 
 	if boundary == "" {
 		t.Fatal("content type was not read as multipart")
 	}
-	model, _, err := readMultipart(httptest.NewRecorder(), r, boundary, limit, discardLog())
+	model, _, _, err := readMultipart(httptest.NewRecorder(), r, boundary, limit, discardLog())
 	if err != nil {
 		t.Fatalf("readMultipart: %v", err)
 	}
@@ -190,5 +191,21 @@ func TestAModelFirstFormNeverSpills(t *testing.T) {
 	if after := openDescriptors(t); after > before {
 		t.Errorf("descriptors went %d → %d — a model-first form should never open a file",
 			before, after)
+	}
+}
+
+// The payload log's view of a form: text fields it walked, a stand-in for the file — never its
+// bytes — and nothing after model, which it never reads.
+func TestTheFormKeepsFieldsAndNamesTheFile(t *testing.T) {
+	body, contentType := form(t, "language", "en", "@file", strings.Repeat("A", 64<<10), "model", "whisper", "prompt", "after")
+	r := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	r.Header.Set("Content-Type", contentType)
+	_, _, fields, err := readMultipart(httptest.NewRecorder(), r, multipartBoundary(r), 1<<20, discardLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"language": "en", "file": "[file sample.wav application/octet-stream]", "model": "whisper"}
+	if !maps.Equal(fields, want) {
+		t.Errorf("form = %v, want %v", fields, want)
 	}
 }

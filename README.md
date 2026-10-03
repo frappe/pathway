@@ -336,6 +336,43 @@ and `/v1/realtime` is not a modality-claimed path so any model may serve it. Two
 `ModifyResponse` deliberately skips the usage tee on a `101`: ReverseProxy needs that body to stay an
 `io.ReadWriteCloser` to write back to the engine, and wrapping it fails the handshake outright.
 
+#### The payload log
+
+The one place the gateway keeps customer content rather than metadata, so it is off twice over: the
+box needs `GROVE_PAYLOAD_LOG`, and the user needs `log_payloads` (pushed on `user:<name>`, read per
+request, so turning it takes effect on the next one). One JSON line per request, written when the
+request ends — a client that hung up mid-stream still gets one, with what it had received:
+
+`rid` (joins the access line), `key`, `user`, `model`, `path` (after the `/anthropic` strip),
+`status`, `prompt`, `output`, `output_encoding` (only when `base64`), `prompt_bytes`,
+`output_bytes`.
+
+It sits between `modelaccess` and `route`: refusals above it (401, 402, 403, 408, 413) leave no
+line; everything from routing down does, once per request whatever `retry` did.
+
+What is kept:
+
+- **Text, whole.** `prompt` is the body as the client sent it, before any transform; `output` is
+  what the client received, after the model swap, error event included. Never truncated.
+  A stream is its raw `data:` frames, not reassembled text.
+- **Inline media up to 256 KiB, as sent.** Past it — a `data:` URI anywhere, or base64 under
+  `data` / `b64_json` (OpenAI `input_audio`, `audio`, generated images; Anthropic `source`) — the
+  item becomes `[media image/png 834512 bytes sha256:9f2c…]`: its type, decoded size and the first
+  16 hex of its hash, enough to match a file the customer sends without keeping it. A body with
+  nothing replaced is logged byte-for-byte; one with something replaced is re-encoded.
+- **A file response** (`audio/*`, `image/*`, `video/*`, `application/octet-stream` — speech) is
+  base64 with `output_encoding: "base64"` up to 256 KiB, else `[media audio/mpeg 2097152 bytes]`;
+  the recorder stops holding it at the limit. The client gets every byte either way.
+- **An upload** (transcription) is its form fields as a JSON object, each file a stand-in —
+  `"file": "[file talk.mp3 audio/mpeg]"` — never the file. Only parts before `model` are seen,
+  since the rest streams to the upstream unread; `prompt_bytes` is the whole form's
+  `Content-Length`, `-1` when chunked.
+- **Realtime sessions are not logged**: once the connection is hijacked nothing passes the
+  recorder.
+
+A text response is held in memory until its line is written; a long stream for an opted-in user
+costs its size.
+
 ### A request, layer by layer
 
 What each layer contributes, for one `POST /v1/chat/completions`:
@@ -697,6 +734,7 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
 | `GROVE_NODE_EXPORTER_URL` | default `http://127.0.0.1:9100/metrics` |
 | `GROVE_ACCESS_LOG` | file for the per-request line; blank → stdout |
 | `GROVE_ERROR_LOG` | file mirroring Warn and above out of the process log; blank → stdout only |
+| `GROVE_PAYLOAD_LOG` | file for prompts and outputs of users flagged `log_payloads`; customer content, so its own file and retention. Blank turns `payloadlog` off box-wide |
 | `GROVE_CONFIG` | tunables path; default `/etc/pathway/config.json` |
 | `GROVE_PID_FILE` | optional |
 

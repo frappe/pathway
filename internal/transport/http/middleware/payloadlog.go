@@ -1,8 +1,12 @@
 package middleware
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 func init() {
@@ -15,8 +19,8 @@ func init() {
 //
 // What it logs is the customer's own view: the request as the client sent it (state.Raw, above the
 // transforms) and the response as the client received it (below the proxy's model swap). One line
-// per request; rid joins it to the access line. Bodyless paths — upgrade, multipart — are not
-// logged at all.
+// per request; rid joins it to the access line. Inline media over mediaKeep is a placeholder; an
+// upload is its form fields with a stand-in per file; an upgrade (realtime) is not logged at all.
 func newPayloadLog(deps Deps) (Middleware, error) {
 	if deps.Payload == nil {
 		return passthrough, nil
@@ -24,7 +28,7 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
-			if !state.Identity.User.LogPayloads || state.Raw == nil {
+			if !state.Identity.User.LogPayloads || (state.Raw == nil && state.Form == nil) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -33,33 +37,48 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 			// unwinds this stage through http.ErrAbortHandler, and the frames already generated
 			// are exactly the ones a support query about an abandoned request asks after.
 			defer func() {
-				deps.Payload.LogAttrs(r.Context(), slog.LevelInfo, "payload",
+				prompt, promptBytes := state.Raw, int64(len(state.Raw))
+				if state.Raw == nil {
+					// An upload: what the form said, never the file. Its size is the whole form's,
+					// -1 when the client sent it chunked.
+					prompt, _ = json.Marshal(state.Form)
+					promptBytes = r.ContentLength
+				}
+				attrs := []slog.Attr{
 					slog.String("rid", state.RequestID),
 					slog.String("key", or(state.Identity.Prefix(), "-")),
 					slog.String("user", state.Identity.Key.User),
 					slog.String("model", or(state.Model, "-")),
 					slog.String("path", r.URL.Path),
 					slog.Int("status", recorder.status),
-					slog.String("prompt", string(state.Raw)),
-					slog.String("output", string(recorder.body)),
-					slog.Int("prompt_bytes", len(state.Raw)),
-					slog.Int64("output_bytes", recorder.total),
-				)
+					slog.String("prompt", string(redactMedia(prompt))),
+				}
+				output, encoding := recorder.output()
+				attrs = append(attrs, slog.String("output", output))
+				if encoding != "" {
+					attrs = append(attrs, slog.String("output_encoding", encoding))
+				}
+				attrs = append(attrs, slog.Int64("prompt_bytes", promptBytes), slog.Int64("output_bytes", recorder.total))
+				deps.Payload.LogAttrs(r.Context(), slog.LevelInfo, "payload", attrs...)
 			}()
 			next.ServeHTTP(recorder, r)
 		})
 	}, nil
 }
 
-// payloadRecorder passes every byte through and keeps a copy of all of them. Write-through
-// first would read nicer, but the copy must happen before the caller's buffer is reused.
-// ponytail: unbounded per-request memory — the whole response is held until the line is written;
-// bring back a cap if long streams ever hurt.
+// payloadRecorder passes every byte through and keeps a copy: all of a text response, and a binary
+// one only up to mediaKeep, past which it just counts. Write-through first would read nicer, but
+// the copy must happen before the caller's buffer is reused.
+// ponytail: a text response is held whole until the line is written (no truncation, user call
+// 2026-08-31); a cap is the fix if long streams ever hurt.
 type payloadRecorder struct {
 	http.ResponseWriter
 	status int
 	body   []byte
 	total  int64
+	// binary is decided on the first write, when the headers are final.
+	binary  bool
+	decided bool
 }
 
 func (p *payloadRecorder) WriteHeader(status int) {
@@ -68,9 +87,31 @@ func (p *payloadRecorder) WriteHeader(status int) {
 }
 
 func (p *payloadRecorder) Write(b []byte) (int, error) {
-	p.body = append(p.body, b...)
+	if !p.decided {
+		p.decided = true
+		p.binary = binaryMediaType(p.Header().Get("Content-Type"))
+	}
+	if !p.binary || len(p.body) <= mediaKeep {
+		p.body = append(p.body, b...)
+	}
 	p.total += int64(len(b))
 	return p.ResponseWriter.Write(b)
+}
+
+// output is what the line records: text as received with big media replaced; a file as base64
+// when it fits mediaKeep, a placeholder when it does not.
+func (p *payloadRecorder) output() (text, encoding string) {
+	contentType := p.Header().Get("Content-Type")
+	switch {
+	case p.binary && p.total <= mediaKeep:
+		return base64.StdEncoding.EncodeToString(p.body), "base64"
+	case p.binary:
+		mediaType, _, _ := strings.Cut(contentType, ";")
+		return fmt.Sprintf("[media %s %d bytes]", strings.TrimSpace(mediaType), p.total), ""
+	case strings.HasPrefix(contentType, "text/event-stream"):
+		return string(redactStreamMedia(p.body)), ""
+	}
+	return string(redactMedia(p.body)), ""
 }
 
 // Unwrap lets net/http find the underlying writer for Flush — without it a stream would buffer.
