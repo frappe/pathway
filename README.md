@@ -652,6 +652,7 @@ is not there. The name only, never the value. Top-level fields; a rewritten one 
 | `modelmap` | rewrites `model` to the route's `upstream_model` |
 | `streamusage` | forces `stream_options.include_usage` on a streaming completion |
 | `servicetier` | drops a caller's `service_tier` on every hop: it picks the vendor's price class, which is never the caller's to choose |
+| `maxtokens` | on a vendor chat hop, sends the output cap under the name that vendor honours: `max_completion_tokens` for OpenAI (400s on the old name), `max_tokens` for every other (they ignore the new one, uncapping output). Logged as a drop of the other name |
 | `cachesalt` | prefixes a caller's `cache_salt` with their tenant, strips it on a vendor hop. Not in the default list |
 
 ### Add a storage backend

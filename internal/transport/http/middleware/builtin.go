@@ -367,6 +367,7 @@ func newTransform(deps Deps) (Middleware, error) {
 				UpstreamModel: state.Decision.Route.UpstreamModel,
 				User:          state.Identity.Key.User,
 				Provider:      state.Decision.Route.IsProvider(),
+				Vendor:        vendor(state.Decision.Route),
 			}, state.Body)
 			if err != nil {
 				deps.Log.Error("request transform failed", "path", r.URL.Path, "err", err)
@@ -636,3 +637,12 @@ func (s *statusRecorder) ttft(started time.Time) float64 {
 // Unwrap lets net/http find the underlying writer for Flush and Hijack. Without it, wrapping the
 // writer would turn every streaming response into a buffered one.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// vendor names the third party a provider route dials — the control plane pushes the provider's
+// name as the row's deployment. Blank on anything we run.
+func vendor(route domain.Route) string {
+	if !route.IsProvider() {
+		return ""
+	}
+	return route.Deployment
+}

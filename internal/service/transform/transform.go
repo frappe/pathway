@@ -25,6 +25,8 @@ type Context struct {
 	User string
 	// Provider is true when the hop leaves our network for a vendor.
 	Provider bool
+	// Vendor is the provider's name on a vendor hop ("openai"), blank on anything we run.
+	Vendor string
 }
 
 // Request is one body rewrite. Apply reports whether it changed anything, so a body that no
@@ -65,7 +67,7 @@ func Registered() []string {
 
 // Default is what runs when nothing is configured. Order matters only in that a later transform
 // sees an earlier one's output.
-var Default = []string{"modelmap", "streamusage", "cachesalt", "servicetier"}
+var Default = []string{"modelmap", "streamusage", "cachesalt", "servicetier", "maxtokens"}
 
 // Chain is an ordered, resolved set of transforms, replaceable in place under its own lock — the
 // middleware holds a pointer, and rebuilding the whole chain to change which rewrites run would be
