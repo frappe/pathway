@@ -532,7 +532,7 @@ func newPick(deps Deps) (Middleware, error) {
 				failIngress(w, r, denial.Status, denial.Reason)
 				return
 			}
-			state.Decision = routing.Decision{Route: route, RequestID: requestID, Key: routing.PickKey(route.Keyring(), nil)}
+			state.Decision = routing.Decision{Route: route, RequestID: requestID, Key: deps.Routing.PickKey(route.Keyring())}
 
 			// Stamped before the request leaves, so it is set whatever status the engine comes back
 			// with. The gateway reads it off the response to attribute usage to a placement it

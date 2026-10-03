@@ -1001,7 +1001,7 @@ own fields:
   "engine_url":     "https://api.anthropic.com",
   "internal_key":   "",
   "credentials":    [{"id": "<key row id>", "secret": "<the vendor's API key>"}, ...],
-  "key_selection":  "random",
+  "key_selection":  "round_robin",
   "healthy":        true,
   "capacity":       0,
   "deployment":     "anthropic",
@@ -1024,13 +1024,16 @@ certificate is verified whatever `upstream_tls_verify` says — that hop leaves 
 someone else's key.
 
 `credentials` is every key the control plane holds with the vendor, each under the id it is
-counted by; `internal_key` stays blank on a provider row and is the one-key spelling an engine or
-ingress row keeps (`Keyring()` reads either). `route` draws one at random per request
-(`key_selection` is carried for the day there is a second strategy; random is a per-request draw,
-so a session may change key between requests, and a vendor's prompt cache is per credential).
-The `retry` stage then walks the ring on the key's own failures only: a **429** spends the key —
-each is tried once, then the rate-limited ones are opened once more, since a quota window may have
-slid — and a **401/402/403** retires it for the rest of the request. The second exhaustion is the
+counted by, in ring order; `internal_key` stays blank on a provider row and is the one-key spelling
+an engine or ingress row keeps (`Keyring()` reads either). `route` takes the keys in turn, one
+cursor per ring in this process — a vendor's ring is the same on every model it serves, so its keys
+share the turn across models, which is how the limits they share are drawn on evenly; two gateways
+each take even turns without agreeing on whose it is. `key_selection` is carried for the day there
+is a second strategy. A session still changes key between requests, so a vendor's prompt cache is
+per credential. The `retry` stage then walks on round the ring from the loser, on the key's own
+failures only: a **429** spends the key — each is tried once, then the rate-limited ones are opened
+once more, since a quota window may have slid — and a **401/402/403** retires it for the rest of the
+request. The second exhaustion is the
 client's answer, headers and body as the vendor sent them. Nothing else is retried: a 502 on one
 key is a 502 on the next. A held attempt leaks nothing to the client; the request is billed once
 whatever it walked, and the access line's `attempts` counts the dials. Every attempt lands in

@@ -44,7 +44,7 @@ func keyedFixture(t *testing.T, answers map[string]int, keys ...string) (*fixtur
 		credentials = append(credentials, domain.Credential{ID: "id-" + key, Secret: key})
 	}
 	f.store.Routes["deepseek/chat"] = []domain.Route{{
-		EngineURL: f.engine.URL, Credentials: credentials, KeySelection: "random", Healthy: true,
+		EngineURL: f.engine.URL, Credentials: credentials, KeySelection: "round_robin", Healthy: true,
 		Deployment: "deepseek", Server: "deepseek", Kind: "provider", Dialect: "openai",
 		UpstreamModel: "deepseek-chat",
 	}}
@@ -59,30 +59,39 @@ func (v *keyedVendor) chat(f *fixture) *httptest.ResponseRecorder {
 	return f.post("/v1/chat/completions", chatBody)
 }
 
-// untilRotated posts until the random draw dials the refused key first, so the request rotates.
-// Every answer along the way must be a success — a run that drew the good key first is one too.
-func untilRotated(t *testing.T, f *fixture, vendor *keyedVendor) *httptest.ResponseRecorder {
+// rotated posts one request on a fresh fixture: the turn starts at the first key, the refused one,
+// so the request rotates and must still succeed.
+func rotated(t *testing.T, f *fixture, vendor *keyedVendor) *httptest.ResponseRecorder {
 	t.Helper()
-	for range 64 {
-		resp := vendor.chat(f)
-		if resp.Code != http.StatusOK {
-			t.Fatalf("status = %d, body = %s, keys = %v", resp.Code, resp.Body, vendor.keys)
-		}
-		if len(vendor.keys) > 1 {
-			return resp
-		}
+	resp := vendor.chat(f)
+	if resp.Code != http.StatusOK || len(vendor.keys) < 2 {
+		t.Fatalf("status = %d, body = %s, keys = %v", resp.Code, resp.Body, vendor.keys)
 	}
-	t.Fatal("64 draws never dialled the refused key first")
-	return nil
+	return resp
 }
 
 func (f *fixture) keyStats(id string) domain.KeyStats { return f.store.KeyStats["id-"+id] }
+
+// Requests take the keys in turn, so a vendor's per-key limits are drawn on evenly.
+func TestRequestsTakeTheKeysInTurn(t *testing.T) {
+	f, vendor := keyedFixture(t, nil, "A", "B", "C")
+	var dialled []string
+	for range 4 {
+		if resp := vendor.chat(f); resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
+		}
+		dialled = append(dialled, vendor.keys...)
+	}
+	if got := strings.Join(dialled, ""); got != "ABCA" {
+		t.Errorf("keys dialled = %q", got)
+	}
+}
 
 // A key the vendor rate-limits is swapped for another, and the client never learns there were two
 // attempts: one bill, the answer from the key that worked, none of the loser's headers.
 func TestARateLimitedKeyIsSwappedForAnother(t *testing.T) {
 	f, vendor := keyedFixture(t, map[string]int{"A": 429}, "A", "B")
-	resp := untilRotated(t, f, vendor)
+	resp := rotated(t, f, vendor)
 
 	if strings.Join(vendor.keys, ",") != "A,B" {
 		t.Errorf("keys dialled = %v", vendor.keys)
@@ -99,7 +108,7 @@ func TestARateLimitedKeyIsSwappedForAnother(t *testing.T) {
 // first attempt left behind.
 func TestTheWinnerGetsTheBodyAgain(t *testing.T) {
 	f, vendor := keyedFixture(t, map[string]int{"A": 429}, "A", "B")
-	untilRotated(t, f, vendor)
+	rotated(t, f, vendor)
 
 	var body map[string]any
 	if err := json.Unmarshal(f.seen.body, &body); err != nil {
@@ -116,9 +125,9 @@ func TestTheWinnerGetsTheBodyAgain(t *testing.T) {
 // Every attempt is billed once: however many keys a request walked, it is one request.
 func TestARotatedRequestIsBilledOnce(t *testing.T) {
 	f, vendor := keyedFixture(t, map[string]int{"A": 429}, "A", "B")
-	untilRotated(t, f, vendor)
+	rotated(t, f, vendor)
 	runs := f.store.Usage["abc123"]["request_count"]
-	// Every post of the loop above was one request; the rotated one must not have been two.
+	// One post, two dials: the rotated request must not have been billed as two.
 	var attempts int64
 	for id := range f.store.KeyStats {
 		attempts += f.store.KeyStats[id].Requests

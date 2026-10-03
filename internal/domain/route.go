@@ -8,8 +8,8 @@ type Route struct {
 	// whose credentials ride Credentials.
 	InternalKey string `json:"internal_key"`
 	// Credentials is every key the control plane holds with a vendor, each under the id it is
-	// counted by. KeySelection names how one is picked per request: only "random" exists, so it
-	// is carried, not read.
+	// counted by, in the order the ring is walked. KeySelection names how one is picked per
+	// request: only "round_robin" exists, so it is carried, not read.
 	Credentials  []Credential `json:"credentials,omitempty"`
 	KeySelection string       `json:"key_selection,omitempty"`
 	Healthy      bool         `json:"healthy"`

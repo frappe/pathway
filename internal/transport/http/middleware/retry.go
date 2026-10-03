@@ -90,20 +90,21 @@ func newKeyRing(keys []domain.Credential) *keyRing {
 	return &keyRing{keys: keys, spent: map[string]bool{}, dead: map[string]bool{}}
 }
 
-// next retires `loser` for `status` and picks the key the next attempt dials with — blank when
-// none is left. The rate-limited keys are opened once when nothing else remains: a vendor's quota
-// window may have slid by then. A second exhaustion is the answer the client gets.
+// next retires `loser` for `status` and picks the key the next attempt dials with — the one after
+// it round the ring, blank when none is left. The rate-limited keys are opened once when nothing
+// else remains: a vendor's quota window may have slid by then. A second exhaustion is the answer
+// the client gets.
 func (k *keyRing) next(loser domain.Credential, status int) domain.Credential {
 	k.spent[loser.ID] = true
 	if domain.IsKeyRejected(status) {
 		k.dead[loser.ID] = true
 	}
-	if winner := routing.PickKey(k.keys, k.spent); winner.ID != "" || k.reset {
+	if winner := routing.NextKey(k.keys, loser, k.spent); winner.ID != "" || k.reset {
 		return winner
 	}
 	k.reset = true
 	k.spent = maps.Clone(k.dead)
-	return routing.PickKey(k.keys, k.spent)
+	return routing.NextKey(k.keys, loser, k.spent)
 }
 
 // attemptWriter holds an attempt's answer until `again` has said whether another key gets a go:

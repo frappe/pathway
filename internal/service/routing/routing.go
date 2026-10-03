@@ -7,7 +7,10 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"math/rand/v2"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
@@ -39,8 +42,8 @@ type Request struct {
 type Decision struct {
 	Route     domain.Route
 	RequestID string
-	// Key is the credential this attempt dials with — one of the route's keyring, picked at
-	// random; the retry stage moves it when a vendor refuses the key.
+	// Key is the credential this attempt dials with — one of the route's keyring, taken in turn;
+	// the retry stage moves it when a vendor refuses the key.
 	Key     domain.Credential
 	Session string // the session actually pinned; "" when none was used
 	// SessionKey is sha256(Session), set only for an ingress route. The gateway's session may be a
@@ -64,6 +67,9 @@ type Service struct {
 	// than a deploy.
 	syntheticTTL func() time.Duration
 	capacityWait func() time.Duration
+	// cursors is the round-robin position per vendor ring (ringID → *atomic.Uint64), this process's
+	// own: two gateways each take even turns without agreeing on whose turn it is.
+	cursors sync.Map
 }
 
 func serving(table []domain.Route, dialect, path string) []domain.Route {
@@ -161,7 +167,7 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	decision := Decision{
 		Route:     route,
 		RequestID: req.RequestID,
-		Key:       PickKey(route.Keyring(), nil),
+		Key:       s.PickKey(route.Keyring()),
 		Session:   session,
 	}
 	if route.IsIngress() && session != "" {
@@ -208,21 +214,41 @@ func (s *Service) waitForRoom(ctx context.Context, table []domain.Route, stickyU
 	return domain.Route{}, 429
 }
 
-// PickKey is the route's one selection strategy, random, over the keys not in `spent`: the
-// credential a request dials with, or the next one once a vendor refused the last. Blank when
-// every key is spent. Random is a per-request draw, so a session may change key between
-// requests — a vendor's prompt cache is per credential, which is the strategy's known cost.
-func PickKey(keyring []domain.Credential, spent map[string]bool) domain.Credential {
-	var open []domain.Credential
-	for _, key := range keyring {
-		if !spent[key.ID] {
-			open = append(open, key)
-		}
-	}
-	if len(open) == 0 {
+// PickKey is the route's one selection strategy, round robin: the credential a request dials with,
+// the next in the ring's order after the last request's. The cursor is per ring, and a vendor's ring
+// is the same on every model it serves, so its keys take even turns across models — the limits they
+// share are the vendor's. A session still changes key between requests, so a vendor's prompt cache
+// stays per credential; that is the strategy's known cost. Blank on an empty ring.
+func (s *Service) PickKey(keyring []domain.Credential) domain.Credential {
+	if len(keyring) == 0 {
 		return domain.Credential{}
 	}
-	return open[rand.IntN(len(open))]
+	cursor, _ := s.cursors.LoadOrStore(ringID(keyring), new(atomic.Uint64))
+	turn := cursor.(*atomic.Uint64).Add(1) - 1
+	return keyring[turn%uint64(len(keyring))]
+}
+
+// ringID names a ring by its members: the ids the control plane counts the keys under, in the
+// order it pushed them. An engine's one blank-id credential names the one ring every engine shares,
+// which has a single position anyway.
+func ringID(keyring []domain.Credential) string {
+	ids := make([]string, len(keyring))
+	for i, key := range keyring {
+		ids[i] = key.ID
+	}
+	return strings.Join(ids, ",")
+}
+
+// NextKey is the retry stage's walk: the first key after `loser` in ring order that is not in
+// `spent`, round the ring once. Blank when every key is spent.
+func NextKey(keyring []domain.Credential, loser domain.Credential, spent map[string]bool) domain.Credential {
+	start := slices.IndexFunc(keyring, func(key domain.Credential) bool { return key.ID == loser.ID })
+	for step := 1; step <= len(keyring); step++ {
+		if key := keyring[(start+step)%len(keyring)]; !spent[key.ID] {
+			return key
+		}
+	}
+	return domain.Credential{}
 }
 
 // PickReplica is the ingress tier: the same rule with no session synthesis, no region (every

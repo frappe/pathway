@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -347,21 +348,52 @@ func TestARouteWithoutAModalityIsUnrestricted(t *testing.T) {
 	}
 }
 
-func TestPickKeyDrawsOnlyFromTheUnspent(t *testing.T) {
+func picks(s *Service, ring []domain.Credential, n int) string {
+	var ids []string
+	for range n {
+		ids = append(ids, s.PickKey(ring).ID)
+	}
+	return strings.Join(ids, "")
+}
+
+func TestPickKeyTakesTurns(t *testing.T) {
+	s := &Service{}
 	ring := []domain.Credential{{ID: "a"}, {ID: "b"}, {ID: "c"}}
-	for range 32 {
-		if key := PickKey(ring, map[string]bool{"a": true, "c": true}); key.ID != "b" {
-			t.Fatalf("picked %q with only b open", key.ID)
-		}
+	if got := picks(s, ring, 7); got != "abcabca" {
+		t.Errorf("turns = %q", got)
 	}
-	if key := PickKey(ring, map[string]bool{"a": true, "b": true, "c": true}); key.ID != "" {
-		t.Errorf("picked %q from an exhausted ring", key.ID)
+	// The same ids on another model's route are the same vendor: its turn carries on.
+	twin := []domain.Credential{{ID: "a", Secret: "x"}, {ID: "b", Secret: "y"}, {ID: "c", Secret: "z"}}
+	if got := picks(s, twin, 2); got != "bc" {
+		t.Errorf("the twin ring started over: %q", got)
 	}
-	if key := PickKey([]domain.Credential{{Secret: "only"}}, nil); key.Secret != "only" {
+	// Another ring, another cursor.
+	if got := picks(s, []domain.Credential{{ID: "p"}, {ID: "q"}}, 3); got != "pqp" {
+		t.Errorf("a second ring shared the cursor: %q", got)
+	}
+	if key := s.PickKey([]domain.Credential{{Secret: "only"}}); key.Secret != "only" {
 		t.Errorf("an engine's one key was not picked: %+v", key)
+	}
+	if key := s.PickKey(nil); key != (domain.Credential{}) {
+		t.Errorf("picked %+v from an empty ring", key)
 	}
 }
 
+func TestNextKeyWalksTheRingPastTheSpent(t *testing.T) {
+	ring := []domain.Credential{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	if key := NextKey(ring, ring[0], map[string]bool{"a": true, "b": true}); key.ID != "c" {
+		t.Errorf("after a with b spent: %q", key.ID)
+	}
+	if key := NextKey(ring, ring[2], map[string]bool{"c": true}); key.ID != "a" {
+		t.Errorf("after c did not wrap: %q", key.ID)
+	}
+	if key := NextKey(ring, ring[1], map[string]bool{"a": true, "b": true, "c": true}); key.ID != "" {
+		t.Errorf("picked %q from an exhausted ring", key.ID)
+	}
+}
+
+// A full fleet waits up to capacity_wait for a slot rather than turning the request away at once,
+// and gives up early on a client that left.
 func TestPickWaitsForRoom(t *testing.T) {
 	full := func() *memory.Store {
 		route := engine("https://full")
