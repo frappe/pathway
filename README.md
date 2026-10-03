@@ -315,6 +315,12 @@ Two consequences worth knowing:
   over a full disk.
 - A request that announces a `Content-Length` over `max_body_bytes` is refused before anything is
   read; a chunked one is caught mid-stream instead, after the route was already picked.
+- **Only what `body` reads is on a clock.** Every body `body` reads — a whole JSON body, a form up
+  to its `model` — must arrive within 60 seconds of the headers or the request is a **408**: header
+  timeouts stop at the headers, and without this a client dripping its body holds a goroutine and up
+  to `max_body_bytes` of buffer for as long as it likes. The rest of a form streams through the
+  proxy unbounded in time, on purpose: a deadline there would fail inside the hop, where a slow
+  client reads as a failed upstream and counts against it.
 
 #### Realtime sessions
 

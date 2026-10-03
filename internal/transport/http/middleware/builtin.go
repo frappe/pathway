@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -199,6 +200,11 @@ func newQuota(deps Deps) (Middleware, error) {
 	}, nil
 }
 
+// bodyReadTimeout bounds how long the gateway waits for the body it reads itself. ReadHeaderTimeout
+// stops at the headers, so without it a client that drips its body holds a goroutine and up to
+// max_body_bytes of buffer for as long as it likes. A var so a test can lower it.
+var bodyReadTimeout = 60 * time.Second
+
 // body reads and decodes the request body, bounded. The model and the session hint come out of it,
 // and every stage below reads them from the State rather than parsing again.
 func newBody(deps Deps) (Middleware, error) {
@@ -228,6 +234,20 @@ func newBody(deps Deps) (Middleware, error) {
 				return
 			}
 
+			// Only around what this stage reads, cleared before the hop: the rest of a multipart
+			// upload streams through the proxy, where a client-side timeout would read as the
+			// upstream failing. Not supported on a recorder, which is fine — nothing drips there.
+			// ponytail: an upload's tail past its model field is still unbounded in time.
+			reading := http.NewResponseController(w)
+			_ = reading.SetReadDeadline(time.Now().Add(bodyReadTimeout))
+			// Cleared only on success: after a failed read the deadline must stay, or the server
+			// waits out the rest of the stalled body before the refusal goes out.
+			doneReading := func(err error) {
+				if err == nil {
+					_ = reading.SetReadDeadline(time.Time{})
+				}
+			}
+
 			// A multipart body gives up its fields without being materialised and is forwarded as it
 			// arrived. It never becomes a transform.Body, so the transform stage below skips it
 			// rather than re-encoding a form as JSON.
@@ -237,6 +257,7 @@ func newBody(deps Deps) (Middleware, error) {
 					return
 				}
 				model, session, form, err := readMultipart(w, r, boundary, maxBytes, deps.Log)
+				doneReading(err)
 				if err != nil {
 					denyUnreadableBody(w, r, err)
 					return
@@ -248,6 +269,7 @@ func newBody(deps Deps) (Middleware, error) {
 			}
 
 			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
+			doneReading(err)
 			if err != nil {
 				denyUnreadableBody(w, r, err)
 				return
@@ -567,6 +589,11 @@ func denyUnreadableBody(w http.ResponseWriter, r *http.Request, err error) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
 		deny(w, r, domain.Deny(http.StatusRequestEntityTooLarge, "request body too large"))
+		return
+	}
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		deny(w, r, domain.Deny(http.StatusRequestTimeout, "request body not received in time"))
 		return
 	}
 	deny(w, r, domain.Deny(http.StatusBadRequest, "could not read request body"))
