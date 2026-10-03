@@ -278,10 +278,12 @@ proxy ──► engine (or ingress ──► engine)
 | `drain` | while shutting down: 503 + `Retry-After` + "gateway is restarting" |
 | `auth` | bearer → key → user → groups, once, into the request state |
 | `quota` | the credit flag the control plane pushed, or a prepaid balance spent → 402 |
-| `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here |
+| `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Over `max_body_bytes` → 413; not all here within 60s → 408 |
 | `modelaccess` | `CanUse` → 403 |
-| `route` | sticky / region / capacity / least-in-flight; claims an in-flight slot |
+| `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the user's `log_payloads` is on. See [The payload log](#the-payload-log) |
+| `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |
+| `retry` | runs the stages below again with another credential when a vendor refuses the one dialled (429, 401/402/403); counts every attempt against its key |
 | `transform` | the registered body rewrites; re-encodes only if one changed something |
 | `upstreamauth` | swaps in the engine's internal key, sets the forwarding and ingress headers |
 
@@ -769,10 +771,11 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
 ```json
 {
   "log_level": "info",
-  "middleware": ["recover", "accesslog", "drain", "auth", "quota", "body",
-                 "modelaccess", "route", "meter", "transform", "upstreamauth"],
-  "transforms": ["modelmap", "streamusage", "priority"],
+  "middleware": ["recover", "accesslog", "drain", "auth", "quota", "body", "modelaccess",
+                 "payloadlog", "route", "meter", "retry", "transform", "upstreamauth"],
+  "transforms": ["modelmap", "streamusage", "servicetier", "maxtokens"],
   "synthetic_session_ttl": "0s",
+  "capacity_wait": "0s",
   "max_body_bytes": 33554432,
   "upstream_read_timeout": "600s",
   "upstream_tls_verify": false,
@@ -795,11 +798,19 @@ believes they turned.
 
 `upstream_read_timeout` bounds an upstream's silence, not a request's length: the wait for its
 headers, and every wait for more of its body after them. A model that thinks for ten minutes before
-its first token needs it raised; a stream that talks for an hour does not.
+its first token needs it raised; a stream that talks for an hour does not. Running out before the
+headers is a **504** `upstream timed out`; after them, an event stream ends in an error event (see
+[Streaming](#streaming)).
 
 `synthetic_session_ttl` is the one worth knowing. `0s` balances every caller that names no session
 of its own; `30m` pins each API key to one engine, which is what a single-placement fleet always
 did and the lever to pull if balancing goes wrong.
+
+`capacity_wait` is how long a request waits for a slot when every upstream of its model is at its
+`capacity`, before the 429. `0s` refuses at once. Nothing is claimed or billed while it waits, and a
+client that leaves stops the wait. A vendor's cap is its rows' `capacity`: rows sharing a base URL
+share one in-flight count across every gateway, so the control plane pushes the vendor's whole limit,
+not a share of it.
 
 `maintenance: true` refuses every new data request with 503 `maintenance` (`Retry-After: 30`) and
 fails `/healthz`, while requests already running finish. It lives in the file, so a box restarted
@@ -1099,12 +1110,14 @@ was unreadable turns one broken dependency into an outage.
 | health counters unreadable | every route stays as the control plane pushed it. Ejection is an optimisation too |
 | sticky read/write fails | one cold prefix cache, not a wrong answer |
 | usage write fails | the request already succeeded, so it is not failed retroactively: its usage goes to the **spool** (below) and lands once the store answers. `spent` did not move either, so the gate runs loose by that request until then |
-| the engine is dead | **502**, and the hop counts against the target — three in a row and it leaves rotation |
+| the engine is dead | **502** `upstream unavailable`, and the hop counts against the target — three in a row and it leaves rotation |
+| the engine accepts the connection but sends no headers | **504** `upstream timed out` after `upstream_read_timeout` (a dial that runs out is a 504 too); counts against the target |
 | the client leaves before the upstream answers | the upstream call is cancelled at once; the access line reads **499** `cut=client_left`, and the hop does not count against the target |
 | the client leaves in the middle of a response | the upstream call is cancelled at once; `cut=client_left`. What the upstream had reported by then is metered, the rest is not |
-| the upstream goes silent after its headers | cut after `upstream_read_timeout` of silence, `cut=upstream_idle`; the client's connection is dropped, and the hop counts against the target. A stream that keeps talking is never cut, however long it runs |
-| the upstream's body breaks off | the client's connection is dropped; `cut=upstream`, and the hop counts against the target |
-| every replica is full | **429**, distinct from 503 on purpose: the model is up |
+| the upstream goes silent after its headers | cut after `upstream_read_timeout` of silence, `cut=upstream_idle`, and the hop counts against the target. An event stream ends in an `upstream went silent` error event; any other body is dropped. A stream that keeps talking is never cut, however long it runs |
+| the upstream's body breaks off | `cut=upstream`, and the hop counts against the target. An event stream ends in an `upstream broke off the stream` error event; any other body is dropped |
+| the client drips its body | **408** once 60s pass without the part `body` reads; nothing is routed or billed |
+| every replica is full | waits up to `capacity_wait`, then **429**, distinct from 503 on purpose: the model is up. Nothing is claimed or billed while waiting |
 | the model has no placement | **503** |
 | the control plane is down | nothing happens. The gateway serves the last table it was pushed, indefinitely |
 | the tunables file is bad | the running configuration is kept, one error line says why |
@@ -1123,11 +1136,13 @@ Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except
 |---|---|---|
 | 401 | no key, unknown key, revoked key | fix the credential |
 | 403 | the key exists but may not use this model | ask for access |
+| 408 | the body did not arrive within 60s of the headers | resend on a working connection |
 | 413 | body over `max_body_bytes` | send less |
 | 402 | out of prepaid credit | top up; nothing to retry |
 | 429 | every replica at capacity | back off and retry |
 | 499 | the client left before the upstream answered. Only ever in the access line: nobody is there to receive it | – |
 | 502 | the engine could not be reached or failed the hop | retry; another replica may take it |
+| 504 | the engine sent no headers within `upstream_read_timeout`, or could not be dialled in time | retry; another replica may take it |
 | 503 | the model has no healthy placement, a store is unreadable, or the gateway is draining or in maintenance | retry with backoff — `Retry-After` is set when draining or in maintenance |
 
 ---
