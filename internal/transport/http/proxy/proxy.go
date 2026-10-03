@@ -1,6 +1,7 @@
 // Package proxy forwards an admitted request to the engine that was picked for it, and reads the
-// usage frame out of the response on the way back without touching a byte of it — save one: on a
-// route whose upstream answers under its own model id, that id is swapped back to the client's.
+// usage frame out of the response on the way back without touching a byte of it — save two: on a
+// route whose upstream answers under its own model id, that id is swapped back to the client's; and
+// an event stream the upstream abandons gets one error event appended, so the client is told why.
 package proxy
 
 import (
@@ -181,6 +182,12 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 				resp.ContentLength = -1
 				resp.Body = newModelSwapReader(tee, swap)
 			}
+			if isEventStream(resp) {
+				// Outermost, and the declared length dropped: the closing event adds bytes.
+				resp.Header.Del("Content-Length")
+				resp.ContentLength = -1
+				resp.Body = newStreamEnd(resp.Body, r.Context(), hop, respond.Dialect(r.Context()) == domain.DialectAnthropic)
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -194,13 +201,20 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			// Status stays 0, which is what marks the hop failed: the connection never got far
 			// enough to have one.
 			p.log.Warn("upstream hop failed", "target", target, "err", err)
+			// A dial or header wait that ran out is a timeout and says so; anything else is a
+			// connection that was refused or broken.
+			status, message := http.StatusBadGateway, "upstream unavailable"
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				status, message = http.StatusGatewayTimeout, "upstream timed out"
+			}
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadGateway)
+			w.WriteHeader(status)
 			if respond.Dialect(r.Context()) == domain.DialectAnthropic {
-				_, _ = w.Write(append(domain.AnthropicError(http.StatusBadGateway, []byte("upstream unavailable")), '\n'))
+				_, _ = w.Write(append(domain.AnthropicError(status, []byte(message)), '\n'))
 				return
 			}
-			_, _ = w.Write([]byte(`{"error":{"message":"upstream unavailable","type":"api_error"}}` + "\n"))
+			_, _ = w.Write([]byte(`{"error":{"message":"` + message + `","type":"api_error"}}` + "\n"))
 		},
 	}
 

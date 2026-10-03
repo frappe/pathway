@@ -408,6 +408,24 @@ The response is never buffered. `FlushInterval: -1` pushes each write straight t
 usage scraper (`proxy/usagetee.go`) reads the bytes it is already copying and writes nothing back —
 so the client sees exactly the stream the engine produced, at the engine's own pace.
 
+One exception, at the end only. When an event stream breaks off — the upstream went silent for
+`upstream_read_timeout`, or its body failed — while the client is still there, `proxy/streamend.go`
+closes the event in progress and appends one error event in the surface's shape, the one its SDK
+raises on, then ends the stream cleanly:
+
+```
+data: {"error":{"message":"upstream went silent","type":"api_error"}}                              (OpenAI surface)
+
+event: error
+data: {"error":{"message":"upstream went silent","type":"api_error"},"type":"error"}               (/anthropic)
+```
+
+`upstream went silent` for the timeout, `upstream broke off the stream` otherwise. Without it the
+200 has long gone out and the client sees only a dropped connection. It sits outside the usage
+scraper, so usage and the `cut` are read off the upstream's own bytes exactly as before. An event
+already cut mid-line still reaches the client broken, ahead of the error. A body that is one JSON
+document cannot be repaired this way and is still just dropped.
+
 ---
 
 ## Routing

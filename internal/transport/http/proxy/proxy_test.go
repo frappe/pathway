@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/transport/respond"
 )
 
 func quiet() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil)) }
@@ -285,5 +286,74 @@ func TestAnUpstreamThatBreaksOffIsMarked(t *testing.T) {
 
 	if out := forward(New(Options{}, quiet()), server.URL, false); out.Cut != domain.CutUpstream || out.Status != http.StatusOK {
 		t.Errorf("cut %q, status %d", out.Cut, out.Status)
+	}
+}
+
+// forwardOn is forward on a surface, keeping what the client received.
+func forwardOn(p *Proxy, target, dialect string) (Outcome, *httptest.ResponseRecorder) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	r = r.WithContext(respond.WithDialect(r.Context(), dialect))
+	w := httptest.NewRecorder()
+	var out Outcome
+	p.Forward(w, r, target, false, ModelSwap{}, &out)
+	return out, w
+}
+
+// A wait for headers that runs out is a 504 that says so, not the 502 of a refused connection.
+func TestAHeaderTimeoutIsA504(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body) // read to the end, or the server never sees the hop leave
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	out, w := forwardOn(New(Options{ReadTimeout: 100 * time.Millisecond}, quiet()), server.URL, domain.DialectOpenAI)
+	if w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), "upstream timed out") {
+		t.Errorf("status %d, body %s", w.Code, w.Body)
+	}
+	if out.Status != 0 {
+		t.Errorf("outcome status = %d; a hop with no answer must stay 0 to count against the upstream", out.Status)
+	}
+}
+
+// A stream the upstream abandons ends in an error event the client's SDK raises on, in its own
+// surface's shape, after whatever had already arrived. Usage and the cut are read as before.
+func TestAnAbandonedStreamEndsInAnErrorEvent(t *testing.T) {
+	const limit = 100 * time.Millisecond
+	first := `data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}` + "\n\n"
+	for name, tc := range map[string]struct {
+		dialect, sent, cut, want string
+		silent                   bool
+	}{
+		"silent, openai": {domain.DialectOpenAI, first, domain.CutUpstreamIdle,
+			first + `data: {"error":{"message":"upstream went silent","type":"api_error"}}` + "\n\n", true},
+		"silent, anthropic": {domain.DialectAnthropic, first, domain.CutUpstreamIdle,
+			first + "event: error\ndata: " + `{"error":{"message":"upstream went silent","type":"api_error"},"type":"error"}` + "\n\n", true},
+		"broke off mid-line": {domain.DialectOpenAI, first + `data: {"cho`, domain.CutUpstream,
+			first + `data: {"cho` + "\n\n" + `data: {"error":{"message":"upstream broke off the stream","type":"api_error"}}` + "\n\n", false},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, tc.sent)
+			w.(http.Flusher).Flush()
+			if tc.silent {
+				<-r.Context().Done()
+				return
+			}
+			panic(http.ErrAbortHandler)
+		}))
+		t.Cleanup(server.Close)
+
+		out, w := forwardOn(New(Options{ReadTimeout: limit}, quiet()), server.URL, tc.dialect)
+		if got := w.Body.String(); got != tc.want {
+			t.Errorf("%s: client got\n%q\nwant\n%q", name, got, tc.want)
+		}
+		if out.Cut != tc.cut {
+			t.Errorf("%s: cut %q, want %q", name, out.Cut, tc.cut)
+		}
+		if !strings.Contains(out.Usage, `"prompt_tokens":3`) {
+			t.Errorf("%s: usage lost: %q", name, out.Usage)
+		}
 	}
 }
