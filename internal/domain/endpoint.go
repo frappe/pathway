@@ -5,10 +5,9 @@ import "strings"
 var endpointModalities = map[string]map[string]bool{
 	"/v1/chat/completions":     {"text": true, "multimodal": true},
 	"/v1/messages":             {"text": true, "multimodal": true},
-	"/v1/completions":          {"text": true, "multimodal": true},
-	"/v1/embeddings":           {"embedding": true, "multimodal": true},
-	"/v1/audio/transcriptions": {"audio": true, "multimodal": true},
-	"/v1/audio/translations":   {"audio": true, "multimodal": true},
+	"/v1/embeddings":           {"embedding": true},
+	"/v1/audio/transcriptions": {"audio": true},
+	"/v1/audio/translations":   {"audio": true},
 }
 
 // knownModalities is what this build understands. A value outside it comes from a control plane
@@ -18,14 +17,13 @@ var knownModalities = map[string]bool{
 	"text": true, "multimodal": true, "embedding": true, "audio": true,
 }
 
-// ServesRoute reports whether this route answers on this path — the model's modality when it is
-// an engine of ours, and the pushed dialect when it is a vendor. A provider is a closed set
-// where an engine is not: a path outside its dialect is a 404 from it, after a round trip we
-// paid for — so it is our 404 instead.
-func ServesRoute(r Route, path string) bool {
+// ServesRoute reports whether this route answers on this surface and path — the model's modality
+// when it is an engine of ours, and the pushed dialect when it is a vendor. A provider is a closed
+// set where an engine is not: anything but its dialect's own paths is a 404 from it, after a
+// round trip we paid for — so it is our 404 instead.
+func ServesRoute(r Route, dialect, path string) bool {
 	if r.IsProvider() {
-		clientDialect := ClientDialect(path)
-		return clientDialect != "" && r.SpeaksDialect(clientDialect)
+		return PathDialect(path) == dialect && r.SpeaksDialect(dialect)
 	}
 	return Serves(r.Modality, path)
 }

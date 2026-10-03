@@ -13,16 +13,16 @@ const (
 	DialectAnthropic = "anthropic"
 )
 
-// ClientDialect is the dialect a surface path declares. "" for every path outside the two
-// chat-shaped surfaces — those keep their existing modality/404 rules.
-func ClientDialect(path string) string {
-	switch strings.TrimRight(path, "/") {
-	case "/v1/chat/completions", "/v1/completions":
-		return DialectOpenAI
-	case "/v1/messages", "/v1/messages/count_tokens":
-		return DialectAnthropic
-	}
-	return ""
+// vendorPaths are the paths a vendor serves, each owned by one dialect's surface. A new
+// surface for a dialect (say /v1/responses for OpenAI) is a row here.
+var vendorPaths = map[string]string{
+	"/v1/chat/completions": DialectOpenAI,
+	"/v1/messages":         DialectAnthropic,
+}
+
+// PathDialect is the dialect that owns a vendor path, "" for any other path.
+func PathDialect(path string) string {
+	return vendorPaths[strings.TrimRight(path, "/")]
 }
 
 // AnthropicError renders an upstream failure in the shape an Anthropic SDK parses. The type

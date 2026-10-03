@@ -18,9 +18,9 @@ func TestServes(t *testing.T) {
 		{"embedding", "/v1/embeddings", true, ""},
 		{"audio", "/v1/audio/transcriptions", true, ""},
 		{"audio", "/v1/audio/translations", true, ""},
-		{"multimodal", "/v1/audio/transcriptions", true, "a multimodal model takes every input surface"},
-		{"multimodal", "/v1/audio/translations", true, ""},
-		{"multimodal", "/v1/embeddings", true, ""},
+		{"multimodal", "/v1/audio/transcriptions", false, "images ride the chat body; audio in is an ASR box"},
+		{"multimodal", "/v1/audio/translations", false, ""},
+		{"multimodal", "/v1/embeddings", false, "nor is it a pooling model"},
 
 		{"text", "/v1/audio/transcriptions", false, "a chat engine would 404 this after a round trip"},
 		{"audio", "/v1/chat/completions", false, "an ASR box cannot hold a conversation"},
@@ -63,41 +63,42 @@ func TestServesRoute(t *testing.T) {
 	engine := Route{Kind: "direct", Modality: "text"}
 
 	for _, c := range []struct {
-		name  string
-		route Route
-		path  string
-		want  bool
-		why   string
+		name    string
+		route   Route
+		dialect string
+		path    string
+		want    bool
+		why     string
 	}{
-		{"vendor", vendor, "/v1/messages", true, "the surface the dialect exists for"},
-		{"vendor", vendor, "/v1/messages/count_tokens", true, ""},
-		{"vendor", vendor, "/v1/messages/", true, "a trailing slash is the same endpoint"},
-		{"vendor", vendor, "/v1/chat/completions", false, "nothing translates"},
-		{"vendor", vendor, "/v1/embeddings", false, ""},
-		{"vendor", vendor, "/v1/rerank", false, "unclaimed is allowed on an engine and refused on a vendor"},
-		{"vendor", vendor, "/tokenize", false, ""},
+		{"vendor", vendor, DialectAnthropic, "/v1/messages", true, "the surface the dialect exists for"},
+		{"vendor", vendor, DialectAnthropic, "/v1/messages/count_tokens", false, "no surface for it"},
+		{"vendor", vendor, DialectAnthropic, "/v1/messages/", true, "a trailing slash is the same endpoint"},
+		{"vendor", vendor, DialectOpenAI, "/v1/chat/completions", false, "nothing translates"},
+		{"vendor", vendor, DialectOpenAI, "/v1/embeddings", false, ""},
+		{"vendor", vendor, DialectOpenAI, "/v1/rerank", false, "unclaimed is allowed on an engine and refused on a vendor"},
+		{"vendor", vendor, DialectOpenAI, "/tokenize", false, ""},
 
-		{"openai-vendor", openaiVendor, "/v1/chat/completions", true, ""},
-		{"openai-vendor", openaiVendor, "/v1/completions", true, ""},
-		{"openai-vendor", openaiVendor, "/v1/messages", false, "nothing translates"},
+		{"openai-vendor", openaiVendor, DialectOpenAI, "/v1/chat/completions", true, ""},
+		{"openai-vendor", openaiVendor, DialectOpenAI, "/v1/completions", false, "legacy completions is not a surface"},
+		{"openai-vendor", openaiVendor, DialectAnthropic, "/v1/messages", false, "nothing translates"},
 
-		{"blank-vendor", blankVendor, "/v1/chat/completions", false, "a vendor row without a dialect serves nothing"},
-		{"blank-vendor", blankVendor, "/v1/messages", false, ""},
+		{"blank-vendor", blankVendor, DialectOpenAI, "/v1/chat/completions", false, "a vendor row without a dialect serves nothing"},
+		{"blank-vendor", blankVendor, DialectAnthropic, "/v1/messages", false, ""},
 
-		{"engine", engine, "/v1/rerank", true, "engines still serve more than the OpenAI core"},
-		{"engine", engine, "/v1/chat/completions", true, ""},
-		{"engine", engine, "/v1/messages", true, "vLLM answers both dialects natively"},
-		{"engine", engine, "/v1/embeddings", false, "a text engine is still held to its modality"},
+		{"engine", engine, DialectOpenAI, "/v1/rerank", true, "engines still serve more than the OpenAI core"},
+		{"engine", engine, DialectOpenAI, "/v1/chat/completions", true, ""},
+		{"engine", engine, DialectAnthropic, "/v1/messages", true, "vLLM answers both dialects natively"},
+		{"engine", engine, DialectOpenAI, "/v1/embeddings", false, "a text engine is still held to its modality"},
 	} {
-		if got := ServesRoute(c.route, c.path); got != c.want {
-			t.Errorf("ServesRoute(%s, %q) = %v, want %v — %s", c.name, c.path, got, c.want, c.why)
+		if got := ServesRoute(c.route, c.dialect, c.path); got != c.want {
+			t.Errorf("ServesRoute(%s, %s, %q) = %v, want %v — %s", c.name, c.dialect, c.path, got, c.want, c.why)
 		}
 	}
 }
 
 // A route pushed before the vendor split has no Kind, and must keep being read as one of ours.
 func TestABlankKindIsStillAnEngine(t *testing.T) {
-	if !ServesRoute(Route{Modality: "text"}, "/v1/rerank") {
+	if !ServesRoute(Route{Modality: "text"}, DialectOpenAI, "/v1/rerank") {
 		t.Error("a route with no kind was treated as a vendor")
 	}
 }

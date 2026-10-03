@@ -296,6 +296,7 @@ func newRoute(deps Deps) (Middleware, error) {
 				MeterID:   state.Identity.MeterID,
 				KeyPrefix: state.Identity.Prefix(),
 				Path:      r.URL.Path,
+				Dialect:   respond.Dialect(r.Context()),
 				RequestID: state.RequestID,
 			})
 			if err != nil {

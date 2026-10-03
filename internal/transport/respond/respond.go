@@ -3,6 +3,7 @@
 package respond
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -43,11 +44,26 @@ func TypedErrorFor(w http.ResponseWriter, r *http.Request, status int, errorType
 	})
 }
 
-// anthropicSurface is anything under /anthropic before the alias strips it, and an Anthropic path
-// after — the data chain only ever sees the stripped form.
+type dialectKey struct{}
+
+// WithDialect records the surface a request arrived on. The /anthropic alias sets it as it strips
+// the prefix, the only point that still knows which surface it was.
+func WithDialect(ctx context.Context, dialect string) context.Context {
+	return context.WithValue(ctx, dialectKey{}, dialect)
+}
+
+// Dialect is the surface a request arrived on. Root is the OpenAI surface, so unset is OpenAI.
+func Dialect(ctx context.Context) string {
+	if d, _ := ctx.Value(dialectKey{}).(string); d != "" {
+		return d
+	}
+	return domain.DialectOpenAI
+}
+
+// anthropicSurface is anything under /anthropic before the alias strips it, and whatever the alias
+// marked after — the data chain only ever sees the stripped form.
 func anthropicSurface(r *http.Request) bool {
-	path := r.URL.Path
-	return strings.HasPrefix(path, "/anthropic/") || domain.ClientDialect(path) == domain.DialectAnthropic
+	return strings.HasPrefix(r.URL.Path, "/anthropic/") || Dialect(r.Context()) == domain.DialectAnthropic
 }
 
 // Denial answers whatever the admission path refused with. Anything that is not a Denial is a bug

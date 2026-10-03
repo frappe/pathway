@@ -27,6 +27,8 @@ type Request struct {
 	// Path is the surface being asked for, checked against the model's modality. An ASR model and
 	// a chat model are indistinguishable by name alone.
 	Path string
+	// Dialect is the surface the request arrived on; a vendor serves only its own.
+	Dialect string
 	// RequestID was minted at the edge; the claim and the decision carry it. Blank is minted here
 	// rather than claimed as "" — a blank member would silently undercount the engine.
 	RequestID string
@@ -59,10 +61,10 @@ type Service struct {
 	syntheticTTL func() time.Duration
 }
 
-func serving(table []domain.Route, path string) []domain.Route {
+func serving(table []domain.Route, dialect, path string) []domain.Route {
 	out := make([]domain.Route, 0, len(table))
 	for _, candidate := range table {
-		if domain.ServesRoute(candidate, path) {
+		if domain.ServesRoute(candidate, dialect, path) {
 			out = append(out, candidate)
 		}
 	}
@@ -117,7 +119,7 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	// filters the table and the pick runs on what survives. Refused only when nothing does,
 	// rather than forwarded — the upstream would 404 it, and this sits above meter, so a
 	// wrong-surface call bills nothing.
-	table = serving(table, req.Path)
+	table = serving(table, req.Dialect, req.Path)
 	if len(table) == 0 {
 		return Decision{}, domain.Deny(404, req.Model+" does not serve "+req.Path)
 	}

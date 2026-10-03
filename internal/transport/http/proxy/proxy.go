@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/transport/respond"
 )
 
 // Outcome is what the proxy learned, for metering and passive ejection.
@@ -195,7 +196,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			p.log.Warn("upstream hop failed", "target", target, "err", err)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
-			if domain.ClientDialect(r.URL.Path) == domain.DialectAnthropic {
+			if respond.Dialect(r.Context()) == domain.DialectAnthropic {
 				_, _ = w.Write(append(domain.AnthropicError(http.StatusBadGateway, []byte("upstream unavailable")), '\n'))
 				return
 			}

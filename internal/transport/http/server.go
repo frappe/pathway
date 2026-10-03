@@ -146,7 +146,7 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 // surface, and an Anthropic client belongs under /anthropic.
 func openaiRoot(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if domain.ClientDialect(r.URL.Path) == domain.DialectAnthropic {
+		if domain.PathDialect(r.URL.Path) == domain.DialectAnthropic {
 			respond.Error(w, http.StatusNotFound, "no such path at root; Anthropic clients use /anthropic"+r.URL.Path)
 			return
 		}
@@ -159,11 +159,11 @@ func openaiRoot(next http.Handler) http.Handler {
 func anthropicAlias(next http.Handler) http.Handler {
 	stripped := http.StripPrefix("/anthropic", next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if domain.ClientDialect(strings.TrimPrefix(r.URL.Path, "/anthropic")) != domain.DialectAnthropic {
+		if domain.PathDialect(strings.TrimPrefix(r.URL.Path, "/anthropic")) != domain.DialectAnthropic {
 			respond.ErrorFor(w, r, http.StatusNotFound, "no such path under /anthropic")
 			return
 		}
-		stripped.ServeHTTP(w, r)
+		stripped.ServeHTTP(w, r.WithContext(respond.WithDialect(r.Context(), domain.DialectAnthropic)))
 	})
 }
 

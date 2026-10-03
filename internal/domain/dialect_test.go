@@ -5,21 +5,16 @@ import (
 	"testing"
 )
 
-// The dialect a path declares. Everything outside the two chat pairs stays with the modality
-// rules, which is what keeps "unknown format errored" the standing behaviour.
-func TestClientDialect(t *testing.T) {
+func TestPathDialect(t *testing.T) {
 	for path, want := range map[string]string{
-		"/v1/chat/completions":      DialectOpenAI,
-		"/v1/completions":           DialectOpenAI,
-		"/v1/messages":              DialectAnthropic,
-		"/v1/messages/":             DialectAnthropic,
-		"/v1/messages/count_tokens": DialectAnthropic,
-		"/v1/embeddings":            "",
-		"/v1/responses":             "",
-		"/":                         "",
+		"/v1/chat/completions": DialectOpenAI,
+		"/v1/messages":         DialectAnthropic,
+		"/v1/messages/":        DialectAnthropic,
+		"/v1/embeddings":       "",
+		"/":                    "",
 	} {
-		if got := ClientDialect(path); got != want {
-			t.Errorf("ClientDialect(%q) = %q, want %q", path, got, want)
+		if got := PathDialect(path); got != want {
+			t.Errorf("PathDialect(%q) = %q, want %q", path, got, want)
 		}
 	}
 }

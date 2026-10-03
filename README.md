@@ -948,10 +948,17 @@ malformed and the row serves nothing.
 
 A provider route is also **deny-by-default on the surface check**. `Serves` is generous to an engine
 because an engine answers on more than the OpenAI core (`/tokenize`, `/v1/rerank`), but a vendor is a
-closed set we already know, so `ServesRoute` holds it to its dialect's chat paths —
-`/v1/chat/completions` and `/v1/completions` for `openai`, `/v1/messages` and
-`/v1/messages/count_tokens` for `anthropic`. Anything else is our 404 at `routing.go`, above
-`meter`, instead of a round trip that comes back as theirs.
+closed set we already know, so `ServesRoute` holds it to its dialect's paths — `/v1/chat/completions`
+for `openai`, `/v1/messages` for `anthropic`. Anything else is our 404 at `routing.go`, above
+`meter`, instead of a round trip that comes back as theirs. The paths are one table,
+`vendorPaths` in `domain/dialect.go`, path → dialect: serving another (`/v1/responses` for
+`openai`, say) is a row there.
+
+The surface is not read off the path. The `/anthropic` alias strips its prefix before the chain
+runs, so below it `/anthropic/v1/messages` and a stray root `/v1/messages` look the same; the alias
+records the surface on the request as it strips (`respond.WithDialect`), and everything below —
+`routing.Request.Dialect`, the refusal's shape, the proxy's own errors — reads `respond.Dialect`.
+Unmarked is OpenAI, because root is the OpenAI surface.
 
 ### Backwards compatibility that is still load-bearing
 
@@ -971,7 +978,7 @@ closed set we already know, so `ServesRoute` holds it to its dialect's chat path
 | | |
 |---|---|
 | `POST /v1/*` | the data path for OpenAI clients. `/v1/messages` here is a 404 pointing at `/anthropic` |
-| `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` and `/v1/messages/count_tokens` only, keyed by `x-api-key` or a Bearer |
+| `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` only — anything else under it is a 404 in Anthropic's shape — keyed by `x-api-key` or a Bearer |
 | `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |

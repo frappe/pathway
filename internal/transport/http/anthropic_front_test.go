@@ -150,7 +150,7 @@ func TestTheAliasServesADialectFilteredAnthropicModelList(t *testing.T) {
 // Root is the OpenAI surface: an Anthropic path there is refused before any stage runs, pointing
 // the client at /anthropic, and nothing is dialled.
 func TestRootRefusesTheAnthropicSurface(t *testing.T) {
-	for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
+	for _, path := range []string{"/v1/messages", "/v1/messages/"} {
 		f := providerFixtureAnswering(t, jsonEngine(anthropicMessage))
 		resp := f.post(path, `{"model":"anthropic/claude-4-5","max_tokens":16,"messages":[]}`)
 		if resp.Code != http.StatusNotFound {
