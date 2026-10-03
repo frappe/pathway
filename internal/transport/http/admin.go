@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"github.com/phot0n/pathway/internal/service/metering"
 	"net/http"
+	"strings"
 
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/repository"
@@ -24,10 +26,25 @@ type adminKey struct {
 type adminUser struct {
 	Name    string `json:"name"`
 	Email   string `json:"email"`
-	Group   string `json:"group"` // "" = ungrouped
-	Allow   string `json:"allow"` // comma list: this user's adds on top of the group
+	Group   string `json:"group"` // comma list of group names; "" = ungrouped
+	Allow   string `json:"allow"` // comma list: this user's adds on top of their groups'
 	Deny    string `json:"deny"`  // comma list: removals that beat every grant
 	Limited bool   `json:"limited"`
+	// LogPayloads opts this user's prompts and outputs into the payload log. Absent on an older
+	// control plane's push, which decodes false — off.
+	LogPayloads bool   `json:"log_payloads"`
+	Geography   string `json:"geography"` // blank = unpinned, as an older push decodes
+	// Prepaid gates this user on Budget, a nano-USD ceiling. Absent on an older push: no gate.
+	Prepaid bool  `json:"prepaid"`
+	Budget  int64 `json:"budget"`
+}
+
+func (u adminUser) upsert() repository.UserUpsert {
+	return repository.UserUpsert{
+		Name: u.Name, Email: u.Email, Groups: u.Group,
+		Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
+		Geography: u.Geography, Prepaid: u.Prepaid, Budget: u.Budget,
+	}
 }
 
 type adminGroup struct {
@@ -76,10 +93,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	records := make([]repository.UserUpsert, 0, len(body.Users))
 	for _, u := range body.Users {
-		records = append(records, repository.UserUpsert{
-			Name: u.Name, Email: u.Email, Group: u.Group,
-			Allow: u.Allow, Deny: u.Deny, Limited: u.Limited,
-		})
+		records = append(records, u.upsert())
 	}
 	if err := s.provisioning.UpsertUsers(r.Context(), records); err != nil {
 		respond.Error(w, http.StatusServiceUnavailable, "user store error")
@@ -88,12 +102,11 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"ok": true, "count": len(body.Users)})
 }
 
-// PUT /admin/groups — upsert what each group grants, plus the pooled public catalogue. Upsert-only:
+// PUT /admin/groups — upsert what each group grants. Upsert-only:
 // a group nobody links to is unreachable, not harmful.
 func (s *Server) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Groups  []adminGroup `json:"groups"`
-		Catalog *string      `json:"catalog"` // nil = a control plane that predates it
+		Groups []adminGroup `json:"groups"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -104,7 +117,7 @@ func (s *Server) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 			Name: g.Name, Models: g.Models,
 		})
 	}
-	if err := s.provisioning.UpsertGroups(r.Context(), records, body.Catalog); err != nil {
+	if err := s.provisioning.UpsertGroups(r.Context(), records); err != nil {
 		respond.Error(w, http.StatusServiceUnavailable, "group store error")
 		return
 	}
@@ -143,6 +156,14 @@ func (s *Server) handleAdminStateHash(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"hashes": hashes})
 }
 
+// GET /admin/in-flight — whether new requests are refused, and how many are still running. The
+// control plane polls it to know a box in maintenance has gone idle.
+func (s *Server) handleAdminInFlight(w http.ResponseWriter, _ *http.Request) {
+	respond.JSON(w, map[string]any{"maintenance": s.inMaintenance(), "in_flight": s.inFlight.Load()})
+}
+
+func (s *Server) inMaintenance() bool { return s.maintenance != nil && s.maintenance() }
+
 // POST /admin/state — desired state, whole per section (plan_agent_state_sync.md): apply what is
 // named, delete what is not, store the hashes — one transaction. Errors are 500s, never swallowed:
 // a push acknowledged but not stored would be divergence no retry ever heals.
@@ -150,7 +171,6 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Groups *struct {
 			Hash    string       `json:"hash"`
-			Catalog string       `json:"catalog"`
 			Records []adminGroup `json:"records"`
 		} `json:"groups"`
 		Users *struct {
@@ -181,7 +201,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			records = append(records, repository.GroupUpsert{Name: g.Name, Models: g.Models})
 		}
 		push.Groups = &repository.GroupsPush{
-			Hash: body.Groups.Hash, Catalog: body.Groups.Catalog, Records: records,
+			Hash: body.Groups.Hash, Records: records,
 		}
 	}
 	if body.Users != nil {
@@ -189,10 +209,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 		for label, bucket := range body.Users.Buckets {
 			records := make([]repository.UserUpsert, 0, len(bucket.Records))
 			for _, u := range bucket.Records {
-				records = append(records, repository.UserUpsert{
-					Name: u.Name, Email: u.Email, Group: u.Group,
-					Allow: u.Allow, Deny: u.Deny, Limited: u.Limited,
-				})
+				records = append(records, u.upsert())
 			}
 			push.Users[label] = repository.UserBucket{Hash: bucket.Hash, Records: records}
 		}
@@ -221,16 +238,102 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"counts": counts})
 }
 
-// GET /admin/usage — pull: atomically read-and-delete every live counter. Mutating, and there is no
-// second round trip, so a failed insert control-plane-side drops that cycle's delta rather than
-// double-counting it.
+// GET /grove-admin/provider-keys?ids=a,b — what each vendor credential answered, lifetime, by the
+// id the control plane pushed it under. A key never dialled answers zeros.
+func (s *Server) handleAdminProviderKeys(w http.ResponseWriter, r *http.Request) {
+	ids := commaList(r.URL.Query().Get("ids"))
+	if s.providerKeys == nil || len(ids) == 0 {
+		respond.JSON(w, map[string]domain.KeyStats{})
+		return
+	}
+	stats, err := s.providerKeys.Stats(r.Context(), ids)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "provider key store error")
+		return
+	}
+	respond.JSON(w, stats)
+}
+
+// commaList splits a query value on commas, blanks dropped.
+func commaList(value string) []string {
+	var items []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// GET /grove-admin/usage[?keys=p1,p2] — pull: live counters set aside under a new drain id (only
+// the listed prefixes when keys is given), answered with every counter not yet acknowledged,
+// grouped by drain id. Nothing is deleted here, so a key the control plane failed to record is
+// answered again on the next pull under its own id, while the rest move on.
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
-	usages, err := s.provisioning.DrainUsage(r.Context())
+	drains, err := s.provisioning.DrainUsage(r.Context(), commaList(r.URL.Query().Get("keys")))
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "usage store error")
 		return
 	}
-	respond.JSON(w, map[string]any{"usages": usages})
+	answer := map[string]any{"drains": drains}
+	if spool := s.spool(); spool != nil {
+		// Lines the store kept refusing, for the control plane to land or record as stuck.
+		answer["dead"], answer["spool"] = spool.Dead(), spool.Stats()
+	}
+	respond.JSON(w, answer)
+}
+
+// POST /grove-admin/usage/ack {"acks": {"<drain id>": ["<prefix>", ...]}, "dead": ["<request id>"]}
+// — the control plane has committed these keys, and recorded these dead spool lines. Each is kept for the retention window, then expires. A pair not waiting
+// is a no-op, so a retried ack is harmless.
+func (s *Server) handleAdminUsageAck(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Acks map[string][]string `json:"acks"`
+		Dead []string            `json:"dead"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	count, err := s.provisioning.AckUsage(r.Context(), body.Acks, s.usageRetention())
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "usage store error")
+		return
+	}
+	if spool := s.spool(); spool != nil && len(body.Dead) > 0 {
+		forgot, err := spool.Forget(body.Dead)
+		if err != nil {
+			respond.Error(w, http.StatusInternalServerError, "usage spool error")
+			return
+		}
+		count += forgot
+	}
+	respond.JSON(w, map[string]any{"ok": true, "count": count})
+}
+
+// POST /grove-admin/spend-adjust {"user", "delta", "id"} — correct one holder's lifetime spend on
+// this store by delta nano-USD, once per id: a retry answers applied=false and moves nothing.
+func (s *Server) handleAdminSpendAdjust(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		User  string `json:"user"`
+		Delta int64  `json:"delta"`
+		ID    string `json:"id"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if body.User == "" || body.ID == "" {
+		http.Error(w, "user and id are required", http.StatusBadRequest)
+		return
+	}
+	spent, applied, found, err := s.provisioning.AdjustSpent(r.Context(), body.User, body.ID, body.Delta)
+	switch {
+	case err != nil:
+		respond.Error(w, http.StatusInternalServerError, "user store error")
+	case !found:
+		respond.Error(w, http.StatusNotFound, "no such user on this store")
+	default:
+		respond.JSON(w, map[string]any{"spent": spent, "applied": applied})
+	}
 }
 
 func (s *Server) deleteRecords(w http.ResponseWriter, r *http.Request, remove func(context.Context, []string) (int, error)) {
@@ -262,10 +365,23 @@ func adminAuth(token string, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// decodeBody refuses a field this binary does not know. A push the box cannot keep whole is an
+// error the control plane must see — a row stored without the field, under the hash of the full
+// payload, is drift no later push would notice.
 func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
-	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(into); err != nil {
+		http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
 		return false
 	}
 	return true
+}
+
+// spool is the usage spool, or nil on a box that keeps none.
+func (s *Server) spool() *metering.Spool {
+	if s.metering == nil {
+		return nil
+	}
+	return s.metering.Spool
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -64,58 +65,111 @@ func newAccessLog(deps Deps) (Middleware, error) {
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Already inside an accesslog: a listener wraps its whole mux in one, and the data
+			// chain carries its own. One line per request — the outermost wins.
+			if !From(r).Started.IsZero() {
+				next.ServeHTTP(w, r)
+				return
+			}
 			r, state := newState(r)
+			// Answered under both names — OpenAI SDKs read X-Request-Id, Anthropic SDKs Request-Id —
+			// and set before any stage can refuse, so a denial carries it as well as a completion.
+			w.Header().Set("X-Request-Id", state.RequestID)
+			w.Header().Set("Request-Id", state.RequestID)
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
-			next.ServeHTTP(recorder, r)
+			// Deferred: a client hanging up mid-stream unwinds this stage through
+			// http.ErrAbortHandler, which recover deliberately re-panics. A request served
+			// until the moment it was abandoned still owes its line — the upstream generated
+			// and billed whatever it had, and a log that silently drops those requests is one
+			// that cannot be reconciled against the bill.
+			defer func() {
+				attrs := []slog.Attr{
+					slog.String("remote", clientIP(r)),
+					slog.String("method", r.Method),
+					slog.String("path", r.URL.Path),
+					slog.Int("status", recorder.status),
+					slog.Int64("bytes", recorder.written),
+					slog.Float64("rt", time.Since(state.Started).Seconds()),
+				}
+				// ttft is an upstream measurement — the wait for the first byte an engine or vendor
+				// sent back. On a request the gateway answered itself (a model list, a health check,
+				// a refusal) it would only repeat rt, so it is left off the line.
+				if state.Decision.EngineURL() != "" {
+					attrs = append(attrs, slog.Float64("ttft", recorder.ttft(state.Started)))
+				}
+				attrs = append(attrs,
+					slog.Int("attempts", state.Attempts),
+					slog.String("key", or(state.Identity.Prefix(), "-")),
+					slog.String("model", or(state.Model, "-")),
+					slog.String("rid", state.RequestID),
+					slog.String("upstream", or(state.Decision.EngineURL(), "-")),
+					slog.String("upstream_rid", or(state.UpstreamRID, "-")),
+					slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
+					slog.String("engine", or(state.Deployment, "-")),
+					slog.Int("upstream_status", state.UpstreamStatus),
+					slog.String("reason", or(state.DeniedReason, state.Reason)),
+					slog.String("cut", or(state.Cut, "-")),
+				)
+				access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
+			}()
 
-			access.LogAttrs(r.Context(), slog.LevelInfo, "access",
-				slog.String("remote", clientIP(r)),
-				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
-				slog.Int("status", recorder.status),
-				slog.Int64("bytes", recorder.written),
-				slog.Float64("rt", time.Since(state.Started).Seconds()),
-				slog.String("key", or(state.Identity.Prefix(), "-")),
-				slog.String("model", or(state.Model, "-")),
-				slog.String("rid", or(state.Decision.RequestID, "-")),
-				slog.String("upstream", or(state.Decision.EngineURL(), "-")),
-				slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
-				slog.String("engine", or(state.Deployment, "-")),
-				slog.Int("upstream_status", state.UpstreamStatus),
-				slog.String("reason", or(state.DeniedReason, state.Reason)),
-			)
+			next.ServeHTTP(recorder, r)
 		})
 	}, nil
 }
 
-// drain answers while the process is shutting down. In-flight requests are past this stage and stay
-// past it; only a new one on an already-open connection lands here, and it gets a real message with
-// a retry hint rather than a reset.
+// drain answers while the process is shutting down or in maintenance. In-flight requests are past
+// this stage and stay past it; a new one gets a real message with a retry hint rather than a reset.
+// Everything it lets through is counted, so the control plane can wait for zero.
 func newDrain(deps Deps) (Middleware, error) {
-	if deps.Drain == nil {
-		return passthrough, nil
-	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !deps.Drain.Draining() {
-				next.ServeHTTP(w, r)
+			if deps.Drain != nil && deps.Drain.Draining() {
+				refuse(w, r, "draining", "5", "gateway is restarting, retry shortly")
 				return
 			}
-			state := From(r)
-			state.Denied, state.DeniedReason = http.StatusServiceUnavailable, "draining"
-			w.Header().Set("Retry-After", "5")
-			w.Header().Set("Connection", "close")
-			respond.Error(w, http.StatusServiceUnavailable, "gateway is restarting, retry shortly")
+			// Counted BEFORE the check: a request that saw maintenance off is already in the count
+			// any reader who turned it on sees afterwards.
+			if deps.InFlight != nil {
+				deps.InFlight.Add(1)
+				defer deps.InFlight.Add(-1)
+			}
+			if deps.Maintenance != nil && deps.Maintenance() {
+				refuse(w, r, "maintenance", "30", "gateway is under maintenance, retry shortly")
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}, nil
+}
+
+func refuse(w http.ResponseWriter, r *http.Request, reason, retryAfter, message string) {
+	state := From(r)
+	state.Denied, state.DeniedReason = http.StatusServiceUnavailable, reason
+	w.Header().Set("Retry-After", retryAfter)
+	w.Header().Set("Connection", "close")
+	respond.TypedErrorFor(w, r, http.StatusServiceUnavailable, reason, message)
+}
+
+// Credential is the caller's key however their SDK spells it: Authorization Bearer, or the
+// x-api-key header every Anthropic SDK sends instead. Normalised to the Bearer form so one
+// admission path serves both dialects' clients.
+func Credential(r *http.Request) string {
+	if authorization := r.Header.Get("Authorization"); authorization != "" {
+		return authorization
+	}
+	if key := r.Header.Get("x-api-key"); key != "" {
+		return "Bearer " + key
+	}
+	return ""
 }
 
 // auth resolves the caller: bearer → key → user → group, once, into the State.
 func newAuth(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			identity, err := deps.Admission.Identify(r.Context(), r.Header.Get("Authorization"))
+			identity, err := deps.Admission.Identify(r.Context(), Credential(r))
 			if err != nil {
 				deny(w, r, err)
 				return
@@ -126,19 +180,29 @@ func newAuth(deps Deps) (Middleware, error) {
 	}, nil
 }
 
-// quota honours the monthly token budget the control plane pushed. The gateway keeps no counters of
-// its own — it reads a flag someone else computed.
+// quota honours the geography pin, the credit flag the control plane pushed, and the prepaid
+// balance this box keeps — all read off the user record, before the body is.
 func newQuota(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if From(r).Identity.User.Limited {
-				deny(w, r, domain.Deny(http.StatusTooManyRequests, "monthly token quota exhausted"))
+			usr := From(r).Identity.User
+			if err := domain.GeographyDenial(usr, deps.Geography); err != nil {
+				deny(w, r, err)
+				return
+			}
+			if err := domain.ExhaustedDenial(usr); err != nil {
+				deny(w, r, err)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}, nil
 }
+
+// bodyReadTimeout bounds how long the gateway waits for the body it reads itself. ReadHeaderTimeout
+// stops at the headers, so without it a client that drips its body holds a goroutine and up to
+// max_body_bytes of buffer for as long as it likes. A var so a test can lower it.
+var bodyReadTimeout = 60 * time.Second
 
 // body reads and decodes the request body, bounded. The model and the session hint come out of it,
 // and every stage below reads them from the State rather than parsing again.
@@ -169,6 +233,20 @@ func newBody(deps Deps) (Middleware, error) {
 				return
 			}
 
+			// Only around what this stage reads, cleared before the hop: the rest of a multipart
+			// upload streams through the proxy, where a client-side timeout would read as the
+			// upstream failing. Not supported on a recorder, which is fine — nothing drips there.
+			// ponytail: an upload's tail past its model field is still unbounded in time.
+			reading := http.NewResponseController(w)
+			_ = reading.SetReadDeadline(time.Now().Add(bodyReadTimeout))
+			// Cleared only on success: after a failed read the deadline must stay, or the server
+			// waits out the rest of the stalled body before the refusal goes out.
+			doneReading := func(err error) {
+				if err == nil {
+					_ = reading.SetReadDeadline(time.Time{})
+				}
+			}
+
 			// A multipart body gives up its fields without being materialised and is forwarded as it
 			// arrived. It never becomes a transform.Body, so the transform stage below skips it
 			// rather than re-encoding a form as JSON.
@@ -177,18 +255,20 @@ func newBody(deps Deps) (Middleware, error) {
 					deny(w, r, domain.Deny(http.StatusRequestEntityTooLarge, "request body too large"))
 					return
 				}
-				model, session, err := readMultipart(w, r, boundary, maxBytes, deps.Log)
+				model, session, form, err := readMultipart(w, r, boundary, maxBytes, deps.Log)
+				doneReading(err)
 				if err != nil {
 					denyUnreadableBody(w, r, err)
 					return
 				}
-				state.Model, state.Session = model, session
+				state.Model, state.Session, state.Form = model, session, form
 				applySessionHeader(r, state)
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
+			doneReading(err)
 			if err != nil {
 				denyUnreadableBody(w, r, err)
 				return
@@ -197,6 +277,7 @@ func newBody(deps Deps) (Middleware, error) {
 
 			// A body that is not a JSON object is not an error here: some /v1 endpoints take none
 			// at all, and the engine is the right place to reject a malformed one.
+			state.Raw = raw
 			var decoded transform.Body
 			if len(raw) > 0 && json.Unmarshal(raw, &decoded) == nil {
 				state.Body = decoded
@@ -236,6 +317,8 @@ func newRoute(deps Deps) (Middleware, error) {
 				MeterID:   state.Identity.MeterID,
 				KeyPrefix: state.Identity.Prefix(),
 				Path:      r.URL.Path,
+				Dialect:   respond.Dialect(r.Context()),
+				RequestID: state.RequestID,
 			})
 			if err != nil {
 				deny(w, r, err)
@@ -243,10 +326,9 @@ func newRoute(deps Deps) (Middleware, error) {
 			}
 			state.Decision = decision
 
-			// Canonical, overriding any client-supplied value: vLLM adopts X-Request-Id as its own
-			// request id and OpenAI-aware tooling reads it back.
+			// Outbound: canonical over anything the client sent. vLLM adopts X-Request-Id as its own
+			// request id; an ingress carries it on unchanged.
 			r.Header.Set("X-Request-Id", decision.RequestID)
-			w.Header().Set("X-Request-Id", decision.RequestID)
 			next.ServeHTTP(w, r)
 		})
 	}, nil
@@ -265,13 +347,20 @@ func newMeter(deps Deps) (Middleware, error) {
 				ctx := withoutCancel(r.Context())
 				deps.Routing.Release(ctx, state.Decision.EngineURL(), state.Decision.RequestID)
 				deps.Metering.Record(ctx, metering.Report{
+					RequestID:      state.RequestID,
 					Prefix:         state.Identity.Prefix(),
 					Model:          state.Model,
 					Deployment:     or(state.Deployment, state.Decision.Route.Deployment),
 					Usage:          state.Usage,
+					UsageStart:     state.UsageStart,
+					Pricing:        state.Decision.Route.Pricing,
+					User:           state.Identity.Key.User,
+					Prepaid:        state.Identity.User.Prepaid,
+					Budget:         state.Identity.User.Budget,
 					Target:         state.Decision.EngineURL(),
 					UpstreamStatus: statusText(state.UpstreamStatus),
 					Reason:         state.Reason,
+					Cut:            state.Cut,
 				})
 			}()
 			next.ServeHTTP(w, r)
@@ -297,6 +386,9 @@ func newTransform(deps Deps) (Middleware, error) {
 			changed, err := deps.Transform.Apply(transform.Context{
 				Path:          r.URL.Path,
 				UpstreamModel: state.Decision.Route.UpstreamModel,
+				User:          state.Identity.Key.User,
+				Provider:      state.Decision.Route.IsProvider(),
+				Vendor:        vendor(state.Decision.Route),
 			}, state.Body)
 			if err != nil {
 				deps.Log.Error("request transform failed", "path", r.URL.Path, "err", err)
@@ -338,22 +430,34 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
-			route := state.Decision.Route
+			route, secret := state.Decision.Route, state.Decision.Key.Secret
+			// The caller may have authenticated with either header; neither may travel onward.
+			r.Header.Del("x-api-key")
 			switch {
 			case route.IsProvider():
 				// A vendor authenticates its own way, and would read our Bearer as a caller's
-				// credential leaking outward — so it is deleted, not overwritten.
-				// ponytail: one vendor's scheme hardcoded. A second one means pushing the header
-				// name, the value prefix and any constants on the route instead of this branch.
+				// credential leaking outward — so it is deleted, not overwritten. The scheme
+				// follows the front's dialect: an Anthropic front takes x-api-key and its version
+				// header, an OpenAI-compatible one takes the Bearer everyone else does. Our request
+				// id stays inside our network too: a vendor ignores it and mints its own. The
+				// secret is the decision's, not the row's: a row carries several and the retry
+				// stage moves between them.
 				r.Header.Del("Authorization")
-				if route.InternalKey != "" {
-					r.Header.Set("x-api-key", route.InternalKey)
+				r.Header.Del("X-Request-Id")
+				if route.Dialect != domain.DialectAnthropic {
+					if secret != "" {
+						r.Header.Set("Authorization", "Bearer "+secret)
+					}
+					break
+				}
+				if secret != "" {
+					r.Header.Set("x-api-key", secret)
 				}
 				if route.APIVersion != "" {
 					r.Header.Set("anthropic-version", route.APIVersion)
 				}
-			case route.InternalKey != "":
-				r.Header.Set("Authorization", "Bearer "+route.InternalKey)
+			case secret != "":
+				r.Header.Set("Authorization", "Bearer "+secret)
 			}
 			// This is the edge, so a client-sent forwarding header is a claim, not a fact.
 			// Overwritten rather than appended: the appending form leaves the caller's entries in
@@ -403,13 +507,21 @@ func newPick(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
+			// The gateway's id, adopted over the one this box minted: one grep crosses both logs, and
+			// the caller is an authenticated gateway, not a client. Read first, so a refusal below is
+			// attributable too.
+			if rid := r.Header.Get("X-Request-Id"); rid != "" {
+				state.RequestID = rid
+				w.Header().Set("X-Request-Id", rid)
+				w.Header().Set("Request-Id", rid)
+			}
 			state.Model = r.Header.Get("X-Grove-Model")
 			if state.Model == "" {
 				failIngress(w, r, http.StatusBadRequest, "no-model")
 				return
 			}
 			sessionKey := r.Header.Get("X-Grove-Session-Key")
-			requestID := r.Header.Get("X-Request-Id")
+			requestID := state.RequestID
 
 			route, err := deps.Routing.PickReplica(r.Context(), state.Model, sessionKey, requestID)
 			if err != nil {
@@ -420,7 +532,7 @@ func newPick(deps Deps) (Middleware, error) {
 				failIngress(w, r, denial.Status, denial.Reason)
 				return
 			}
-			state.Decision = routing.Decision{Route: route, RequestID: requestID}
+			state.Decision = routing.Decision{Route: route, RequestID: requestID, Key: deps.Routing.PickKey(route.Keyring())}
 
 			// Stamped before the request leaves, so it is set whatever status the engine comes back
 			// with. The gateway reads it off the response to attribute usage to a placement it
@@ -452,7 +564,7 @@ func deny(w http.ResponseWriter, r *http.Request, err error) {
 		state := From(r)
 		state.Denied, state.DeniedReason = denial.Status, denial.Reason
 	}
-	respond.Denial(w, err)
+	respond.DenialFor(w, r, err)
 }
 
 func passthrough(next http.Handler) http.Handler { return next }
@@ -478,6 +590,11 @@ func denyUnreadableBody(w http.ResponseWriter, r *http.Request, err error) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
 		deny(w, r, domain.Deny(http.StatusRequestEntityTooLarge, "request body too large"))
+		return
+	}
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		deny(w, r, domain.Deny(http.StatusRequestTimeout, "request body not received in time"))
 		return
 	}
 	deny(w, r, domain.Deny(http.StatusBadRequest, "could not read request body"))
@@ -515,6 +632,9 @@ type statusRecorder struct {
 	status  int
 	written int64
 	wrote   bool
+	// firstByte is when the first body byte left — what TTFT means on a streaming response,
+	// and the number a log store can aggregate that total time hides.
+	firstByte time.Time
 }
 
 func (s *statusRecorder) WriteHeader(status int) {
@@ -526,11 +646,31 @@ func (s *statusRecorder) WriteHeader(status int) {
 
 func (s *statusRecorder) Write(p []byte) (int, error) {
 	s.wrote = true
+	if s.firstByte.IsZero() {
+		s.firstByte = time.Now()
+	}
 	n, err := s.ResponseWriter.Write(p)
 	s.written += int64(n)
 	return n, err
 }
 
+// ttft is seconds to the first body byte, 0 when nothing was ever written.
+func (s *statusRecorder) ttft(started time.Time) float64 {
+	if s.firstByte.IsZero() {
+		return 0
+	}
+	return s.firstByte.Sub(started).Seconds()
+}
+
 // Unwrap lets net/http find the underlying writer for Flush and Hijack. Without it, wrapping the
 // writer would turn every streaming response into a buffered one.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// vendor names the third party a provider route dials — the control plane pushes the provider's
+// name as the row's deployment. Blank on anything we run.
+func vendor(route domain.Route) string {
+	if !route.IsProvider() {
+		return ""
+	}
+	return route.Deployment
+}

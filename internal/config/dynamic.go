@@ -26,6 +26,10 @@ type Dynamic struct {
 	// exists at all: it was already documented as a knob and still needed a re-provision to turn.
 	SyntheticSessionTTL string `json:"synthetic_session_ttl"`
 
+	// CapacityWait is how long a request waits for a slot when every upstream of its model is at
+	// capacity, before the 429. "0" refuses at once.
+	CapacityWait string `json:"capacity_wait"`
+
 	MaxBodyBytes        int64  `json:"max_body_bytes"`
 	UpstreamReadTimeout string `json:"upstream_read_timeout"`
 	UpstreamTLSVerify   *bool  `json:"upstream_tls_verify"`
@@ -33,6 +37,19 @@ type Dynamic struct {
 	DrainTimeout   string `json:"drain_timeout"`
 	LameDuck       string `json:"lame_duck"`
 	UpgradeTimeout string `json:"upgrade_timeout"`
+
+	// UsageRetention is how long a drain the control plane has acknowledged stays in Redis before
+	// it expires — what a control plane restored from backup could read back.
+	UsageRetention string `json:"usage_retention"`
+
+	// UsageSpool is the file a request's usage is appended to when the store is down, replayed
+	// once it answers; UsageSpoolMaxBytes caps it, past which usage is logged and dropped.
+	UsageSpool         string `json:"usage_spool"`
+	UsageSpoolMaxBytes int64  `json:"usage_spool_max_bytes"`
+
+	// Maintenance refuses new requests with a 503 while in-flight ones finish. In the file, not
+	// behind an endpoint, so a box restarted while in maintenance comes back still in it.
+	Maintenance bool `json:"maintenance"`
 }
 
 // Resolved is Dynamic with every string parsed once, so the request path never parses a duration.
@@ -42,6 +59,7 @@ type Resolved struct {
 	Transforms []string
 
 	SyntheticSessionTTL time.Duration
+	CapacityWait        time.Duration
 	MaxBodyBytes        int64
 	UpstreamReadTimeout time.Duration
 	UpstreamTLSVerify   bool
@@ -49,6 +67,13 @@ type Resolved struct {
 	DrainTimeout   time.Duration
 	LameDuck       time.Duration
 	UpgradeTimeout time.Duration
+
+	UsageRetention time.Duration
+
+	UsageSpool         string
+	UsageSpoolMaxBytes int64
+
+	Maintenance bool
 }
 
 // Defaults are what a box with no config file runs, and what any field the file omits falls back
@@ -56,7 +81,7 @@ type Resolved struct {
 func Defaults() Resolved {
 	return Resolved{
 		LogLevel:            slog.LevelInfo,
-		Transforms:          []string{"modelmap", "streamusage"},
+		Transforms:          []string{"modelmap", "streamusage", "servicetier", "maxtokens"},
 		SyntheticSessionTTL: 0,
 		MaxBodyBytes:        32 << 20,
 		UpstreamReadTimeout: 600 * time.Second,
@@ -64,6 +89,9 @@ func Defaults() Resolved {
 		DrainTimeout:        630 * time.Second,
 		LameDuck:            5 * time.Second,
 		UpgradeTimeout:      30 * time.Second,
+		UsageRetention:      7 * 24 * time.Hour,
+		UsageSpool:          "/var/lib/pathway/usage-spool.jsonl",
+		UsageSpoolMaxBytes:  1 << 30,
 	}
 }
 
@@ -91,10 +119,12 @@ func (d Dynamic) Resolve(base Resolved) (Resolved, error) {
 		target *time.Duration
 	}{
 		{"synthetic_session_ttl", d.SyntheticSessionTTL, &out.SyntheticSessionTTL},
+		{"capacity_wait", d.CapacityWait, &out.CapacityWait},
 		{"upstream_read_timeout", d.UpstreamReadTimeout, &out.UpstreamReadTimeout},
 		{"drain_timeout", d.DrainTimeout, &out.DrainTimeout},
 		{"lame_duck", d.LameDuck, &out.LameDuck},
 		{"upgrade_timeout", d.UpgradeTimeout, &out.UpgradeTimeout},
+		{"usage_retention", d.UsageRetention, &out.UsageRetention},
 	} {
 		if strings.TrimSpace(field.raw) == "" {
 			continue
@@ -111,9 +141,19 @@ func (d Dynamic) Resolve(base Resolved) (Resolved, error) {
 		}
 		out.MaxBodyBytes = d.MaxBodyBytes
 	}
+	if path := strings.TrimSpace(d.UsageSpool); path != "" {
+		out.UsageSpool = path
+	}
+	if d.UsageSpoolMaxBytes != 0 {
+		if d.UsageSpoolMaxBytes < 0 {
+			return Resolved{}, errors.New("usage_spool_max_bytes must be positive")
+		}
+		out.UsageSpoolMaxBytes = d.UsageSpoolMaxBytes
+	}
 	if d.UpstreamTLSVerify != nil {
 		out.UpstreamTLSVerify = *d.UpstreamTLSVerify
 	}
+	out.Maintenance = d.Maintenance
 	return out, nil
 }
 

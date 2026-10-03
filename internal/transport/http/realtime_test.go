@@ -53,9 +53,9 @@ func realtimeStore(t *testing.T, engineURL, modality string) *memory.Store {
 	t.Helper()
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-		Status: "active", User: "ritwik", KeyPrefix: "abc123",
+		Status: "active", User: "test-user", KeyPrefix: "abc123",
 	}
-	store.Users["ritwik"] = domain.UserRecord{Group: "acme"}
+	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("nemotron-asr")}
 	store.Routes["nemotron-asr"] = []domain.Route{{
 		EngineURL: engineURL, Healthy: true, Deployment: "pod-1",
@@ -124,12 +124,12 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 	conn.Close()
 	var drained map[string]map[string]string
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		snapshot, err := store.Repositories().Usage.Drain(context.Background())
+		snapshot, err := store.Repositories().Usage.Drain(context.Background(), "d", nil)
 		if err != nil {
 			t.Fatalf("Drain: %v", err)
 		}
-		if len(snapshot) > 0 {
-			drained = snapshot
+		if len(snapshot["d"]) > 0 {
+			drained = snapshot["d"]
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

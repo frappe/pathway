@@ -1,10 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -71,6 +73,7 @@ func TestABadFileRefusesToStart(t *testing.T) {
 		`{"log_level":"lowd"}`,           // not a level
 		`{"synthetic_session_ttl":"30"}`, // no unit — the old env var read this as "off"
 		`{"drain_timeout":"-5m"}`,        // negative
+		`{"capacity_wait":"soon"}`,
 		`{"max_body_bytes":-1}`,
 		`{"lgo_level":"debug"}`, // a typo'd key, which is a knob someone thinks they turned
 	} {
@@ -93,6 +96,9 @@ func TestOmittedFieldsKeepTheirDefault(t *testing.T) {
 	}
 	if got.DrainTimeout != Defaults().DrainTimeout {
 		t.Errorf("drain_timeout moved to %v without being named", got.DrainTimeout)
+	}
+	if got.UsageRetention != 7*24*time.Hour {
+		t.Errorf("usage_retention = %v, want the default week", got.UsageRetention)
 	}
 	if got.MaxBodyBytes != Defaults().MaxBodyBytes {
 		t.Errorf("max_body_bytes moved to %d without being named", got.MaxBodyBytes)
@@ -181,6 +187,24 @@ func TestAFileIsAppliedWholeOrNotAtAll(t *testing.T) {
 	}
 }
 
+// Maintenance is turned on and off the way every knob is: an edit and a signal.
+func TestMaintenanceIsAReloadableKnob(t *testing.T) {
+	path := write(t, `{}`)
+	live, err := Open(path, Defaults(), quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, on := range []bool{true, false} {
+		if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"maintenance":%t}`, on)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, next, changed, err := live.Reload()
+		if err != nil || next.Maintenance != on || !SameList(changed, []string{"maintenance"}) {
+			t.Errorf("maintenance=%t: next=%t changed=%v err=%v", on, next.Maintenance, changed, err)
+		}
+	}
+}
+
 // A reload that changes nothing should say so rather than reporting a change.
 func TestReloadingAnUnchangedFileReportsNoChange(t *testing.T) {
 	live, _ := Open(write(t, `{"log_level":"warn"}`), Defaults(), quiet())
@@ -201,6 +225,13 @@ func TestAnAbsentListKeepsTheDefault(t *testing.T) {
 	}
 }
 
+// Grove renders no transform list, so this default is what every box runs.
+func TestAnUnconfiguredBoxDropsTheServiceTier(t *testing.T) {
+	if !slices.Contains(Defaults().Transforms, "servicetier") {
+		t.Errorf("transforms = %v, want servicetier among them", Defaults().Transforms)
+	}
+}
+
 func sameResolved(a, b Resolved) bool {
 	return a.LogLevel == b.LogLevel &&
 		SameList(a.Middleware, b.Middleware) &&
@@ -209,7 +240,11 @@ func sameResolved(a, b Resolved) bool {
 		a.MaxBodyBytes == b.MaxBodyBytes &&
 		a.UpstreamReadTimeout == b.UpstreamReadTimeout &&
 		a.UpstreamTLSVerify == b.UpstreamTLSVerify &&
+		a.Maintenance == b.Maintenance &&
 		a.DrainTimeout == b.DrainTimeout &&
 		a.LameDuck == b.LameDuck &&
-		a.UpgradeTimeout == b.UpgradeTimeout
+		a.UpgradeTimeout == b.UpgradeTimeout &&
+		a.UsageRetention == b.UsageRetention &&
+		a.UsageSpool == b.UsageSpool &&
+		a.UsageSpoolMaxBytes == b.UsageSpoolMaxBytes
 }

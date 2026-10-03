@@ -16,8 +16,9 @@ type Client struct {
 	rdb *redis.Client
 }
 
-func New(addr string) *Client {
-	return &Client{rdb: redis.NewClient(&redis.Options{Addr: addr})}
+// New dials one Redis: loopback, or the Network's shared store, which needs a password.
+func New(addr, password string) *Client {
+	return &Client{rdb: redis.NewClient(&redis.Options{Addr: addr, Password: password})}
 }
 
 // Ping fails fast at startup: a gateway that cannot reach its store serves nothing, and finding
@@ -37,7 +38,8 @@ func (c *Client) Store() repository.Store {
 		InFlight: inFlight{c.rdb},
 		Health:   health{c.rdb},
 		Usage:    usage{c.rdb},
-		Catalog:  catalog{c.rdb},
 		State:    state{c.rdb},
+
+		ProviderKeys: providerKeys{c.rdb},
 	}
 }

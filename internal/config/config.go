@@ -19,13 +19,15 @@ const DefaultPath = "/etc/pathway/config.json"
 type Config struct {
 	ConfigPath string // the tunables file this process watches
 
-	RedisAddr string
+	RedisAddr     string
+	RedisPassword string // blank = no AUTH, as a loopback Redis has
 
 	AdminToken   string
 	IngressToken string
 	GatewayID    string // set → tenant plane
 	IngressID    string // set → infra plane; both set is a refusal
 	Region       string
+	Geography    string // blank refuses every user pinned to a geography
 
 	// The data path. Blank ListenHTTPS keeps the new listeners down entirely, which is what lets
 	// this binary ship to a box still fronted by OpenResty.
@@ -42,9 +44,10 @@ type Config struct {
 	HtpasswdPath    string
 	NodeExporterURL string
 
-	AccessLogPath string
-	ErrorLogPath  string
-	PIDFile       string
+	AccessLogPath  string
+	ErrorLogPath   string
+	PayloadLogPath string
+	PIDFile        string
 }
 
 // ServesData reports whether this process owns the customer-facing ports. False while OpenResty
@@ -61,11 +64,13 @@ func (c Config) IsIngress() bool { return c.IngressID != "" }
 // Load reads the environment and refuses to return a Config that would run wrong.
 func Load() (Config, error) {
 	cfg := Config{
-		ConfigPath: env("GROVE_CONFIG", DefaultPath),
-		RedisAddr:  env("GROVE_REDIS_ADDR", "127.0.0.1:6379"),
+		ConfigPath:    env("GROVE_CONFIG", DefaultPath),
+		RedisAddr:     env("GROVE_REDIS_ADDR", "127.0.0.1:6379"),
+		RedisPassword: strings.TrimSpace(os.Getenv("GROVE_REDIS_PASSWORD")),
 
 		IngressToken: strings.TrimSpace(os.Getenv("GROVE_INGRESS_TOKEN")),
 		Region:       strings.TrimSpace(os.Getenv("GROVE_GATEWAY_REGION")),
+		Geography:    strings.TrimSpace(os.Getenv("GROVE_GATEWAY_GEOGRAPHY")),
 
 		ListenHTTP:  strings.TrimSpace(os.Getenv("GROVE_LISTEN_HTTP")),
 		ListenHTTPS: strings.TrimSpace(os.Getenv("GROVE_LISTEN_HTTPS")),
@@ -77,9 +82,10 @@ func Load() (Config, error) {
 		HtpasswdPath:    env("GROVE_HTPASSWD", "/etc/grove/nginx/metrics.htpasswd"),
 		NodeExporterURL: env("GROVE_NODE_EXPORTER_URL", "http://127.0.0.1:9100/metrics"),
 
-		AccessLogPath: strings.TrimSpace(os.Getenv("GROVE_ACCESS_LOG")),
-		ErrorLogPath:  strings.TrimSpace(os.Getenv("GROVE_ERROR_LOG")),
-		PIDFile:       strings.TrimSpace(os.Getenv("GROVE_PID_FILE")),
+		AccessLogPath:  strings.TrimSpace(os.Getenv("GROVE_ACCESS_LOG")),
+		ErrorLogPath:   strings.TrimSpace(os.Getenv("GROVE_ERROR_LOG")),
+		PayloadLogPath: strings.TrimSpace(os.Getenv("GROVE_PAYLOAD_LOG")),
+		PIDFile:        strings.TrimSpace(os.Getenv("GROVE_PID_FILE")),
 	}
 
 	// Before Redis: a missing token is a config fault, and needing a reachable Redis to hear
@@ -128,8 +134,8 @@ func RequireAdminToken(raw string) (string, error) {
 	return token, nil
 }
 
-// GatewayID names this gateway for request-ids: GROVE_GATEWAY_ID (set at deploy to the Gateway
-// Server name) else the host's short name, else "gw".
+// GatewayID names this gateway in its startup line: GROVE_GATEWAY_ID (set at deploy to the Gateway
+// Server name) else the host's short name, else "gw". Being set at all selects the tenant plane.
 func GatewayID() string {
 	if v := strings.TrimSpace(os.Getenv("GROVE_GATEWAY_ID")); v != "" {
 		return v

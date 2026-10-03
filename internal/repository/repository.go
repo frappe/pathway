@@ -22,9 +22,12 @@ type Users interface {
 	Get(ctx context.Context, name string) (domain.UserRecord, bool, error)
 	Upsert(ctx context.Context, records []UserUpsert) error
 	Delete(ctx context.Context, ids []string) (int, error)
+	// AdjustSpent moves a holder's lifetime spend by delta nano-USD, once per id: a repeated id
+	// answers the current spend with applied=false. found=false when the holder is not here.
+	AdjustSpent(ctx context.Context, name, id string, delta int64) (spent int64, applied, found bool, err error)
 }
 
-// Groups holds what a Grove User Group grants everyone in it.
+// Groups holds what a Model Group grants everyone in it.
 type Groups interface {
 	// Get answers the zero value for a group that was never pushed, so a key pointing at one falls
 	// back to its own Allow list instead of erroring.
@@ -66,23 +69,37 @@ type Health interface {
 	RecordSuccess(ctx context.Context, target string) error
 }
 
+// ProviderKeys counts what each vendor credential answered — lifetime, by the id the control
+// plane pushed it under. Read live by the control plane; never drained.
+type ProviderKeys interface {
+	// Count lands one attempt on one key: the upstream's status, or 0 when the hop produced none.
+	Count(ctx context.Context, id string, status int) error
+	// Stats answers one record per id, zero for a key that never answered.
+	Stats(ctx context.Context, ids []string) (map[string]domain.KeyStats, error)
+}
+
 // Usage accrues token counters per API key prefix. The field names are the service's business —
 // this only adds numbers to them.
 type Usage interface {
-	// Add applies every field in one atomic step, so a drain never sees half a request.
-	Add(ctx context.Context, prefix string, fields map[string]int64) error
-	// Drain atomically reads and deletes every live counter, keyed by bare prefix. Read-and-delete
-	// in one step: the snapshot is the only copy once it returns, which never double-counts.
-	Drain(ctx context.Context) (map[string]map[string]string, error)
+	// Accrue lands one request in one atomic step — its counters, its cost, and the holder's
+	// spend — so a drain never sees half a request, and never a counter without its cost.
+	Accrue(ctx context.Context, accrual Accrual) error
+	// Drain sets live counters aside under newID — every one, or only these prefixes when keys is
+	// non-empty — and answers every counter not yet acknowledged, old drains included, so one the
+	// control plane failed to record comes back under its own id. Nothing is deleted here.
+	Drain(ctx context.Context, newID string, keys []string) (Drains, error)
+	// Ack marks (drain id → prefixes) recorded: each is kept for retention, then expires. A pair
+	// that is not unacknowledged is a no-op. → how many pairs moved.
+	Ack(ctx context.Context, acks map[string][]string, retention time.Duration) (int, error)
+	// Replay lands a spooled accrual exactly as Accrue would, once per ID: a second replay of the
+	// same ID (a crash mid-pass) moves nothing. → whether it landed now.
+	Replay(ctx context.Context, accrual Accrual) (bool, error)
+	// Ping reports whether the store answers — the spool replays only while it does.
+	Ping(ctx context.Context) error
 }
 
-// Catalog holds the pooled public model list, replaced whole on each groups push.
-type Catalog interface {
-	// Get answers ok=false when no group is public, which is the default.
-	Get(ctx context.Context) (string, bool, error)
-	Set(ctx context.Context, csv string) error
-	Clear(ctx context.Context) error
-}
+// Drains is drain id → bare prefix → counters, as the control plane receives them.
+type Drains map[string]map[string]map[string]string
 
 // State is the desired-state push: apply what the payload names, delete what it does not, and
 // store the hashes it carried — all in one transaction, so the hashes never claim state that
@@ -102,8 +119,9 @@ type Store struct {
 	InFlight InFlight
 	Health   Health
 	Usage    Usage
-	Catalog  Catalog
 	State    State
+	// ProviderKeys is unused on an ingress, which dials no vendor.
+	ProviderKeys ProviderKeys
 }
 
 // The upsert shapes the control plane pushes. Deliberately flat strings, matching the wire: the
@@ -118,17 +136,35 @@ type KeyUpsert struct {
 }
 
 type UserUpsert struct {
-	Name    string
-	Email   string
-	Group   string
-	Allow   string // comma list
-	Deny    string // comma list
-	Limited bool
+	Name        string
+	Email       string
+	Groups      string // comma list of Model Group names
+	Allow       string // comma list
+	Deny        string // comma list
+	Limited     bool
+	LogPayloads bool
+	Geography   string
+	Prepaid     bool
+	Budget      int64 // nano-USD
 }
 
 type GroupUpsert struct {
 	Name   string
 	Models string // comma list
+}
+
+// Accrual is one metered request. Fields already carry the cost beside the counters; Cost is
+// repeated so the store can move the holder's lifetime spend without reading the map back.
+type Accrual struct {
+	// ID is the request id: what makes a spooled accrual's replay land once.
+	ID     string           `json:"id"`
+	Prefix string           `json:"prefix"`
+	Fields map[string]int64 `json:"fields"`
+	Cost   int64            `json:"cost"`
+	// User names whose spend moves; blank moves nobody's. Budget is what the holder's balance is
+	// reported against, so the drain carries this store's own view of it.
+	User   string `json:"user"`
+	Budget int64  `json:"budget"`
 }
 
 // The state-push shapes (plan_agent_state_sync.md). A nil section is untouched; a present one is
@@ -144,7 +180,6 @@ type StatePush struct {
 
 type GroupsPush struct {
 	Hash    string
-	Catalog string
 	Records []GroupUpsert
 }
 

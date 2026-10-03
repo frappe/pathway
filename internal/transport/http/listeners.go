@@ -57,7 +57,9 @@ func (s *Server) Handlers(cfg config.Config, chain []string) (http.Handler, erro
 		// down target, which is the signal that matters.
 		s.log.Warn("metrics scrape not mounted", "htpasswd", cfg.HtpasswdPath, "err", err)
 	}
-	return mux, nil
+	// Everything on this listener logs — health probes, admin calls, scrapes, host-mismatch 404s.
+	// The data handler's own wrap steps aside, so its requests still log exactly once.
+	return s.logged(mux), nil
 }
 
 // RedirectHandler is the plaintext listener when TLS is configured: health, redirect everything
@@ -69,7 +71,7 @@ func (s *Server) RedirectHandler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusMovedPermanently)
 	})
-	return mux
+	return s.logged(mux)
 }
 
 // TLSConfig serves the fleet certificate and reloads it from disk when it changes.

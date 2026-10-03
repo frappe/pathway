@@ -30,10 +30,10 @@ func (s state) Apply(ctx context.Context, push repository.StatePush) (repository
 
 	held := map[string][]string{}
 	for prefix, present := range map[string]bool{
-		"group:":  push.Groups != nil,
-		"user:":   push.Users != nil,
-		"key:":    push.Keys != nil,
-		"deploy:": push.Routes != nil,
+		"model_group:": push.Groups != nil,
+		"user:":        push.Users != nil,
+		"key:":         push.Keys != nil,
+		"deploy:":      push.Routes != nil,
 	} {
 		if !present {
 			continue
@@ -47,7 +47,7 @@ func (s state) Apply(ctx context.Context, push repository.StatePush) (repository
 
 	_, err := s.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
 		if push.Groups != nil {
-			counts.Groups = applyGroups(ctx, p, *push.Groups, held["group:"])
+			counts.Groups = applyGroups(ctx, p, *push.Groups, held["model_group:"])
 		}
 		if push.Users != nil {
 			counts.Users = applyUsers(ctx, p, push.Users, held["user:"])
@@ -72,14 +72,9 @@ func applyGroups(ctx context.Context, p redis.Pipeliner, push repository.GroupsP
 			continue
 		}
 		named[rec.Name] = true
-		p.HSet(ctx, "group:"+rec.Name, map[string]any{"models": rec.Models})
+		p.HSet(ctx, "model_group:"+rec.Name, map[string]any{"models": rec.Models})
 	}
-	deleteUnnamed(ctx, p, "group:", held, func(id string) bool { return named[id] })
-	if push.Catalog == "" {
-		p.Del(ctx, "catalog:public")
-	} else {
-		p.Set(ctx, "catalog:public", push.Catalog, 0)
-	}
+	deleteUnnamed(ctx, p, "model_group:", held, func(id string) bool { return named[id] })
 	p.HSet(ctx, stateHashKey, "groups", push.Hash)
 	return len(named)
 }
@@ -93,14 +88,7 @@ func applyUsers(ctx context.Context, p redis.Pipeliner, buckets map[string]repos
 			}
 			named[rec.Name] = true
 			count++
-			limited := "0"
-			if rec.Limited {
-				limited = "1"
-			}
-			p.HSet(ctx, "user:"+rec.Name, map[string]any{
-				"email": rec.Email, "group": rec.Group,
-				"allow": rec.Allow, "deny": rec.Deny, "limited": limited,
-			})
+			p.HSet(ctx, "user:"+rec.Name, userFields(rec))
 		}
 		setBucketHash(ctx, p, "users:"+label, bucket.Hash, len(bucket.Records))
 	}

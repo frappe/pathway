@@ -3,6 +3,21 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Any branch or commit under any release name, e.g. from a fork or a feature branch:
+  #   gh workflow run release.yml -f ref=dialect -f tag=dialect-2026-09-15
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit SHA to build
+        required: true
+        default: main
+      tag:
+        description: Release name, created on that commit (what Grove's Pathway Release pins)
+        required: true
+      prerelease:
+        description: Mark as a pre-release, so Latest stays on the tagged main releases
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -10,16 +25,19 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      # Through env, never inline in a script: a dispatch input is free text.
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
       - name: build
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           mkdir -p dist
           for arch in amd64 arm64; do
@@ -29,8 +47,10 @@ jobs:
           done
           cd dist && sha256sum pathway-linux-* > sha256sums.txt && cat sha256sums.txt
 
+      # --target only matters for a dispatch: a pushed tag already exists and GitHub ignores it.
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" dist/* --generate-notes
+        run: |
+          gh release create "$TAG" dist/* --generate-notes --target "$(git rev-parse HEAD)" \
+            ${{ inputs.prerelease && '--prerelease' || '' }}

@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/phot0n/pathway/internal/transport/http/middleware"
+	"github.com/phot0n/pathway/internal/transport/http/proxy"
 	"github.com/phot0n/pathway/internal/transport/respond"
 )
 
@@ -22,16 +23,29 @@ func (s *Server) proxyHandler() http.Handler {
 		}
 
 		// A provider hop leaves our network, which is what decides whether its certificate is
-		// checked — an engine's is one we signed, a vendor's is not.
-		outcome := s.proxy.Forward(w, r, target, state.Decision.Route.IsProvider())
-		state.UpstreamStatus = outcome.Status
-		state.Usage = outcome.Usage
-		state.Reason = outcome.Reason
-		if outcome.Deployment != "" {
-			// An ingress picked the replica and said so. The only way usage reaches a placement
-			// this gateway never chose.
-			state.Deployment = outcome.Deployment
-		}
+		// checked — an engine's is one we signed, a vendor's is not. A route that rewrote the
+		// model on the way out gets it swapped back on the way in: the response must speak the id
+		// the client asked for, not the upstream's own spelling.
+		route := state.Decision.Route
+		state.Attempts++
+		// Deferred, like meter's own record: a client hanging up mid-stream unwinds this handler
+		// through http.ErrAbortHandler, and the upstream still billed whatever it had generated.
+		var outcome proxy.Outcome
+		defer func() {
+			state.UpstreamStatus = outcome.Status
+			state.UpstreamRID = outcome.UpstreamRID
+			state.Usage = outcome.Usage
+			state.UsageStart = outcome.UsageStart
+			state.Reason = outcome.Reason
+			state.Cut = outcome.Cut
+			if outcome.Deployment != "" {
+				// An ingress picked the replica and said so. The only way usage reaches a placement
+				// this gateway never chose.
+				state.Deployment = outcome.Deployment
+			}
+		}()
+		s.proxy.Forward(w, r, target, route.IsProvider(),
+			proxy.ModelSwap{Upstream: route.UpstreamModel, Client: state.Model}, &outcome)
 	})
 }
 
@@ -41,6 +55,6 @@ func root(w http.ResponseWriter, _ *http.Request) {
 	respond.JSON(w, map[string]any{
 		"status":  "ok",
 		"message": "Grove Gateway Service",
-		"usage":   "POST /v1/messages or /v1/chat/completions",
+		"usage":   "POST /v1/chat/completions, or /anthropic/v1/messages for Anthropic clients",
 	})
 }

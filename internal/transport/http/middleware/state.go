@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/service/admission"
 	"github.com/phot0n/pathway/internal/service/routing"
 	"github.com/phot0n/pathway/internal/service/transform"
@@ -15,19 +16,36 @@ import (
 // the request: nothing outlives the handler and no two requests share one.
 type State struct {
 	Started time.Time
+	// RequestID is minted at the edge, before anything can refuse: every line and header for this
+	// request carries it, a health probe and a 401 included.
+	RequestID string
 
 	Identity admission.Identity
 	Model    string
 	Session  string
 	Body     transform.Body
+	// Raw is the request body exactly as the client sent it, kept for the payload log — Body above
+	// is decoded and later mutated by transforms, so it cannot testify to what the customer wrote.
+	// Nil on the bodyless paths (upgrade, multipart).
+	Raw []byte
+	// Form is what a multipart body said before its model field — the text fields, and a stand-in
+	// naming each file — for the payload log. Never the file itself. Nil on every other path.
+	Form map[string]string
 
 	Decision routing.Decision
+	// Attempts is how many times an upstream was dialled for this request; 0 when none was.
+	Attempts int
 
 	// Filled on the way back out, by the proxy.
 	UpstreamStatus int
-	Usage          string
-	Deployment     string
-	Reason         string
+	// UpstreamRID is the upstream's own request id: a vendor's ticket key, blank on our engines.
+	UpstreamRID string
+	Usage       string
+	UsageStart  string
+	Deployment  string
+	Reason      string
+	// Cut names who ended a response that did not finish; blank on one that did.
+	Cut string
 	// Denied is the status a stage refused with, for the access log. 0 means the request reached
 	// an upstream.
 	Denied       int
@@ -39,7 +57,7 @@ type stateKey struct{}
 // newState attaches a fresh State. Called once, by accesslog, which is the outermost stage that
 // needs one.
 func newState(r *http.Request) (*http.Request, *State) {
-	state := &State{Started: time.Now()}
+	state := &State{Started: time.Now(), RequestID: domain.NewRequestID()}
 	return r.WithContext(context.WithValue(r.Context(), stateKey{}, state)), state
 }
 

@@ -28,12 +28,23 @@ type Store struct {
 	Sticky   map[string]string
 	InFlight map[string]map[string]bool // engine → request ids
 	Failures map[string]int
+	// KeyStats is what each vendor credential answered, the memory twin of pk:<id>.
+	KeyStats map[string]domain.KeyStats
 	Usage    map[string]map[string]int64
-	Public   *string
 	Hashes   map[string]string // grove:state_hash — section/bucket → hash
 
+	// Drained is every counter set aside, drain id → prefix → counters; Unacked the "<id>:<prefix>"
+	// pairs not yet acknowledged; Retained how long each acknowledged pair is kept. Adjusted is
+	// every spend adjustment id already applied.
+	Drained map[string]map[string]map[string]int64
+	Unacked map[string]bool
+	// Accrued is the request ids a replay has landed, the memory twin of accrued:<id>.
+	Accrued  map[string]bool
+	Retained map[string]time.Duration
+	Adjusted map[string]bool
+
 	// Fail names the repositories that should error, by interface name ("routes", "inflight",
-	// "health", "sessions", "keys", "users", "groups", "usage", "catalog", "state").
+	// "health", "sessions", "keys", "users", "groups", "usage", "state", "providerkeys").
 	Fail map[string]bool
 }
 
@@ -44,8 +55,10 @@ func New() *Store {
 		Keys: map[string]domain.KeyRecord{}, Users: map[string]domain.UserRecord{},
 		Groups: map[string]domain.GroupRecord{}, Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
-		Failures: map[string]int{}, Usage: map[string]map[string]int64{},
+		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
 		Hashes: map[string]string{}, Fail: map[string]bool{},
+		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{}, Accrued: map[string]bool{},
+		Retained: map[string]time.Duration{}, Adjusted: map[string]bool{},
 	}
 }
 
@@ -54,7 +67,7 @@ func (s *Store) Repositories() repository.Store {
 	return repository.Store{
 		Keys: keys{s}, Users: users{s}, Groups: groups{s}, Routes: routes{s},
 		Sessions: sessions{s}, InFlight: inFlight{s}, Health: health{s},
-		Usage: usage{s}, Catalog: catalog{s}, State: state{s},
+		Usage: usage{s}, State: state{s}, ProviderKeys: providerKeys{s},
 	}
 }
 
@@ -63,6 +76,16 @@ func (s *Store) failed(name string) error {
 		return errStore
 	}
 	return nil
+}
+
+// putUser matches the real store's HSET-merge: a push writes its fields and leaves Spent alone.
+func (s *Store) putUser(rec repository.UserUpsert) {
+	s.Users[rec.Name] = domain.UserRecord{
+		Email: rec.Email, Groups: domain.ModelSet(rec.Groups),
+		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
+		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
+		Prepaid: rec.Prepaid, Budget: rec.Budget, Spent: s.Users[rec.Name].Spent,
+	}
 }
 
 type keys struct{ s *Store }
@@ -122,11 +145,7 @@ func (u users) Upsert(_ context.Context, records []repository.UserUpsert) error 
 		if rec.Name == "" {
 			continue
 		}
-		u.s.Users[rec.Name] = domain.UserRecord{
-			Email: rec.Email, Group: rec.Group,
-			Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
-			Limited: rec.Limited,
-		}
+		u.s.putUser(rec)
 	}
 	return nil
 }
@@ -135,6 +154,23 @@ func (u users) Delete(_ context.Context, ids []string) (int, error) {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
 	return deleteFrom(ids, func(id string) { delete(u.s.Users, id) }), u.s.failed("users")
+}
+
+// AdjustSpent matches the real one: once per id, and only on a holder the store knows.
+func (u users) AdjustSpent(_ context.Context, name, id string, delta int64) (int64, bool, bool, error) {
+	u.s.mu.Lock()
+	defer u.s.mu.Unlock()
+	if err := u.s.failed("users"); err != nil {
+		return 0, false, false, err
+	}
+	holder, found := u.s.Users[name]
+	if !found || u.s.Adjusted[id] {
+		return holder.Spent, false, found, nil
+	}
+	holder.Spent += delta
+	u.s.Users[name] = holder
+	u.s.Adjusted[id] = true
+	return holder.Spent, true, true, nil
 }
 
 type groups struct{ s *Store }
@@ -308,74 +344,156 @@ func (h health) RecordSuccess(_ context.Context, target string) error {
 	return nil
 }
 
+type providerKeys struct{ s *Store }
+
+func (p providerKeys) Count(_ context.Context, id string, status int) error {
+	p.s.mu.Lock()
+	defer p.s.mu.Unlock()
+	if err := p.s.failed("providerkeys"); err != nil {
+		return err
+	}
+	stats, now := p.s.KeyStats[id], time.Now().Unix()
+	stats.Requests++
+	stats.LastUsed = now
+	switch domain.KeyStatusClass(status) {
+	case "rate_limited":
+		stats.RateLimited++
+		stats.LastRateLimited = now
+	case "rejected":
+		stats.Rejected++
+	case "ok":
+		stats.OK++
+	default:
+		stats.Failed++
+	}
+	p.s.KeyStats[id] = stats
+	return nil
+}
+
+func (p providerKeys) Stats(_ context.Context, ids []string) (map[string]domain.KeyStats, error) {
+	p.s.mu.Lock()
+	defer p.s.mu.Unlock()
+	if err := p.s.failed("providerkeys"); err != nil {
+		return nil, err
+	}
+	stats := make(map[string]domain.KeyStats, len(ids))
+	for _, id := range ids {
+		stats[id] = p.s.KeyStats[id]
+	}
+	return stats, nil
+}
+
 type usage struct{ s *Store }
 
-func (u usage) Add(_ context.Context, prefix string, fields map[string]int64) error {
+// Accrue matches the real one: counters, cost and the holder's spend land under one lock, and the
+// spend moves only on a holder the store knows.
+func (u usage) Accrue(_ context.Context, a repository.Accrual) error {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
 	if err := u.s.failed("usage"); err != nil {
 		return err
 	}
-	if u.s.Usage[prefix] == nil {
-		u.s.Usage[prefix] = map[string]int64{}
-	}
-	for field, n := range fields {
-		u.s.Usage[prefix][field] += n
-	}
+	u.accrue(a)
 	return nil
 }
 
-// Drain matches the real one: read and delete in one step, so a second call sees nothing.
-func (u usage) Drain(_ context.Context) (map[string]map[string]string, error) {
+// Replay matches the real one: once per request id.
+func (u usage) Replay(_ context.Context, a repository.Accrual) (bool, error) {
+	u.s.mu.Lock()
+	defer u.s.mu.Unlock()
+	if err := u.s.failed("usage"); err != nil {
+		return false, err
+	}
+	if u.s.Accrued[a.ID] {
+		return false, nil
+	}
+	u.s.Accrued[a.ID] = true
+	u.accrue(a)
+	return true, nil
+}
+
+func (u usage) Ping(_ context.Context) error {
+	u.s.mu.Lock()
+	defer u.s.mu.Unlock()
+	return u.s.failed("ping")
+}
+
+func (u usage) accrue(a repository.Accrual) {
+	if u.s.Usage[a.Prefix] == nil {
+		u.s.Usage[a.Prefix] = map[string]int64{}
+	}
+	for field, n := range a.Fields {
+		u.s.Usage[a.Prefix][field] += n
+	}
+	holder, known := u.s.Users[a.User]
+	if a.User == "" || !known {
+		return
+	}
+	holder.Spent += a.Cost
+	u.s.Users[a.User] = holder
+	u.s.Usage[a.Prefix]["user_spent"] = holder.Spent
+	u.s.Usage[a.Prefix]["user_balance"] = a.Budget - holder.Spent
+}
+
+// Drain matches the real one: live counters (all, or only keys) are set aside under newID, and
+// every unacknowledged pair is answered. Nothing is deleted until Ack.
+func (u usage) Drain(_ context.Context, newID string, keys []string) (repository.Drains, error) {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
 	if err := u.s.failed("usage"); err != nil {
 		return nil, err
 	}
-	out := map[string]map[string]string{}
+	wanted := map[string]bool{}
+	for _, key := range keys {
+		wanted[key] = true
+	}
 	for prefix, fields := range u.s.Usage {
+		if len(wanted) > 0 && !wanted[prefix] {
+			continue
+		}
+		if u.s.Drained[newID] == nil {
+			u.s.Drained[newID] = map[string]map[string]int64{}
+		}
+		u.s.Drained[newID][prefix] = fields
+		u.s.Unacked[newID+":"+prefix] = true
+		delete(u.s.Usage, prefix)
+	}
+	out := repository.Drains{}
+	for member := range u.s.Unacked {
+		id, prefix, _ := strings.Cut(member, ":")
+		if len(wanted) > 0 && !wanted[prefix] {
+			continue
+		}
 		snapshot := map[string]string{}
-		for field, n := range fields {
+		for field, n := range u.s.Drained[id][prefix] {
 			snapshot[field] = strconv.FormatInt(n, 10)
 		}
-		out[prefix] = snapshot
+		if out[id] == nil {
+			out[id] = map[string]map[string]string{}
+		}
+		out[id][prefix] = snapshot
 	}
-	u.s.Usage = map[string]map[string]int64{}
 	return out, nil
 }
 
-type catalog struct{ s *Store }
-
-func (c catalog) Get(_ context.Context) (string, bool, error) {
-	c.s.mu.Lock()
-	defer c.s.mu.Unlock()
-	if err := c.s.failed("catalog"); err != nil {
-		return "", false, err
+// Ack matches the real one: only unacknowledged pairs move anything.
+func (u usage) Ack(_ context.Context, acks map[string][]string, retention time.Duration) (int, error) {
+	u.s.mu.Lock()
+	defer u.s.mu.Unlock()
+	if err := u.s.failed("usage"); err != nil {
+		return 0, err
 	}
-	if c.s.Public == nil {
-		return "", false, nil
+	count := 0
+	for id, prefixes := range acks {
+		for _, prefix := range prefixes {
+			if member := id + ":" + prefix; u.s.Unacked[member] {
+				delete(u.s.Unacked, member)
+				u.s.Retained[member] = retention
+				count++
+			}
+		}
 	}
-	return *c.s.Public, true, nil
-}
-
-func (c catalog) Set(_ context.Context, csv string) error {
-	c.s.mu.Lock()
-	defer c.s.mu.Unlock()
-	if err := c.s.failed("catalog"); err != nil {
-		return err
-	}
-	c.s.Public = &csv
-	return nil
-}
-
-func (c catalog) Clear(_ context.Context) error {
-	c.s.mu.Lock()
-	defer c.s.mu.Unlock()
-	if err := c.s.failed("catalog"); err != nil {
-		return err
-	}
-	c.s.Public = nil
-	return nil
+	return count, nil
 }
 
 type state struct{ s *Store }
@@ -416,11 +534,6 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 				delete(st.s.Groups, name)
 			}
 		}
-		if push.Groups.Catalog == "" {
-			st.s.Public = nil
-		} else {
-			st.s.Public = &push.Groups.Catalog
-		}
 		st.s.Hashes["groups"] = push.Groups.Hash
 		counts.Groups = len(named)
 	}
@@ -433,11 +546,7 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 				}
 				named[rec.Name] = true
 				counts.Users++
-				st.s.Users[rec.Name] = domain.UserRecord{
-					Email: rec.Email, Group: rec.Group,
-					Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
-					Limited: rec.Limited,
-				}
+				st.s.putUser(rec)
 			}
 			st.setBucketHash("users:"+label, bucket.Hash, len(bucket.Records))
 		}

@@ -5,20 +5,30 @@ import (
 	"io"
 )
 
-// carryLimit bounds the partial line held across reads — a single huge non-streaming body. The tail
-// is what matters, because the usage object is at the end of it.
-const carryLimit = 256 << 10
+// carryLimit bounds what is held across reads — a partial line of a stream, or a body that is one
+// document. Past it the tail is kept, because the usage object is at the end of it and
+// domain.ParseUsage reads it out of a document cut at the front. scan re-copies the carry on every
+// Read, so raise this only after that.
+const carryLimit = 1 << 20
 
-// usageTee keeps the last newline-delimited line containing "usage" — the final frame of a stream,
-// or a whole non-streaming body. It reads what it is already copying and writes nothing back, so
-// the stream reaches the client byte-for-byte and on time. That property is the contract.
+// usageTee keeps what a response says about usage, read two ways. An event stream is read by the
+// line: the last line containing "usage", and the first when there is more than one, since an
+// Anthropic stream reports the prompt on its first event and the output on its last. Any other
+// body is one document and is kept whole: a vendor may print it over many lines, and the line that
+// names "usage" then holds none of it. It reads what it is already copying and writes nothing
+// back, so the response reaches the client byte-for-byte and on time. That property is the contract.
 type usageTee struct {
-	body  io.ReadCloser
-	carry []byte
-	line  []byte
+	body   io.ReadCloser
+	stream bool
+	failed bool // a read ended in an error: the body broke off before its end
+	carry  []byte
+	first  []byte
+	line   []byte
 }
 
-func newUsageTee(body io.ReadCloser) *usageTee { return &usageTee{body: body} }
+func newUsageTee(body io.ReadCloser, stream bool) *usageTee {
+	return &usageTee{body: body, stream: stream}
+}
 
 func (t *usageTee) Read(p []byte) (int, error) {
 	n, err := t.body.Read(p)
@@ -27,6 +37,8 @@ func (t *usageTee) Read(p []byte) (int, error) {
 	}
 	if err == io.EOF {
 		t.flush()
+	} else if err != nil {
+		t.failed = true
 	}
 	return n, err
 }
@@ -41,13 +53,16 @@ func (t *usageTee) Close() error {
 // Usage is the captured line, or empty if the response never carried one.
 func (t *usageTee) Usage() string { return string(t.line) }
 
+// UsageStart is the first usage-bearing line, empty when Usage is the only one.
+func (t *usageTee) UsageStart() string { return string(t.first) }
+
 func (t *usageTee) scan(chunk []byte) {
 	data := chunk
 	if len(t.carry) > 0 {
 		data = append(t.carry, chunk...)
 		t.carry = nil
 	}
-	for {
+	for t.stream {
 		newline := bytes.IndexByte(data, '\n')
 		if newline < 0 {
 			break
@@ -67,8 +82,13 @@ func (t *usageTee) flush() {
 	t.carry = nil
 }
 
+// ponytail: first and last only. Per-event merge if a vendor ever splits its counts three ways.
 func (t *usageTee) keep(line []byte) {
-	if bytes.Contains(line, []byte(`"usage"`)) {
-		t.line = append([]byte(nil), line...)
+	if !bytes.Contains(line, []byte(`"usage"`)) {
+		return
 	}
+	if t.first == nil {
+		t.first = t.line
+	}
+	t.line = append([]byte(nil), line...)
 }

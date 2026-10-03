@@ -7,7 +7,7 @@ package redis
 
 import (
 	"context"
-	"flag"
+	goflag "flag"
 	"fmt"
 	"testing"
 
@@ -29,11 +29,11 @@ func sibling(t *testing.T, id string) string {
 	return ""
 }
 
-var redisAddr = flag.String("redis", "localhost:6390", "address of a THROWAWAY redis — the test flushes it")
+var redisAddr = goflag.String("redis", "localhost:6390", "address of a THROWAWAY redis — the test flushes it")
 
 func liveStore(t *testing.T) (*Client, repository.State) {
 	t.Helper()
-	client := New(*redisAddr)
+	client := New(*redisAddr, "")
 	ctx := context.Background()
 	if err := client.Ping(ctx); err != nil {
 		t.Skipf("no redis at %s: %v", *redisAddr, err)
@@ -50,7 +50,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed records the push will and will not name, plus one in an untouched bucket.
-	client.rdb.HSet(ctx, "group:stale", "models", "m")
+	client.rdb.HSet(ctx, "model_group:stale", "models", "m")
 	client.rdb.HSet(ctx, "key:aa", "status", "active")
 	client.rdb.HSet(ctx, "key:bb", "status", "active")
 	client.rdb.Set(ctx, "deploy:stale", "[]", 0)
@@ -63,7 +63,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	kept := sibling(t, "aa") // named in aa's bucket, so the push keeps it while pruning aa
 	counts, err := state.Apply(ctx, repository.StatePush{
 		Groups: &repository.GroupsPush{
-			Hash: "gh", Catalog: "m1",
+			Hash:    "gh",
 			Records: []repository.GroupUpsert{{Name: "acme", Models: "m1"}},
 		},
 		Keys: map[string]repository.KeyBucket{
@@ -86,14 +86,14 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	}
 
 	for key, want := range map[string]bool{
-		"group:acme":   true,
-		"group:stale":  false, // unnamed → pruned
-		"key:" + kept:  true,
-		"key:aa":       false, // in the pushed bucket, unnamed → pruned
-		"key:bb":       true,  // its bucket was not pushed → survives
-		"deploy:m1":    true,
-		"deploy:stale": false,
-		"usage:prefix": true, // never a prune target
+		"model_group:acme":  true,
+		"model_group:stale": false, // unnamed → pruned
+		"key:" + kept:       true,
+		"key:aa":            false, // in the pushed bucket, unnamed → pruned
+		"key:bb":            true,  // its bucket was not pushed → survives
+		"deploy:m1":         true,
+		"deploy:stale":      false,
+		"usage:prefix":      true, // never a prune target
 	} {
 		n, err := client.rdb.Exists(ctx, key).Result()
 		if err != nil {
@@ -126,5 +126,20 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	}
 	if hashes, _ = state.Hashes(ctx); hashes["keys:"+pushed] != "" {
 		t.Errorf("emptied bucket kept its hash %q", hashes["keys:"+pushed])
+	}
+}
+
+func TestAUserRecordRoundTripsItsGeography(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	bucket := domain.BucketOf("GU-1")
+	if _, err := state.Apply(ctx, repository.StatePush{Users: map[string]repository.UserBucket{
+		bucket: {Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Geography: "eu"}}},
+	}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	usr, found, err := client.Store().Users.Get(ctx, "GU-1")
+	if err != nil || !found || usr.Geography != "eu" {
+		t.Errorf("Get = %+v, %v, %v; want geography eu", usr, found, err)
 	}
 }

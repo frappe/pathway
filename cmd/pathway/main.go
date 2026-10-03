@@ -50,9 +50,10 @@ func run() error {
 	// record, which is the whole reason the type exists.
 	level := new(slog.LevelVar)
 	log, closeLogs, err := observability.New(observability.Options{
-		Level:         level,
-		AccessLogPath: cfg.AccessLogPath,
-		ErrorLogPath:  cfg.ErrorLogPath,
+		Level:          level,
+		AccessLogPath:  cfg.AccessLogPath,
+		ErrorLogPath:   cfg.ErrorLogPath,
+		PayloadLogPath: cfg.PayloadLogPath,
 	})
 	if err != nil {
 		return err
@@ -65,7 +66,7 @@ func run() error {
 		return err
 	}
 
-	client := redisstore.New(cfg.RedisAddr)
+	client := redisstore.New(cfg.RedisAddr, cfg.RedisPassword)
 	if err := client.Ping(context.Background()); err != nil {
 		return err
 	}
@@ -94,21 +95,34 @@ func run() error {
 		return err
 	}
 
+	meter := metering.New(store.Usage, store.Health, log.Process)
+	if !cfg.IsIngress() {
+		// What the store refuses while it is down waits on disk and is replayed once it answers.
+		meter.Spool = metering.NewSpool(store.Usage, log.Process,
+			func() string { return live.Get().UsageSpool },
+			func() int64 { return live.Get().UsageSpoolMaxBytes })
+		go meter.Spool.Run(context.Background(), 5*time.Second)
+	}
+
 	server := gatewayhttp.New(cfg, gatewayhttp.Services{
 		Admission: admission.New(store.Keys, store.Users, store.Groups),
 		Routing: routing.New(store, log.Process, routing.Options{
-			GatewayID:    cfg.GatewayID,
 			Region:       cfg.Region,
 			SyntheticTTL: func() time.Duration { return live.Get().SyntheticSessionTTL },
+			CapacityWait: func() time.Duration { return live.Get().CapacityWait },
 		}),
-		Metering:     metering.New(store.Usage, store.Health, log.Process),
-		Catalog:      catalog.New(store.Routes, store.Catalog),
-		Provisioning: provisioning.New(store, log.Process),
-		Transform:    rebuilt.chain,
-		Proxy:        rebuilt.proxy,
-		Drain:        lifecycle,
-		Access:       log.Access,
-		MaxBodyBytes: func() int64 { return live.Get().MaxBodyBytes },
+		Metering:       meter,
+		Catalog:        catalog.New(store.Routes),
+		Provisioning:   provisioning.New(store, log.Process),
+		ProviderKeys:   store.ProviderKeys,
+		Transform:      rebuilt.chain,
+		Proxy:          rebuilt.proxy,
+		Drain:          lifecycle,
+		Access:         log.Access,
+		Payload:        log.Payload,
+		MaxBodyBytes:   func() int64 { return live.Get().MaxBodyBytes },
+		Maintenance:    func() bool { return live.Get().Maintenance },
+		UsageRetention: func() time.Duration { return live.Get().UsageRetention },
 	}, log.Process)
 	rebuilt.server = server
 	rebuilt.applyScalars(live.Get())
@@ -119,6 +133,7 @@ func run() error {
 		"redis", cfg.RedisAddr,
 		"config", live.Path(),
 		"log_level", live.Get().LogLevel,
+		"maintenance", live.Get().Maintenance,
 		"transforms", rebuilt.chain.Names(),
 	)
 

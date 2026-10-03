@@ -3,19 +3,26 @@ package domain
 // Route is one placement of a model: the vLLM instance's URL plus the internal
 // key to reach it. Mirrors an entry of Redis deploy:<model> (§8A.D).
 type Route struct {
-	EngineURL   string `json:"engine_url"`
+	EngineURL string `json:"engine_url"`
+	// InternalKey is the one credential an engine or ingress row carries. Blank on a provider row,
+	// whose credentials ride Credentials.
 	InternalKey string `json:"internal_key"`
-	Healthy     bool   `json:"healthy"`
-	Region      string `json:"region"`
+	// Credentials is every key the control plane holds with a vendor, each under the id it is
+	// counted by, in the order the ring is walked. KeySelection names how one is picked per
+	// request: only "round_robin" exists, so it is carried, not read.
+	Credentials  []Credential `json:"credentials,omitempty"`
+	KeySelection string       `json:"key_selection,omitempty"`
+	Healthy      bool         `json:"healthy"`
+	Region       string       `json:"region"`
 	// Requests admitted to this engine and not yet metered, counted at decide time. Never pushed —
 	// the control plane has no view of what is running right now.
 	InFlight int `json:"-"`
 	// The engine's --max-num-seqs: what it runs concurrently before vLLM starts queueing. 0 =
 	// unset on the placement, which means no cap here rather than a guess at vLLM's default.
 	Capacity int `json:"capacity"`
-	// Model Deployment / pod id — which placement this is, and the request-id's target part.
-	// One box can serve the same model from two deployments, so Server alone names neither.
-	// Empty on a route pushed before this field existed; BuildRequestID falls back.
+	// Model Deployment / pod id — which placement this is; the access line's `deployment`. One box
+	// can serve the same model from two deployments, so Server alone names neither. Empty on a
+	// route pushed before this field existed.
 	Deployment string `json:"deployment"`
 	Server     string `json:"server"` // inference-server / pod id — which box it is on
 	// "ingress" when this row is an Ingress Server that will pick a replica of its own, "direct"
@@ -31,6 +38,82 @@ type Route struct {
 	UpstreamModel string `json:"upstream_model"`
 	// The vendor's API version header, sent only on a provider route. Blank sends none.
 	APIVersion string `json:"api_version"`
+	// Dialect is the API shape this upstream speaks: "openai" or "anthropic". Blank means BOTH on a
+	// row we run — vLLM answers both surfaces natively — and NOTHING on a provider: a vendor row
+	// without a dialect is malformed, so it serves no path rather than a guessed one.
+	Dialect string `json:"dialect"`
+	// Pricing is the sell price in force, stamped on every row of the model. Absent on an unpriced
+	// model: such a request costs 0, and the control plane's pull is where that shows up.
+	Pricing *Pricing `json:"pricing,omitempty"`
+}
+
+// Pricing is one Model Pricing as the control plane pushed it: its id, which tags every counter it
+// charged so the pull prices them with the same table, its rates per counter in nano-USD per unit
+// (see CounterTable.Cost), and the counter table itself, so both sides count under the same rows.
+type Pricing struct {
+	ID       string           `json:"id"`
+	Rates    map[string]int64 `json:"rates"`
+	Counters CounterTable     `json:"counters,omitempty"`
+}
+
+// Credential is one key to dial an upstream with. ID is what the gateway counts and rotates by,
+// never the secret; blank on the single credential of an engine row, which is counted nowhere.
+type Credential struct {
+	ID     string `json:"id"`
+	Secret string `json:"secret"`
+}
+
+// Keyring is the credentials a request to this route may dial with: the pushed list, or the one
+// InternalKey — possibly blank — of a row that carries none, so every row has at least one.
+func (r Route) Keyring() []Credential {
+	if len(r.Credentials) > 0 {
+		return r.Credentials
+	}
+	return []Credential{{Secret: r.InternalKey}}
+}
+
+// KeyStats is what one credential has answered, lifetime, as the store counts it. OK is every
+// answer that was not the key's fault nor the upstream's — a 2xx, or a 4xx the request earned;
+// Failed is a 5xx or a hop that produced no status. Timestamps are unix seconds.
+type KeyStats struct {
+	Requests        int64 `json:"requests"`
+	OK              int64 `json:"ok"`
+	RateLimited     int64 `json:"rate_limited"`
+	Rejected        int64 `json:"rejected"`
+	Failed          int64 `json:"failed"`
+	LastUsed        int64 `json:"last_used"`
+	LastRateLimited int64 `json:"last_rate_limited"`
+}
+
+// IsKeyFailure reports whether an upstream status is the credential's fault rather than the
+// request's or the upstream's: a rate limit, or a key refused outright. Only these move a request
+// to another key — a 502 on one key is a 502 on the next.
+func IsKeyFailure(status int) bool { return status == 429 || IsKeyRejected(status) }
+
+// IsKeyRejected reports a status that says the credential is dead for this request: unauthorised,
+// unpaid or forbidden. A rate limit is not — that key may be back once the others are spent.
+func IsKeyRejected(status int) bool { return status == 401 || status == 402 || status == 403 }
+
+// KeyStatusClass is the KeyStats bucket an attempt's status lands in, by the field's JSON name.
+func KeyStatusClass(status int) string {
+	switch {
+	case status == 429:
+		return "rate_limited"
+	case IsKeyRejected(status):
+		return "rejected"
+	case status >= 200 && status < 500:
+		return "ok"
+	default:
+		return "failed"
+	}
+}
+
+// SpeaksDialect reports whether this upstream answers requests of this dialect.
+func (r Route) SpeaksDialect(dialect string) bool {
+	if r.Dialect == "" {
+		return !r.IsProvider()
+	}
+	return r.Dialect == dialect
 }
 
 // IsIngress reports whether this row hands off to an ingress rather than naming an engine.

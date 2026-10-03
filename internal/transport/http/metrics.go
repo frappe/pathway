@@ -30,10 +30,19 @@ func newMetricsProxy(htpasswdPath, target string) (*metricsProxy, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The exporter serves exactly one endpoint, named by the target URL. The mount path
+	// /metrics/node is ours, not its — forwarding it (or joining the two, which
+	// NewSingleHostReverseProxy does) asks the exporter for a path it 404s.
+	director := func(r *http.Request) {
+		r.URL.Scheme = upstream.Scheme
+		r.URL.Host = upstream.Host
+		r.URL.Path = upstream.Path
+		r.URL.RawQuery = upstream.RawQuery
+	}
 	return &metricsProxy{
 		username: username,
 		hash:     hash,
-		upstream: httputil.NewSingleHostReverseProxy(upstream),
+		upstream: &httputil.ReverseProxy{Director: director},
 	}, nil
 }
 

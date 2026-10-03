@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/phot0n/pathway/internal/config"
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/observability"
@@ -77,9 +79,9 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-		Status: "active", User: "ritwik", KeyPrefix: "abc123",
+		Status: "active", User: "test-user", KeyPrefix: "abc123",
 	}
-	store.Users["ritwik"] = domain.UserRecord{Group: "acme"}
+	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	store.Routes["qwen3-4b"] = []domain.Route{{
 		EngineURL: engine.URL + "/e/md1", InternalKey: "engine-key",
@@ -89,7 +91,19 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 	return &fixture{t: t, store: store, engine: engine, seen: seen, handler: buildHandler(t, store, config.Config{}, 0)}
 }
 
-func buildHandler(t *testing.T, store *memory.Store, cfg config.Config, maxBody int64) http.Handler {
+// buildHandler is the data plane of newServer: the gateway chain, or the ingress chain when cfg
+// names an ingress, exactly as the real server picks.
+func buildHandler(t *testing.T, store *memory.Store, cfg config.Config, maxBody int64, wire ...func(*Services)) http.Handler {
+	t.Helper()
+	handler, err := newServer(t, store, cfg, maxBody, wire...).DataHandler(nil)
+	if err != nil {
+		t.Fatalf("DataHandler: %v", err)
+	}
+	return handler
+}
+
+// wire lets a test swap one Services field (a captured log, say) without re-stating the rest.
+func newServer(t *testing.T, store *memory.Store, cfg config.Config, maxBody int64, wire ...func(*Services)) *Server {
 	t.Helper()
 	logs := observability.Discard()
 	repos := store.Repositories()
@@ -98,23 +112,22 @@ func buildHandler(t *testing.T, store *memory.Store, cfg config.Config, maxBody 
 		t.Fatalf("transform chain: %v", err)
 	}
 	cfg.AdminToken = "admin-token"
-	server := New(cfg, Services{
+	services := Services{
 		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
-		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
+		Routing:      routing.New(repos, logs.Process, routing.Options{}),
 		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
-		Catalog:      catalog.New(repos.Routes, repos.Catalog),
+		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),
+		ProviderKeys: repos.ProviderKeys,
 		Transform:    transforms,
 		Proxy:        proxy.New(proxy.Options{}, logs.Process),
 		Access:       logs.Access,
 		MaxBodyBytes: func() int64 { return maxBody },
-	}, logs.Process)
-
-	handler, err := server.DataHandler(middleware.GatewayChain)
-	if err != nil {
-		t.Fatalf("DataHandler: %v", err)
 	}
-	return handler
+	for _, w := range wire {
+		w(&services)
+	}
+	return New(cfg, services, logs.Process)
 }
 
 func (f *fixture) post(path, body string, headers ...string) *httptest.ResponseRecorder {
@@ -160,7 +173,12 @@ func TestNonStreamingRequestIsMetered(t *testing.T) {
 // The engine's path is the route's base plus the path the client asked for, and the client's key
 // never reaches it.
 func TestTheEngineSeesTheRewrittenRequest(t *testing.T) {
-	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
+	// The engine echoes the id, as vLLM does with --enable-request-id-headers: the client must
+	// still see exactly one.
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", r.Header.Get("X-Request-Id"))
+		jsonEngine(`{`+usageObject+`}`)(w, r)
+	})
 	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
 
 	if f.seen.path != "/e/md1/v1/chat/completions" {
@@ -169,11 +187,11 @@ func TestTheEngineSeesTheRewrittenRequest(t *testing.T) {
 	if f.seen.authorization != "Bearer engine-key" {
 		t.Errorf("engine authorization = %q — the client's key must not reach an engine", f.seen.authorization)
 	}
-	if !strings.HasPrefix(f.seen.requestID, "gr-gw_test-MD_00007-abc123-") {
-		t.Errorf("engine X-Request-Id = %q", f.seen.requestID)
+	if uuid.Validate(f.seen.requestID) != nil {
+		t.Errorf("engine X-Request-Id = %q, want a uuid", f.seen.requestID)
 	}
-	if got := resp.Header().Get("X-Request-Id"); got != f.seen.requestID {
-		t.Errorf("client got rid %q, engine got %q — the correlation is broken", got, f.seen.requestID)
+	if got := resp.Header().Values("X-Request-Id"); len(got) != 1 || got[0] != f.seen.requestID {
+		t.Errorf("client got rid %v, engine got %q — the correlation is broken", got, f.seen.requestID)
 	}
 	if f.seen.forwardedFor == "" {
 		t.Error("X-Forwarded-For was not set")
@@ -209,6 +227,21 @@ func TestANonStreamingBodyIsForwardedUnchanged(t *testing.T) {
 
 	if string(f.seen.body) != sent {
 		t.Errorf("engine body = %s, want it byte-for-byte as sent", f.seen.body)
+	}
+}
+
+// The wiring behind the cachesalt transform: the tenant it prefixes with is the authenticated
+// Grove user, not anything the caller can choose.
+func TestACacheSaltIsNamespacedByTheAuthenticatedUser(t *testing.T) {
+	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
+	f.post("/v1/chat/completions", `{"model":"qwen3-4b","cache_salt":"team-a","messages":[]}`)
+
+	var body map[string]any
+	if err := json.Unmarshal(f.seen.body, &body); err != nil {
+		t.Fatalf("engine body: %v", err)
+	}
+	if body["cache_salt"] != "test-user:team-a" {
+		t.Errorf("cache_salt = %v, want the tenant-prefixed form", body["cache_salt"])
 	}
 }
 
@@ -400,12 +433,50 @@ func TestARefusedRequestClaimsNothing(t *testing.T) {
 	}
 }
 
+// A user pinned to a geography is served only by that geography's gateways, on inference and on
+// the model list alike. A gateway with no geography refuses every pin.
+func TestAGeographyPinIsHonoured(t *testing.T) {
+	for _, c := range []struct {
+		name, gateway, pin string
+		want               int
+	}{
+		{"unpinned", "in", "", http.StatusOK},
+		{"pinned here", "eu", "eu", http.StatusOK},
+		{"pinned elsewhere", "in", "eu", http.StatusForbidden},
+		{"gateway without a geography", "", "eu", http.StatusForbidden},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, jsonEngine(`{}`))
+			user := f.store.Users["test-user"]
+			user.Geography = c.pin
+			f.store.Users["test-user"] = user
+			f.handler = buildHandler(t, f.store, config.Config{Geography: c.gateway}, 0)
+
+			w := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
+			if w.Code != c.want {
+				t.Fatalf("inference status = %d, want %d (%s)", w.Code, c.want, w.Body)
+			}
+			if c.want == http.StatusForbidden && !strings.Contains(w.Body.String(), "restricted to geography eu") {
+				t.Errorf("refusal does not name the pin: %s", w.Body)
+			}
+
+			r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			r.Header.Set("Authorization", "Bearer "+secret)
+			listing := httptest.NewRecorder()
+			f.handler.ServeHTTP(listing, r)
+			if listing.Code != c.want {
+				t.Errorf("/v1/models status = %d, want %d (%s)", listing.Code, c.want, listing.Body)
+			}
+		})
+	}
+}
+
 // The body cap: beyond it the caller gets a 413 rather than the process growing to hold whatever
 // was sent.
 func TestAnOversizedBodyIsRefused(t *testing.T) {
 	store := memory.New()
-	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", User: "ritwik", KeyPrefix: "abc123"}
-	store.Users["ritwik"] = domain.UserRecord{Group: "acme"}
+	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", User: "test-user", KeyPrefix: "abc123"}
+	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	handler := buildHandler(t, store, config.Config{}, 128)
 
@@ -476,10 +547,11 @@ func drainingHandler(t *testing.T, store *memory.Store) http.Handler {
 	transforms, _ := transform.NewChain(transform.Default)
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
 		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
-		Routing:      routing.New(repos, logs.Process, routing.Options{GatewayID: "gw-test"}),
+		Routing:      routing.New(repos, logs.Process, routing.Options{}),
 		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
-		Catalog:      catalog.New(repos.Routes, repos.Catalog),
+		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),
+		ProviderKeys: repos.ProviderKeys,
 		Transform:    transforms,
 		Proxy:        proxy.New(proxy.Options{}, logs.Process),
 		Drain:        alwaysDraining{},
@@ -493,7 +565,7 @@ func drainingHandler(t *testing.T, store *memory.Store) http.Handler {
 }
 
 // A chain naming a stage that does not exist must stop the process. A misspelt `quota` that merely
-// warned would silently stop enforcing the monthly budget.
+// warned would silently stop enforcing the budget.
 func TestAnUnknownMiddlewareRefusesToStart(t *testing.T) {
 	store := memory.New()
 	logs := observability.Discard()

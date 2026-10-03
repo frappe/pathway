@@ -2,65 +2,35 @@ package domain
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestCleanIDPart(t *testing.T) {
-	cases := map[string]string{
-		"inf-blackwell": "inf_blackwell", // '-' → '_' so the separator stays unambiguous
-		"u4j55nfboc":    "u4j55nfboc",
-		"a b:c/d":       "abcd", // spaces + punctuation dropped
-		"":              "x",    // never empty (would collapse the id)
-	}
-	for in, want := range cases {
-		if got := CleanIDPart(in); got != want {
-			t.Errorf("CleanIDPart(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
+func TestNewRequestID(t *testing.T) {
+	shape := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
-func TestBuildRequestID(t *testing.T) {
-	const gateway = "proxy-sg"
-	// Every part is cleaned, so the only '-' left is the separator, and case is preserved so a target
-	// reads as its doc name. The tail is left unsized — pinning its length only breaks this test
-	// when someone deliberately changes the entropy.
-	shape := regexp.MustCompile(`^gr-proxy_sg-[A-Za-z0-9_]+-u4j55nfboc-[0-9a-f]+$`)
-
-	// Deployment present → used verbatim (sanitized), even though a server id is there too.
-	// The box cannot name the engine: it serves both deployments below.
-	rid := BuildRequestID(gateway,
-		Route{Deployment: "MD-00007", Server: "inf-blackwell", EngineURL: "https://x/e/md-00007"},
-		"u4j55nfboc",
-	)
-	if !shape.MatchString(rid) {
-		t.Errorf("with deployment: %q does not match %v", rid, shape)
-	}
-	if !strings.Contains(rid, "MD_00007") {
-		t.Errorf("with deployment: %q should name the deployment, not the box", rid)
+	first := NewRequestID()
+	if !shape.MatchString(first) {
+		t.Fatalf("%q is not a uuid v7", first)
 	}
 
-	// Two deployments of one model on one box: same server, different ids.
-	other := BuildRequestID(gateway,
-		Route{Deployment: "MD-00008", Server: "inf-blackwell", EngineURL: "https://x/e/md-00008"},
-		"u4j55nfboc",
-	)
-	if strings.Contains(other, "MD_00007") {
-		t.Errorf("second deployment: %q leaked the first one's id", other)
+	// The leading 48 bits are unix milliseconds: what makes the id sort by admission.
+	ms, err := strconv.ParseInt(strings.ReplaceAll(first[:13], "-", ""), 16, 64)
+	if err != nil {
+		t.Fatalf("timestamp part of %q: %v", first, err)
+	}
+	if age := time.Since(time.UnixMilli(ms)); age < 0 || age > time.Second {
+		t.Errorf("%q was stamped %v ago, want about now", first, age)
 	}
 
-	// Route pushed before the deployment field existed → falls back to the server id.
-	legacy := BuildRequestID(gateway, Route{Server: "inf-blackwell", EngineURL: "http://x:8080"}, "u4j55nfboc")
-	if !shape.MatchString(legacy) || !strings.Contains(legacy, "inf_blackwell") {
-		t.Errorf("legacy route: %q should fall back to the server", legacy)
+	time.Sleep(2 * time.Millisecond)
+	second := NewRequestID()
+	if second == first {
+		t.Error("two ids should differ")
 	}
-
-	// Neither → a short hash of the engine URL (still matches the shape).
-	rid2 := BuildRequestID(gateway, Route{EngineURL: "http://x:8080"}, "u4j55nfboc")
-	if !shape.MatchString(rid2) {
-		t.Errorf("fallback: %q does not match %v", rid2, shape)
-	}
-	if rid == rid2 {
-		t.Error("random tail should differ between calls")
+	if !(second > first) {
+		t.Errorf("a later id should sort after an earlier one: %q !> %q", second, first)
 	}
 }

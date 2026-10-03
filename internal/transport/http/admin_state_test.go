@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -22,8 +23,10 @@ import (
 func adminFixture(t *testing.T, store *memory.Store) http.Handler {
 	t.Helper()
 	logs := observability.Discard()
+	repos := store.Repositories()
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
-		Provisioning: provisioning.New(store.Repositories(), logs.Process),
+		Provisioning: provisioning.New(repos, logs.Process),
+		ProviderKeys: repos.ProviderKeys,
 	}, logs.Process)
 	return server.AdminHandler()
 }
@@ -37,6 +40,31 @@ func adminCall(t *testing.T, handler http.Handler, method, path, body string) *h
 	return w
 }
 
+// A field this binary does not know is refused by name, never stored without. The row the
+// control plane keeps then says which field, and the hash is never written — so the next tick
+// pushes again instead of reading "in sync" off a lossy copy.
+func TestAPushWithAFieldTheBinaryDoesNotKnowIsRefused(t *testing.T) {
+	store := memory.New()
+	handler := adminFixture(t, store)
+
+	w := adminCall(t, handler, http.MethodPost, "/grove-admin/routes",
+		`{"routes":{"m":[{"engine_url":"http://e","healthy":true,"keyring_v2":[]}]}}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `unknown field "keyring_v2"`) {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	if len(store.Routes) != 0 {
+		t.Errorf("a refused push was stored: %v", store.Routes)
+	}
+	w = adminCall(t, handler, http.MethodPost, "/grove-admin/state",
+		`{"groups":{"hash":"h","records":[{"name":"g","models":"m","expires_at":"never"}]}}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `unknown field "expires_at"`) {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	if hashes, _ := store.Repositories().State.Hashes(context.Background()); len(hashes) != 0 {
+		t.Errorf("a refused push stored its hash: %v", hashes)
+	}
+}
+
 func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	store := memory.New()
 	store.Groups["stale"] = domain.GroupRecord{}
@@ -44,7 +72,7 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	bucket := domain.BucketOf("aa")
 
 	body := fmt.Sprintf(`{
-		"groups": {"hash": "gh", "catalog": "m1", "records": [{"name": "acme", "models": "m1"}]},
+		"groups": {"hash": "gh", "records": [{"name": "acme", "models": "m1"}]},
 		"keys": {"buckets": {"%s": {"hash": "kh", "records": [
 			{"key_hash": "aa", "prefix": "K-1", "user": "GU-1", "status": "active"}]}}},
 		"routes": {"hash": "rh", "table": {"m1": [
@@ -141,5 +169,25 @@ func TestAnIngressServesTheStateSurfaceToo(t *testing.T) {
 	}
 	if len(store.Routes) != 0 {
 		t.Errorf("routes = %v, want the whole table pruned", store.Routes)
+	}
+}
+
+// The pin rides the users section; an older push without it decodes unpinned.
+func TestAStatePushCarriesTheUsersGeography(t *testing.T) {
+	store := memory.New()
+	handler := adminFixture(t, store)
+	body := fmt.Sprintf(`{"users": {"buckets": {"%s": {"hash": "uh", "records": [
+		{"name": "GU-1", "group": "acme", "geography": "eu"}]},
+		"%s": {"hash": "uh2", "records": [{"name": "GU-2", "group": "acme"}]}}}}`,
+		domain.BucketOf("GU-1"), domain.BucketOf("GU-2"))
+
+	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body); w.Code != http.StatusOK {
+		t.Fatalf("POST state = %d: %s", w.Code, w.Body)
+	}
+	if got := store.Users["GU-1"].Geography; got != "eu" {
+		t.Errorf("GU-1 geography = %q, want eu", got)
+	}
+	if got := store.Users["GU-2"].Geography; got != "" {
+		t.Errorf("GU-2 geography = %q, want unpinned", got)
 	}
 }

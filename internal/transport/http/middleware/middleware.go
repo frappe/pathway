@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"sync/atomic"
 
+	"github.com/phot0n/pathway/internal/repository"
 	"github.com/phot0n/pathway/internal/service/admission"
 	"github.com/phot0n/pathway/internal/service/metering"
 	"github.com/phot0n/pathway/internal/service/routing"
@@ -27,17 +29,27 @@ type Deps struct {
 	Routing   *routing.Service
 	Metering  *metering.Service
 	Transform *transform.Chain
-	Drain     DrainState
-	Log       *slog.Logger
+	// ProviderKeys counts what each vendor credential answered. Unused on an ingress.
+	ProviderKeys repository.ProviderKeys
+	Drain        DrainState
+	// Maintenance refuses new requests while in-flight ones finish; InFlight counts those let through.
+	Maintenance func() bool
+	InFlight    *atomic.Int64
+	Log         *slog.Logger
 	// Access is the per-request record. Separate from Log because it is a record, not a
 	// diagnostic, and must not move when the log level does.
 	Access *slog.Logger
+	// Payload is where opted-in users' prompts and outputs go — customer content, its own file so
+	// it can carry its own retention. Nil disables the payloadlog stage box-wide.
+	Payload *slog.Logger
 
 	// MaxBodyBytes bounds a request body. Beyond it the caller gets a 413 rather than the process
 	// growing to hold whatever was sent. Read per request so a reload moves it.
 	MaxBodyBytes func() int64
 	// IngressToken is the bearer a gateway must present on an ingress. Blank on a gateway.
 	IngressToken string
+	// Geography is this gateway's; a user pinned elsewhere is refused.
+	Geography string
 }
 
 // DrainState reports whether the process is shutting down. An interface so the lifecycle owns the
@@ -71,11 +83,13 @@ func Registered() []string {
 
 // GatewayChain's order is load-bearing: recover outermost so a panic below is still answered,
 // accesslog around everything it times, drain above auth so a restarting box answers the same
-// whatever the key, and meter directly below route because route claims a slot that must come back.
+// whatever the key, meter directly below route because route claims a slot that must come back,
+// and retry below meter (one bill however many attempts) but above transform and upstreamauth
+// (each attempt rewrites the body and the credential).
 var GatewayChain = []string{
 	"recover", "accesslog", "drain",
-	"auth", "quota", "body", "modelaccess",
-	"route", "meter", "transform", "upstreamauth",
+	"auth", "quota", "body", "modelaccess", "payloadlog",
+	"route", "meter", "retry", "transform", "upstreamauth",
 }
 
 // IngressChain is the same machinery with the tenant stages absent — not disabled, absent. An

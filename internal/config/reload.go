@@ -69,12 +69,17 @@ func diff(previous, next Resolved) []string {
 	add("middleware", !SameList(previous.Middleware, next.Middleware))
 	add("transforms", !SameList(previous.Transforms, next.Transforms))
 	add("synthetic_session_ttl", previous.SyntheticSessionTTL != next.SyntheticSessionTTL)
+	add("capacity_wait", previous.CapacityWait != next.CapacityWait)
 	add("max_body_bytes", previous.MaxBodyBytes != next.MaxBodyBytes)
 	add("upstream_read_timeout", previous.UpstreamReadTimeout != next.UpstreamReadTimeout)
 	add("upstream_tls_verify", previous.UpstreamTLSVerify != next.UpstreamTLSVerify)
 	add("drain_timeout", previous.DrainTimeout != next.DrainTimeout)
 	add("lame_duck", previous.LameDuck != next.LameDuck)
 	add("upgrade_timeout", previous.UpgradeTimeout != next.UpgradeTimeout)
+	add("usage_retention", previous.UsageRetention != next.UsageRetention)
+	add("usage_spool", previous.UsageSpool != next.UsageSpool)
+	add("usage_spool_max_bytes", previous.UsageSpoolMaxBytes != next.UsageSpoolMaxBytes)
+	add("maintenance", previous.Maintenance != next.Maintenance)
 	return changed
 }
 

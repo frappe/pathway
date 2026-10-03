@@ -250,3 +250,34 @@ func TestTheIngressNeverSeesTheCallersSession(t *testing.T) {
 		t.Errorf("session key %q is not an opaque hash of %q", key, session)
 	}
 }
+
+func TestKeyringIsThePushedKeysOrTheOneInternalKey(t *testing.T) {
+	engine := Route{InternalKey: "engine-key"}
+	if ring := engine.Keyring(); len(ring) != 1 || ring[0].Secret != "engine-key" || ring[0].ID != "" {
+		t.Errorf("engine keyring = %+v, want its one unnamed key", ring)
+	}
+	vendor := Route{Credentials: []Credential{{ID: "k1", Secret: "a"}, {ID: "k2", Secret: "b"}}}
+	if ring := vendor.Keyring(); len(ring) != 2 || ring[1].ID != "k2" {
+		t.Errorf("vendor keyring = %+v", ring)
+	}
+	// A row pushed before the field, or an engine with no key at all: one blank credential, so a
+	// request still has something to dial with.
+	if ring := (Route{}).Keyring(); len(ring) != 1 {
+		t.Errorf("bare keyring = %+v", ring)
+	}
+}
+
+func TestKeyStatusClass(t *testing.T) {
+	for status, want := range map[int]string{
+		200: "ok", 400: "ok", 404: "ok", 429: "rate_limited",
+		401: "rejected", 402: "rejected", 403: "rejected",
+		500: "failed", 502: "failed", 0: "failed",
+	} {
+		if got := KeyStatusClass(status); got != want {
+			t.Errorf("KeyStatusClass(%d) = %q, want %q", status, got, want)
+		}
+		if IsKeyFailure(status) != (want == "rate_limited" || want == "rejected") {
+			t.Errorf("IsKeyFailure(%d) disagrees with its class %q", status, want)
+		}
+	}
+}

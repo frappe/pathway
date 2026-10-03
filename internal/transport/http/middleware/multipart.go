@@ -104,7 +104,10 @@ func multipartBoundary(r *http.Request) string {
 // readMultipart takes the routing fields and hands the body on byte-exact, replaying what the tee
 // captured (including read-ahead) before the unread rest. It stops at `model`, so a form leading
 // with it captures almost nothing. No model part is refused later by the access check, as with JSON.
-func readMultipart(w http.ResponseWriter, r *http.Request, boundary string, limit int64, log *slog.Logger) (model, session string, err error) {
+// form is every part it walked, for the payload log: a text field's value (bounded like the routing
+// ones) and a stand-in for a file — never the file. Parts after `model` are not seen.
+func readMultipart(w http.ResponseWriter, r *http.Request, boundary string, limit int64, log *slog.Logger) (model, session string, form map[string]string, err error) {
+	form = map[string]string{}
 	original := r.Body
 	limited := http.MaxBytesReader(w, original, limit)
 
@@ -121,22 +124,26 @@ func readMultipart(w http.ResponseWriter, r *http.Request, boundary string, limi
 			break
 		}
 		name := part.FormName()
-		if part.FileName() == "" && (name == modelField || name == sessionField) {
+		if part.FileName() == "" {
 			value, verr := readFormValue(part)
 			part.Close()
 			if verr != nil {
 				err = verr
 				break
 			}
+			form[name] = value
 			if name == modelField {
 				model = value
 				break
 			}
-			session = value
+			if name == sessionField {
+				session = value
+			}
 			continue
 		}
-		// Everything else, every file part included, is walked past and never held. The tee already
-		// has these bytes for the upstream; this only advances the reader to the next boundary.
+		// A file is walked past and never held. The tee already has these bytes for the upstream;
+		// this only advances the reader to the next boundary.
+		form[name] = "[file " + part.FileName() + " " + or(part.Header.Get("Content-Type"), "-") + "]"
 		_, cerr := io.Copy(io.Discard, part)
 		part.Close()
 		if cerr != nil {
@@ -150,10 +157,10 @@ func readMultipart(w http.ResponseWriter, r *http.Request, boundary string, limi
 		// The capture is unreadable, so the body cannot be put back together. Refusing is the only
 		// honest answer — forwarding what is left would send the engine a truncated form.
 		_ = seen.Close()
-		return "", "", rerr
+		return "", "", nil, rerr
 	}
 	r.Body = readCloser{Reader: io.MultiReader(replay, limited), spill: seen, origin: original}
-	return model, session, err
+	return model, session, form, err
 }
 
 // readFormValue takes a bounded prefix of a part and drains the rest, so the reader still lands on

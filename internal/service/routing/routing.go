@@ -7,6 +7,10 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
@@ -27,13 +31,21 @@ type Request struct {
 	// Path is the surface being asked for, checked against the model's modality. An ASR model and
 	// a chat model are indistinguishable by name alone.
 	Path string
+	// Dialect is the surface the request arrived on; a vendor serves only its own.
+	Dialect string
+	// RequestID was minted at the edge; the claim and the decision carry it. Blank is minted here
+	// rather than claimed as "" — a blank member would silently undercount the engine.
+	RequestID string
 }
 
 // Decision is the pick and everything downstream needs to act on it.
 type Decision struct {
 	Route     domain.Route
 	RequestID string
-	Session   string // the session actually pinned; "" when none was used
+	// Key is the credential this attempt dials with — one of the route's keyring, taken in turn;
+	// the retry stage moves it when a vendor refuses the key.
+	Key     domain.Credential
+	Session string // the session actually pinned; "" when none was used
 	// SessionKey is sha256(Session), set only for an ingress route. The gateway's session may be a
 	// caller-chosen string that names the tenant; the infra plane keys on the hash instead.
 	SessionKey string
@@ -49,28 +61,44 @@ type Service struct {
 	health   repository.Health
 	log      *slog.Logger
 
-	gatewayID string
-	region    string
+	region string
 	// syntheticTTL is how long a caller naming no session is pinned to one engine; 0 balances every
 	// such request. A function, not a value, so turning it is an edit to the tunables file rather
 	// than a deploy.
 	syntheticTTL func() time.Duration
+	capacityWait func() time.Duration
+	// cursors is the round-robin position per vendor ring (ringID → *atomic.Uint64), this process's
+	// own: two gateways each take even turns without agreeing on whose turn it is.
+	cursors sync.Map
+}
+
+func serving(table []domain.Route, dialect, path string) []domain.Route {
+	out := make([]domain.Route, 0, len(table))
+	for _, candidate := range table {
+		if domain.ServesRoute(candidate, dialect, path) {
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 type Options struct {
-	GatewayID string
-	Region    string
+	Region string
 	// SyntheticTTL is read on every pick. Nil means no synthetic session at all.
 	SyntheticTTL func() time.Duration
+	// CapacityWait is how long a pick waits for a slot when every replica is full. Nil or 0 is a
+	// 429 at once.
+	CapacityWait func() time.Duration
 }
 
 func New(store repository.Store, log *slog.Logger, opts Options) *Service {
 	return &Service{
 		routes: store.Routes, sessions: store.Sessions,
 		inFlight: store.InFlight, health: store.Health,
-		log:       log,
-		gatewayID: opts.GatewayID, region: opts.Region,
+		log:          log,
+		region:       opts.Region,
 		syntheticTTL: opts.SyntheticTTL,
+		capacityWait: opts.CapacityWait,
 	}
 }
 
@@ -90,6 +118,10 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 		ttl = synthetic
 	}
 
+	if req.RequestID == "" {
+		req.RequestID = domain.NewRequestID()
+	}
+
 	table, err := s.routes.Get(ctx, req.Model)
 	if err != nil || len(table) == 0 {
 		if err != nil {
@@ -98,10 +130,12 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 		return Decision{}, domain.Deny(503, "model unavailable")
 	}
 
-	// The surface check reads the first row: modality is the model's, stamped on every row, and a
-	// model's rows are all the same kind. Refused here rather than forwarded — the upstream would
-	// 404 it, and this sits above meter, so a wrong-surface call bills nothing.
-	if !domain.ServesRoute(table[0], req.Path) {
+	// Surface admission is per ROW: a dual-front vendor's rows differ in dialect, so the path
+	// filters the table and the pick runs on what survives. Refused only when nothing does,
+	// rather than forwarded — the upstream would 404 it, and this sits above meter, so a
+	// wrong-surface call bills nothing.
+	table = serving(table, req.Dialect, req.Path)
+	if len(table) == 0 {
 		return Decision{}, domain.Deny(404, req.Model+" does not serve "+req.Path)
 	}
 
@@ -113,6 +147,9 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	s.markUnhealthy(ctx, table)
 
 	route, status := domain.PickRoute(table, stickyURL, s.region)
+	if status == 429 {
+		route, status = s.waitForRoom(ctx, table, stickyURL)
+	}
 	if status == 429 {
 		return Decision{}, domain.Deny(429, "every replica of "+req.Model+" is at capacity")
 	}
@@ -129,7 +166,8 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 
 	decision := Decision{
 		Route:     route,
-		RequestID: domain.BuildRequestID(s.gatewayID, route, req.KeyPrefix),
+		RequestID: req.RequestID,
+		Key:       s.PickKey(route.Keyring()),
 		Session:   session,
 	}
 	if route.IsIngress() && session != "" {
@@ -145,6 +183,72 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 		"kind", route.Kind, "in_flight", route.InFlight, "sticky", stickyURL != "",
 		"candidates", len(table), "rid", decision.RequestID)
 	return decision, nil
+}
+
+// capacityPoll is how often a waiting pick re-reads the in-flight counts.
+const capacityPoll = 50 * time.Millisecond
+
+// waitForRoom re-picks until a replica has room, the wait runs out, or the client leaves. Nothing is
+// claimed while waiting, and this sits above meter, so a request that gives up bills nothing.
+// ponytail: polls the in-flight store every capacityPoll per waiting request; a release
+// notification is the upgrade if many requests wait at once.
+func (s *Service) waitForRoom(ctx context.Context, table []domain.Route, stickyURL string) (domain.Route, int) {
+	var wait time.Duration
+	if s.capacityWait != nil {
+		wait = s.capacityWait()
+	}
+	deadline := time.Now().Add(wait)
+	for time.Until(deadline) > 0 {
+		timer := time.NewTimer(min(capacityPoll, time.Until(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return domain.Route{}, 429
+		case <-timer.C:
+		}
+		s.fillInFlight(ctx, table)
+		if route, status := domain.PickRoute(table, stickyURL, s.region); status != 429 {
+			return route, status
+		}
+	}
+	return domain.Route{}, 429
+}
+
+// PickKey is the route's one selection strategy, round robin: the credential a request dials with,
+// the next in the ring's order after the last request's. The cursor is per ring, and a vendor's ring
+// is the same on every model it serves, so its keys take even turns across models — the limits they
+// share are the vendor's. A session still changes key between requests, so a vendor's prompt cache
+// stays per credential; that is the strategy's known cost. Blank on an empty ring.
+func (s *Service) PickKey(keyring []domain.Credential) domain.Credential {
+	if len(keyring) == 0 {
+		return domain.Credential{}
+	}
+	cursor, _ := s.cursors.LoadOrStore(ringID(keyring), new(atomic.Uint64))
+	turn := cursor.(*atomic.Uint64).Add(1) - 1
+	return keyring[turn%uint64(len(keyring))]
+}
+
+// ringID names a ring by its members: the ids the control plane counts the keys under, in the
+// order it pushed them. An engine's one blank-id credential names the one ring every engine shares,
+// which has a single position anyway.
+func ringID(keyring []domain.Credential) string {
+	ids := make([]string, len(keyring))
+	for i, key := range keyring {
+		ids[i] = key.ID
+	}
+	return strings.Join(ids, ",")
+}
+
+// NextKey is the retry stage's walk: the first key after `loser` in ring order that is not in
+// `spent`, round the ring once. Blank when every key is spent.
+func NextKey(keyring []domain.Credential, loser domain.Credential, spent map[string]bool) domain.Credential {
+	start := slices.IndexFunc(keyring, func(key domain.Credential) bool { return key.ID == loser.ID })
+	for step := 1; step <= len(keyring); step++ {
+		if key := keyring[(start+step)%len(keyring)]; !spent[key.ID] {
+			return key
+		}
+	}
+	return domain.Credential{}
 }
 
 // PickReplica is the ingress tier: the same rule with no session synthesis, no region (every

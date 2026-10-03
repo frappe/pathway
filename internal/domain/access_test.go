@@ -13,14 +13,14 @@ func set(models ...string) map[string]bool {
 // holder builds a current-shape user record — one that names a group, so canUse resolves rather
 // than reading a flattened set.
 func holder(group string) UserRecord {
-	return UserRecord{Group: group}
+	return UserRecord{Groups: ModelSet(group)}
 }
 
 func live(status string) KeyRecord { return KeyRecord{Status: status} }
 
 func TestEvaluate(t *testing.T) {
 	tier := GroupRecord{Models: set("a")}
-	overBudget := UserRecord{Group: "tier", Limited: true}
+	overBudget := UserRecord{Groups: ModelSet("tier"), Limited: true}
 	cases := []struct {
 		name   string
 		rec    KeyRecord
@@ -31,7 +31,7 @@ func TestEvaluate(t *testing.T) {
 		{"group grant admits", live("active"), holder("tier"), "a", 200},
 		{"model the group does not grant", live("active"), holder("tier"), "b", 403},
 		{"revoked key", live("revoked"), holder("tier"), "a", 401},
-		{"holder over monthly budget", live("active"), overBudget, "a", 429},
+		{"holder out of credit", live("active"), overBudget, "a", 402},
 		// The credential is the thing that is wrong, so it is named first.
 		{"revoked beats over-budget", live("revoked"), overBudget, "a", 401},
 		// Fails closed: no group and no allow must not fall through to "everything".
@@ -40,7 +40,7 @@ func TestEvaluate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			grp := GroupRecord{}
-			if tc.usr.Group != "" {
+			if len(tc.usr.Groups) > 0 {
 				grp = tier
 			}
 			got, reason := Evaluate(tc.rec, tc.usr, grp, tc.model)
@@ -61,16 +61,16 @@ func TestCanUseResolvesTheUsersDeltas(t *testing.T) {
 		model string
 		want  bool
 	}{
-		{"allow adds a model the group lacks", UserRecord{Group: "t", Allow: set("z")}, "z", true},
+		{"allow adds a model the group lacks", UserRecord{Groups: ModelSet("t"), Allow: set("z")}, "z", true},
 		{"allow works without any group", UserRecord{Allow: set("z")}, "z", true},
-		{"deny beats the group's grant", UserRecord{Group: "t", Deny: set("b")}, "b", false},
+		{"deny beats the group's grant", UserRecord{Groups: ModelSet("t"), Deny: set("b")}, "b", false},
 		{"deny beats the user's own allow", UserRecord{Allow: set("z"), Deny: set("z")}, "z", false},
-		{"denying an ungranted model is harmless", UserRecord{Group: "t", Deny: set("zzz")}, "a", true},
+		{"denying an ungranted model is harmless", UserRecord{Groups: ModelSet("t"), Deny: set("zzz")}, "a", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			grp := GroupRecord{}
-			if tc.usr.Group != "" {
+			if len(tc.usr.Groups) > 0 {
 				grp = tier
 			}
 			if got := CanUse(tc.usr, grp, tc.model); got != tc.want {
@@ -80,12 +80,12 @@ func TestCanUseResolvesTheUsersDeltas(t *testing.T) {
 	}
 }
 
-// Over budget must win over the model gate: the holder is rejected before we check whether the
-// model was allowed, so the 429 is not masked by a 403.
-func TestEvaluateRateLimitPrecedence(t *testing.T) {
-	usr := UserRecord{Group: "tier", Limited: true}
-	if got, _ := Evaluate(live("active"), usr, GroupRecord{Models: set("a")}, "b"); got != 429 {
-		t.Fatalf("expected 429 to win over 403, got %d", got)
+// Out of credit must win over the model gate: the holder is rejected before we check whether the
+// model was allowed, so the 402 is not masked by a 403.
+func TestEvaluateCreditPrecedence(t *testing.T) {
+	usr := UserRecord{Groups: ModelSet("tier"), Limited: true}
+	if got, _ := Evaluate(live("active"), usr, GroupRecord{Models: set("a")}, "b"); got != 402 {
+		t.Fatalf("expected 402 to win over 403, got %d", got)
 	}
 }
 
@@ -122,12 +122,12 @@ func TestAPreSplitKeyResolvesThroughSynthUser(t *testing.T) {
 	}
 }
 
-// The budget flag used to ride on the key's status. loadKey lifts it, and synthUser carries it, so
-// an over-budget holder on a pre-split record still gets 429 rather than being read as revoked.
-func TestAPreSplitBudgetFlagStillMeans429(t *testing.T) {
+// The flag used to ride on the key's status. loadKey lifts it, and synthUser carries it, so an
+// exhausted holder on a pre-split record still gets 402 rather than being read as revoked.
+func TestAPreSplitCreditFlagStillRefuses(t *testing.T) {
 	rec := KeyRecord{Status: "active", Legacy: LegacyKey{HasGroup: true, Group: "tier", Limited: true}}
-	if got, _ := Evaluate(rec, SynthUser(rec), GroupRecord{Models: set("a")}, "a"); got != 429 {
-		t.Fatalf("status = %d, want 429", got)
+	if got, _ := Evaluate(rec, SynthUser(rec), GroupRecord{Models: set("a")}, "a"); got != 402 {
+		t.Fatalf("status = %d, want 402", got)
 	}
 }
 
@@ -169,5 +169,38 @@ func TestPreGroupRecordStillResolves(t *testing.T) {
 	}
 	if got, _ := Evaluate(rec, usr, GroupRecord{}, "b"); got != 403 {
 		t.Fatalf("status = %d, want 403 — a legacy set still fails closed", got)
+	}
+}
+
+// The prepaid gate is this box's own view of the holder's balance against the amount they loaded.
+// The control plane's flag refuses alike, whatever this box's balance says.
+func TestEvaluateThePrepaidBalance(t *testing.T) {
+	tier := GroupRecord{Models: set("a")}
+	prepaid := func(spent, budget int64) UserRecord {
+		return UserRecord{Groups: ModelSet("tier"), Prepaid: true, Spent: spent, Budget: budget}
+	}
+	cases := []struct {
+		name   string
+		usr    UserRecord
+		status int
+		reason string
+	}{
+		{"funded admits", prepaid(999, 1000), 200, ""},
+		{"spent to the ceiling", prepaid(1000, 1000), 402, "credit balance exhausted"},
+		{"overspent", prepaid(1500, 1000), 402, "credit balance exhausted"},
+		{"no budget pushed", prepaid(0, 0), 402, "credit balance exhausted"},
+		{"not prepaid ignores the budget", UserRecord{Groups: ModelSet("tier"), Spent: 1500, Budget: 1000}, 200, ""},
+		{"limited refuses a funded holder", UserRecord{Groups: ModelSet("tier"), Limited: true, Prepaid: true, Spent: 0, Budget: 1000}, 402, "credit balance exhausted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := Evaluate(live("active"), tc.usr, tier, "a")
+			if got != tc.status || reason != tc.reason {
+				t.Fatalf("status = %d (%q), want %d (%q)", got, reason, tc.status, tc.reason)
+			}
+			if tc.usr.Exhausted() != (tc.status != 200) {
+				t.Fatalf("Exhausted = %v, want %v", tc.usr.Exhausted(), tc.status != 200)
+			}
+		})
 	}
 }
