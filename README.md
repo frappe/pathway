@@ -265,7 +265,7 @@ It is not architecture for its own sake — it bought three specific things:
 client
   │ TLS, HTTP/2
   ▼
-recover → accesslog → drain → auth → quota → body → modelaccess → route → meter → transform → upstreamauth
+recover → accesslog → drain → auth → quota → body → modelaccess → payloadlog → route → meter → retry → transform → upstreamauth
   │
   ▼
 proxy ──► engine (or ingress ──► engine)
@@ -649,7 +649,9 @@ in the id. So is how it ended, as `cut`: `-` for a response that finished, else 
 `client_left`, `upstream_idle` (silent for the read timeout) or `upstream` (its body broke off).
 An upstream that ends a stream early but cleanly cannot be told from one that finished, and reads
 `-`. On a provider route the vendor's own id is `upstream_rid` on that line and never reaches
-the client; ours never reaches the vendor.
+the client; ours never reaches the vendor. `attempts` is how many times an upstream was dialled
+for the request — 0 when it was refused before any, more than 1 when `retry` moved it to another
+vendor key.
 
 ---
 
@@ -866,6 +868,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `sticky:<session>` | string, 30m | the gateway |
 | `inflight:<engine>` | sorted set, member = request id | the gateway |
 | `health:<target>` | counter, 60s | the gateway |
+| `pk:<key id>` | hash, lifetime | the gateway — what each vendor credential answered; read by `GET /grove-admin/provider-keys` |
 
 ### How the push works
 
@@ -928,6 +931,10 @@ The pull hands the dead lines over: `GET /grove-admin/usage` also answers `"dead
 since the process started). The control plane lands or records each dead line and names it in the
 ack — `"dead": ["<request id>", ...]` beside `"acks"` — which removes it; `count` includes them.
 
+`GET /grove-admin/provider-keys?ids=a,b` answers `{id: {requests, ok, rate_limited, rejected,
+failed, last_used, last_rate_limited}}` per vendor credential, lifetime and never drained; an id
+never dialled is zeros. The control plane sums it across stores for the operator.
+
 `POST /grove-admin/spend-adjust {"user", "delta", "id"}` corrects one holder's `spent` on this store
 by `delta` nano-USD, once per `id` — a retry answers `{"spent", "applied": false}` and moves
 nothing. A holder this store does not hold is a 404; nothing is invented.
@@ -986,13 +993,15 @@ computed here and never pushed — the control plane has no view of what is runn
 (Mtok, minute, request) — stamped on every row of the model. Absent on an unpriced model, and such
 a request costs 0.
 
-A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries three
-more fields:
+A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries its
+own fields:
 
 ```json
 [{
   "engine_url":     "https://api.anthropic.com",
-  "internal_key":   "<the vendor's API key>",
+  "internal_key":   "",
+  "credentials":    [{"id": "<key row id>", "secret": "<the vendor's API key>"}, ...],
+  "key_selection":  "random",
   "healthy":        true,
   "capacity":       0,
   "deployment":     "anthropic",
@@ -1013,6 +1022,20 @@ rather than replaced, the vendor's own key goes in the header its `dialect` expe
 plus `anthropic-version` for an Anthropic front, a Bearer for an OpenAI-compatible one), and the
 certificate is verified whatever `upstream_tls_verify` says — that hop leaves our network carrying
 someone else's key.
+
+`credentials` is every key the control plane holds with the vendor, each under the id it is
+counted by; `internal_key` stays blank on a provider row and is the one-key spelling an engine or
+ingress row keeps (`Keyring()` reads either). `route` draws one at random per request
+(`key_selection` is carried for the day there is a second strategy; random is a per-request draw,
+so a session may change key between requests, and a vendor's prompt cache is per credential).
+The `retry` stage then walks the ring on the key's own failures only: a **429** spends the key —
+each is tried once, then the rate-limited ones are opened once more, since a quota window may have
+slid — and a **401/402/403** retires it for the rest of the request. The second exhaustion is the
+client's answer, headers and body as the vendor sent them. Nothing else is retried: a 502 on one
+key is a 502 on the next. A held attempt leaks nothing to the client; the request is billed once
+whatever it walked, and the access line's `attempts` counts the dials. Every attempt lands in
+`pk:<key id>` (`requests`, `ok`, `rate_limited`, `rejected`, `failed`, `last_used`,
+`last_rate_limited`), lifetime, which `GET /grove-admin/provider-keys?ids=a,b` answers.
 
 `dialect` is the API shape the row speaks, `openai` or `anthropic`, and nothing translates between
 them: a request reaches only rows of its surface's dialect. A vendor with both fronts is two rows. On

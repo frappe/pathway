@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/phot0n/pathway/internal/domain"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -137,4 +138,47 @@ func (h health) RecordFailure(ctx context.Context, target string) error {
 // EjectAfter times ever — before it is dropped.
 func (h health) RecordSuccess(ctx context.Context, target string) error {
 	return h.rdb.Del(ctx, healthKey(target)).Err()
+}
+
+type providerKeys struct{ rdb *redis.Client }
+
+func providerKeyKey(id string) string { return "pk:" + id }
+
+// Count is one transaction so a counter never lands without its class, and an attempt never
+// shows as a request that answered nothing. Lifetime: there is no expiry and no drain.
+func (p providerKeys) Count(ctx context.Context, id string, status int) error {
+	key, now := providerKeyKey(id), time.Now().Unix()
+	_, err := p.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.HIncrBy(ctx, key, "requests", 1)
+		pipe.HIncrBy(ctx, key, domain.KeyStatusClass(status), 1)
+		pipe.HSet(ctx, key, "last_used", now)
+		if status == 429 {
+			pipe.HSet(ctx, key, "last_rate_limited", now)
+		}
+		return nil
+	})
+	return err
+}
+
+func (p providerKeys) Stats(ctx context.Context, ids []string) (map[string]domain.KeyStats, error) {
+	stats := make(map[string]domain.KeyStats, len(ids))
+	for _, id := range ids {
+		fields, err := p.rdb.HGetAll(ctx, providerKeyKey(id)).Result()
+		if err != nil {
+			return nil, err
+		}
+		stats[id] = domain.KeyStats{
+			Requests: counter(fields["requests"]), OK: counter(fields["ok"]),
+			RateLimited: counter(fields["rate_limited"]), Rejected: counter(fields["rejected"]),
+			Failed: counter(fields["failed"]), LastUsed: counter(fields["last_used"]),
+			LastRateLimited: counter(fields["last_rate_limited"]),
+		}
+	}
+	return stats, nil
+}
+
+// counter reads a hash field as a number; absent or unreadable is 0.
+func counter(text string) int64 {
+	value, _ := strconv.ParseInt(text, 10, 64)
+	return value
 }

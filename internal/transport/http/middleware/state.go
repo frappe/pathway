@@ -33,6 +33,8 @@ type State struct {
 	Form map[string]string
 
 	Decision routing.Decision
+	// Attempts is how many times an upstream was dialled for this request; 0 when none was.
+	Attempts int
 
 	// Filled on the way back out, by the proxy.
 	UpstreamStatus int

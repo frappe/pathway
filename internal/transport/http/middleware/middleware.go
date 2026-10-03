@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/phot0n/pathway/internal/repository"
 	"github.com/phot0n/pathway/internal/service/admission"
 	"github.com/phot0n/pathway/internal/service/metering"
 	"github.com/phot0n/pathway/internal/service/routing"
@@ -28,7 +29,9 @@ type Deps struct {
 	Routing   *routing.Service
 	Metering  *metering.Service
 	Transform *transform.Chain
-	Drain     DrainState
+	// ProviderKeys counts what each vendor credential answered. Unused on an ingress.
+	ProviderKeys repository.ProviderKeys
+	Drain        DrainState
 	// Maintenance refuses new requests while in-flight ones finish; InFlight counts those let through.
 	Maintenance func() bool
 	InFlight    *atomic.Int64
@@ -80,11 +83,13 @@ func Registered() []string {
 
 // GatewayChain's order is load-bearing: recover outermost so a panic below is still answered,
 // accesslog around everything it times, drain above auth so a restarting box answers the same
-// whatever the key, and meter directly below route because route claims a slot that must come back.
+// whatever the key, meter directly below route because route claims a slot that must come back,
+// and retry below meter (one bill however many attempts) but above transform and upstreamauth
+// (each attempt rewrites the body and the credential).
 var GatewayChain = []string{
 	"recover", "accesslog", "drain",
 	"auth", "quota", "body", "modelaccess", "payloadlog",
-	"route", "meter", "transform", "upstreamauth",
+	"route", "meter", "retry", "transform", "upstreamauth",
 }
 
 // IngressChain is the same machinery with the tenant stages absent — not disabled, absent. An

@@ -347,6 +347,21 @@ func TestARouteWithoutAModalityIsUnrestricted(t *testing.T) {
 	}
 }
 
+func TestPickKeyDrawsOnlyFromTheUnspent(t *testing.T) {
+	ring := []domain.Credential{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	for range 32 {
+		if key := PickKey(ring, map[string]bool{"a": true, "c": true}); key.ID != "b" {
+			t.Fatalf("picked %q with only b open", key.ID)
+		}
+	}
+	if key := PickKey(ring, map[string]bool{"a": true, "b": true, "c": true}); key.ID != "" {
+		t.Errorf("picked %q from an exhausted ring", key.ID)
+	}
+	if key := PickKey([]domain.Credential{{Secret: "only"}}, nil); key.Secret != "only" {
+		t.Errorf("an engine's one key was not picked: %+v", key)
+	}
+}
+
 func TestPickWaitsForRoom(t *testing.T) {
 	full := func() *memory.Store {
 		route := engine("https://full")

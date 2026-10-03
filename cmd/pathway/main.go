@@ -114,6 +114,7 @@ func run() error {
 		Metering:       meter,
 		Catalog:        catalog.New(store.Routes),
 		Provisioning:   provisioning.New(store, log.Process),
+		ProviderKeys:   store.ProviderKeys,
 		Transform:      rebuilt.chain,
 		Proxy:          rebuilt.proxy,
 		Drain:          lifecycle,

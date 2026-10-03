@@ -39,5 +39,7 @@ func (c *Client) Store() repository.Store {
 		Health:   health{c.rdb},
 		Usage:    usage{c.rdb},
 		State:    state{c.rdb},
+
+		ProviderKeys: providerKeys{c.rdb},
 	}
 }

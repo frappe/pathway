@@ -27,6 +27,7 @@ func (s *Server) proxyHandler() http.Handler {
 		// model on the way out gets it swapped back on the way in: the response must speak the id
 		// the client asked for, not the upstream's own spelling.
 		route := state.Decision.Route
+		state.Attempts++
 		// Deferred, like meter's own record: a client hanging up mid-stream unwinds this handler
 		// through http.ErrAbortHandler, and the upstream still billed whatever it had generated.
 		var outcome proxy.Outcome

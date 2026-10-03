@@ -69,6 +69,15 @@ type Health interface {
 	RecordSuccess(ctx context.Context, target string) error
 }
 
+// ProviderKeys counts what each vendor credential answered — lifetime, by the id the control
+// plane pushed it under. Read live by the control plane; never drained.
+type ProviderKeys interface {
+	// Count lands one attempt on one key: the upstream's status, or 0 when the hop produced none.
+	Count(ctx context.Context, id string, status int) error
+	// Stats answers one record per id, zero for a key that never answered.
+	Stats(ctx context.Context, ids []string) (map[string]domain.KeyStats, error)
+}
+
 // Usage accrues token counters per API key prefix. The field names are the service's business —
 // this only adds numbers to them.
 type Usage interface {
@@ -111,6 +120,8 @@ type Store struct {
 	Health   Health
 	Usage    Usage
 	State    State
+	// ProviderKeys is unused on an ingress, which dials no vendor.
+	ProviderKeys ProviderKeys
 }
 
 // The upsert shapes the control plane pushes. Deliberately flat strings, matching the wire: the

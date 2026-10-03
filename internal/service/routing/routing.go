@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
@@ -38,7 +39,10 @@ type Request struct {
 type Decision struct {
 	Route     domain.Route
 	RequestID string
-	Session   string // the session actually pinned; "" when none was used
+	// Key is the credential this attempt dials with — one of the route's keyring, picked at
+	// random; the retry stage moves it when a vendor refuses the key.
+	Key     domain.Credential
+	Session string // the session actually pinned; "" when none was used
 	// SessionKey is sha256(Session), set only for an ingress route. The gateway's session may be a
 	// caller-chosen string that names the tenant; the infra plane keys on the hash instead.
 	SessionKey string
@@ -157,6 +161,7 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	decision := Decision{
 		Route:     route,
 		RequestID: req.RequestID,
+		Key:       PickKey(route.Keyring(), nil),
 		Session:   session,
 	}
 	if route.IsIngress() && session != "" {
@@ -201,6 +206,23 @@ func (s *Service) waitForRoom(ctx context.Context, table []domain.Route, stickyU
 		}
 	}
 	return domain.Route{}, 429
+}
+
+// PickKey is the route's one selection strategy, random, over the keys not in `spent`: the
+// credential a request dials with, or the next one once a vendor refused the last. Blank when
+// every key is spent. Random is a per-request draw, so a session may change key between
+// requests — a vendor's prompt cache is per credential, which is the strategy's known cost.
+func PickKey(keyring []domain.Credential, spent map[string]bool) domain.Credential {
+	var open []domain.Credential
+	for _, key := range keyring {
+		if !spent[key.ID] {
+			open = append(open, key)
+		}
+	}
+	if len(open) == 0 {
+		return domain.Credential{}
+	}
+	return open[rand.IntN(len(open))]
 }
 
 // PickReplica is the ingress tier: the same rule with no session synthesis, no region (every

@@ -28,6 +28,8 @@ type Store struct {
 	Sticky   map[string]string
 	InFlight map[string]map[string]bool // engine → request ids
 	Failures map[string]int
+	// KeyStats is what each vendor credential answered, the memory twin of pk:<id>.
+	KeyStats map[string]domain.KeyStats
 	Usage    map[string]map[string]int64
 	Hashes   map[string]string // grove:state_hash — section/bucket → hash
 
@@ -42,7 +44,7 @@ type Store struct {
 	Adjusted map[string]bool
 
 	// Fail names the repositories that should error, by interface name ("routes", "inflight",
-	// "health", "sessions", "keys", "users", "groups", "usage", "state").
+	// "health", "sessions", "keys", "users", "groups", "usage", "state", "providerkeys").
 	Fail map[string]bool
 }
 
@@ -53,7 +55,7 @@ func New() *Store {
 		Keys: map[string]domain.KeyRecord{}, Users: map[string]domain.UserRecord{},
 		Groups: map[string]domain.GroupRecord{}, Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
-		Failures: map[string]int{}, Usage: map[string]map[string]int64{},
+		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
 		Hashes: map[string]string{}, Fail: map[string]bool{},
 		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{}, Accrued: map[string]bool{},
 		Retained: map[string]time.Duration{}, Adjusted: map[string]bool{},
@@ -65,7 +67,7 @@ func (s *Store) Repositories() repository.Store {
 	return repository.Store{
 		Keys: keys{s}, Users: users{s}, Groups: groups{s}, Routes: routes{s},
 		Sessions: sessions{s}, InFlight: inFlight{s}, Health: health{s},
-		Usage: usage{s}, State: state{s},
+		Usage: usage{s}, State: state{s}, ProviderKeys: providerKeys{s},
 	}
 }
 
@@ -340,6 +342,45 @@ func (h health) RecordSuccess(_ context.Context, target string) error {
 	}
 	delete(h.s.Failures, target)
 	return nil
+}
+
+type providerKeys struct{ s *Store }
+
+func (p providerKeys) Count(_ context.Context, id string, status int) error {
+	p.s.mu.Lock()
+	defer p.s.mu.Unlock()
+	if err := p.s.failed("providerkeys"); err != nil {
+		return err
+	}
+	stats, now := p.s.KeyStats[id], time.Now().Unix()
+	stats.Requests++
+	stats.LastUsed = now
+	switch domain.KeyStatusClass(status) {
+	case "rate_limited":
+		stats.RateLimited++
+		stats.LastRateLimited = now
+	case "rejected":
+		stats.Rejected++
+	case "ok":
+		stats.OK++
+	default:
+		stats.Failed++
+	}
+	p.s.KeyStats[id] = stats
+	return nil
+}
+
+func (p providerKeys) Stats(_ context.Context, ids []string) (map[string]domain.KeyStats, error) {
+	p.s.mu.Lock()
+	defer p.s.mu.Unlock()
+	if err := p.s.failed("providerkeys"); err != nil {
+		return nil, err
+	}
+	stats := make(map[string]domain.KeyStats, len(ids))
+	for _, id := range ids {
+		stats[id] = p.s.KeyStats[id]
+	}
+	return stats, nil
 }
 
 type usage struct{ s *Store }

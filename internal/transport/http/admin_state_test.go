@@ -23,8 +23,10 @@ import (
 func adminFixture(t *testing.T, store *memory.Store) http.Handler {
 	t.Helper()
 	logs := observability.Discard()
+	repos := store.Repositories()
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
-		Provisioning: provisioning.New(store.Repositories(), logs.Process),
+		Provisioning: provisioning.New(repos, logs.Process),
+		ProviderKeys: repos.ProviderKeys,
 	}, logs.Process)
 	return server.AdminHandler()
 }

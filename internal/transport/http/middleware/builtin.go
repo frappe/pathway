@@ -99,8 +99,7 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					attrs = append(attrs, slog.Float64("ttft", recorder.ttft(state.Started)))
 				}
 				attrs = append(attrs,
-					// Constant until §A retry lands; emitted now so the log schema never moves.
-					slog.Int("attempts", 1),
+					slog.Int("attempts", state.Attempts),
 					slog.String("key", or(state.Identity.Prefix(), "-")),
 					slog.String("model", or(state.Model, "-")),
 					slog.String("rid", state.RequestID),
@@ -431,7 +430,7 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
-			route := state.Decision.Route
+			route, secret := state.Decision.Route, state.Decision.Key.Secret
 			// The caller may have authenticated with either header; neither may travel onward.
 			r.Header.Del("x-api-key")
 			switch {
@@ -440,23 +439,25 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 				// credential leaking outward — so it is deleted, not overwritten. The scheme
 				// follows the front's dialect: an Anthropic front takes x-api-key and its version
 				// header, an OpenAI-compatible one takes the Bearer everyone else does. Our request
-				// id stays inside our network too: a vendor ignores it and mints its own.
+				// id stays inside our network too: a vendor ignores it and mints its own. The
+				// secret is the decision's, not the row's: a row carries several and the retry
+				// stage moves between them.
 				r.Header.Del("Authorization")
 				r.Header.Del("X-Request-Id")
 				if route.Dialect != domain.DialectAnthropic {
-					if route.InternalKey != "" {
-						r.Header.Set("Authorization", "Bearer "+route.InternalKey)
+					if secret != "" {
+						r.Header.Set("Authorization", "Bearer "+secret)
 					}
 					break
 				}
-				if route.InternalKey != "" {
-					r.Header.Set("x-api-key", route.InternalKey)
+				if secret != "" {
+					r.Header.Set("x-api-key", secret)
 				}
 				if route.APIVersion != "" {
 					r.Header.Set("anthropic-version", route.APIVersion)
 				}
-			case route.InternalKey != "":
-				r.Header.Set("Authorization", "Bearer "+route.InternalKey)
+			case secret != "":
+				r.Header.Set("Authorization", "Bearer "+secret)
 			}
 			// This is the edge, so a client-sent forwarding header is a claim, not a fact.
 			// Overwritten rather than appended: the appending form leaves the caller's entries in
@@ -531,7 +532,7 @@ func newPick(deps Deps) (Middleware, error) {
 				failIngress(w, r, denial.Status, denial.Reason)
 				return
 			}
-			state.Decision = routing.Decision{Route: route, RequestID: requestID}
+			state.Decision = routing.Decision{Route: route, RequestID: requestID, Key: routing.PickKey(route.Keyring(), nil)}
 
 			// Stamped before the request leaves, so it is set whatever status the engine comes back
 			// with. The gateway reads it off the response to attribute usage to a placement it

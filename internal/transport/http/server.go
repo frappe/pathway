@@ -11,6 +11,7 @@ import (
 
 	"github.com/phot0n/pathway/internal/config"
 	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/repository"
 	"github.com/phot0n/pathway/internal/service/admission"
 	"github.com/phot0n/pathway/internal/service/catalog"
 	"github.com/phot0n/pathway/internal/service/metering"
@@ -29,6 +30,7 @@ type Server struct {
 	metering     *metering.Service
 	catalog      *catalog.Service
 	provisioning *provisioning.Service
+	providerKeys repository.ProviderKeys
 	proxy        *proxy.Proxy
 	log          *slog.Logger
 
@@ -66,6 +68,8 @@ type Services struct {
 	Metering     *metering.Service
 	Catalog      *catalog.Service
 	Provisioning *provisioning.Service
+	// ProviderKeys counts what each vendor credential answered; unused on an ingress.
+	ProviderKeys repository.ProviderKeys
 	Transform    *transform.Chain
 	Proxy        *proxy.Proxy
 	Drain        middleware.DrainState
@@ -81,11 +85,11 @@ type Services struct {
 func New(cfg config.Config, svc Services, log *slog.Logger) *Server {
 	server := &Server{
 		admission: svc.Admission, routing: svc.Routing, metering: svc.Metering,
-		catalog: svc.Catalog, provisioning: svc.Provisioning, proxy: svc.Proxy,
+		catalog: svc.Catalog, provisioning: svc.Provisioning, providerKeys: svc.ProviderKeys, proxy: svc.Proxy,
 		log: log, drain: svc.Drain, maintenance: svc.Maintenance, retention: svc.UsageRetention,
 		deps: middleware.Deps{
 			Admission: svc.Admission, Routing: svc.Routing, Metering: svc.Metering,
-			Transform: svc.Transform, Drain: svc.Drain, Maintenance: svc.Maintenance,
+			Transform: svc.Transform, ProviderKeys: svc.ProviderKeys, Drain: svc.Drain, Maintenance: svc.Maintenance,
 			Log: log, Access: svc.Access, Payload: svc.Payload,
 			MaxBodyBytes: svc.MaxBodyBytes, IngressToken: cfg.IngressToken,
 			Geography: cfg.Geography,
@@ -223,6 +227,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("/grove-admin/usage", adminAuth(s.adminToken, s.handleAdminUsage))
 	mux.HandleFunc("POST /grove-admin/usage/ack", adminAuth(s.adminToken, s.handleAdminUsageAck))
 	mux.HandleFunc("POST /grove-admin/spend-adjust", adminAuth(s.adminToken, s.handleAdminSpendAdjust))
+	mux.HandleFunc("/grove-admin/provider-keys", adminAuth(s.adminToken, s.handleAdminProviderKeys))
 	return mux
 }
 

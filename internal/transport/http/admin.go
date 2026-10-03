@@ -238,18 +238,39 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"counts": counts})
 }
 
+// GET /grove-admin/provider-keys?ids=a,b — what each vendor credential answered, lifetime, by the
+// id the control plane pushed it under. A key never dialled answers zeros.
+func (s *Server) handleAdminProviderKeys(w http.ResponseWriter, r *http.Request) {
+	ids := commaList(r.URL.Query().Get("ids"))
+	if s.providerKeys == nil || len(ids) == 0 {
+		respond.JSON(w, map[string]domain.KeyStats{})
+		return
+	}
+	stats, err := s.providerKeys.Stats(r.Context(), ids)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "provider key store error")
+		return
+	}
+	respond.JSON(w, stats)
+}
+
+// commaList splits a query value on commas, blanks dropped.
+func commaList(value string) []string {
+	var items []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 // GET /grove-admin/usage[?keys=p1,p2] — pull: live counters set aside under a new drain id (only
 // the listed prefixes when keys is given), answered with every counter not yet acknowledged,
 // grouped by drain id. Nothing is deleted here, so a key the control plane failed to record is
 // answered again on the next pull under its own id, while the rest move on.
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
-	var keys []string
-	for _, key := range strings.Split(r.URL.Query().Get("keys"), ",") {
-		if key = strings.TrimSpace(key); key != "" {
-			keys = append(keys, key)
-		}
-	}
-	drains, err := s.provisioning.DrainUsage(r.Context(), keys)
+	drains, err := s.provisioning.DrainUsage(r.Context(), commaList(r.URL.Query().Get("keys")))
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "usage store error")
 		return
