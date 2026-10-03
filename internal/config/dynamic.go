@@ -26,6 +26,10 @@ type Dynamic struct {
 	// exists at all: it was already documented as a knob and still needed a re-provision to turn.
 	SyntheticSessionTTL string `json:"synthetic_session_ttl"`
 
+	// CapacityWait is how long a request waits for a slot when every upstream of its model is at
+	// capacity, before the 429. "0" refuses at once.
+	CapacityWait string `json:"capacity_wait"`
+
 	MaxBodyBytes        int64  `json:"max_body_bytes"`
 	UpstreamReadTimeout string `json:"upstream_read_timeout"`
 	UpstreamTLSVerify   *bool  `json:"upstream_tls_verify"`
@@ -55,6 +59,7 @@ type Resolved struct {
 	Transforms []string
 
 	SyntheticSessionTTL time.Duration
+	CapacityWait        time.Duration
 	MaxBodyBytes        int64
 	UpstreamReadTimeout time.Duration
 	UpstreamTLSVerify   bool
@@ -114,6 +119,7 @@ func (d Dynamic) Resolve(base Resolved) (Resolved, error) {
 		target *time.Duration
 	}{
 		{"synthetic_session_ttl", d.SyntheticSessionTTL, &out.SyntheticSessionTTL},
+		{"capacity_wait", d.CapacityWait, &out.CapacityWait},
 		{"upstream_read_timeout", d.UpstreamReadTimeout, &out.UpstreamReadTimeout},
 		{"drain_timeout", d.DrainTimeout, &out.DrainTimeout},
 		{"lame_duck", d.LameDuck, &out.LameDuck},

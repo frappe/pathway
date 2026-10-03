@@ -378,7 +378,10 @@ so the client sees exactly the stream the engine produced, at the engine's own p
    between two remote regions that ordering the far ones is precision nobody can feel. A row with
    no region counts as remote — the safe reading of "unknown".
 3. **Capacity.** A row is out if `in_flight >= capacity` (the engine's `--max-num-seqs`). Capacity 0
-   means uncapped. None left → **429**, deliberately not 503: the model is up, come back shortly.
+   means uncapped. None left → wait up to `capacity_wait` (default `0s`) for a slot, re-reading the
+   counts every 50ms, then **429** — deliberately not 503: the model is up, come back shortly.
+   Counts are per `engine_url` in Redis and shared by every gateway, so a vendor's rows on one
+   base URL share one cap.
 4. **Stickiness.** If the caller's session is pinned to a row still in the set, that row wins.
    Stickiness loses to capacity by construction — a warm prefix cache is not worth queueing behind
    a full engine when a replica is idle.

@@ -59,6 +59,7 @@ type Service struct {
 	// such request. A function, not a value, so turning it is an edit to the tunables file rather
 	// than a deploy.
 	syntheticTTL func() time.Duration
+	capacityWait func() time.Duration
 }
 
 func serving(table []domain.Route, dialect, path string) []domain.Route {
@@ -75,6 +76,9 @@ type Options struct {
 	Region string
 	// SyntheticTTL is read on every pick. Nil means no synthetic session at all.
 	SyntheticTTL func() time.Duration
+	// CapacityWait is how long a pick waits for a slot when every replica is full. Nil or 0 is a
+	// 429 at once.
+	CapacityWait func() time.Duration
 }
 
 func New(store repository.Store, log *slog.Logger, opts Options) *Service {
@@ -84,6 +88,7 @@ func New(store repository.Store, log *slog.Logger, opts Options) *Service {
 		log:          log,
 		region:       opts.Region,
 		syntheticTTL: opts.SyntheticTTL,
+		capacityWait: opts.CapacityWait,
 	}
 }
 
@@ -133,6 +138,9 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 
 	route, status := domain.PickRoute(table, stickyURL, s.region)
 	if status == 429 {
+		route, status = s.waitForRoom(ctx, table, stickyURL)
+	}
+	if status == 429 {
 		return Decision{}, domain.Deny(429, "every replica of "+req.Model+" is at capacity")
 	}
 	if status != 200 {
@@ -164,6 +172,35 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 		"kind", route.Kind, "in_flight", route.InFlight, "sticky", stickyURL != "",
 		"candidates", len(table), "rid", decision.RequestID)
 	return decision, nil
+}
+
+// capacityPoll is how often a waiting pick re-reads the in-flight counts.
+const capacityPoll = 50 * time.Millisecond
+
+// waitForRoom re-picks until a replica has room, the wait runs out, or the client leaves. Nothing is
+// claimed while waiting, and this sits above meter, so a request that gives up bills nothing.
+// ponytail: polls the in-flight store every capacityPoll per waiting request; a release
+// notification is the upgrade if many requests wait at once.
+func (s *Service) waitForRoom(ctx context.Context, table []domain.Route, stickyURL string) (domain.Route, int) {
+	var wait time.Duration
+	if s.capacityWait != nil {
+		wait = s.capacityWait()
+	}
+	deadline := time.Now().Add(wait)
+	for time.Until(deadline) > 0 {
+		timer := time.NewTimer(min(capacityPoll, time.Until(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return domain.Route{}, 429
+		case <-timer.C:
+		}
+		s.fillInFlight(ctx, table)
+		if route, status := domain.PickRoute(table, stickyURL, s.region); status != 429 {
+			return route, status
+		}
+	}
+	return domain.Route{}, 429
 }
 
 // PickReplica is the ingress tier: the same rule with no session synthesis, no region (every

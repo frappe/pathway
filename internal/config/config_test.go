@@ -73,6 +73,7 @@ func TestABadFileRefusesToStart(t *testing.T) {
 		`{"log_level":"lowd"}`,           // not a level
 		`{"synthetic_session_ttl":"30"}`, // no unit — the old env var read this as "off"
 		`{"drain_timeout":"-5m"}`,        // negative
+		`{"capacity_wait":"soon"}`,
 		`{"max_body_bytes":-1}`,
 		`{"lgo_level":"debug"}`, // a typo'd key, which is a knob someone thinks they turned
 	} {

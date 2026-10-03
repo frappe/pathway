@@ -346,3 +346,39 @@ func TestARouteWithoutAModalityIsUnrestricted(t *testing.T) {
 		t.Fatalf("a blank modality refused a request: %v", err)
 	}
 }
+
+func TestPickWaitsForRoom(t *testing.T) {
+	full := func() *memory.Store {
+		route := engine("https://full")
+		route.Capacity = 1
+		store := memory.New()
+		store.Routes["qwen3-4b"] = []domain.Route{route}
+		store.InFlight["https://full"] = map[string]bool{"someone": true}
+		return store
+	}
+	request := Request{Model: "qwen3-4b", MeterID: "meter"}
+
+	if _, err := serviceOver(full(), Options{}).Pick(context.Background(), request); err == nil {
+		t.Error("no wait configured, and a full engine was picked")
+	}
+
+	store := full()
+	svc := serviceOver(store, Options{CapacityWait: fixedTTL(time.Second)})
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		_ = store.Repositories().InFlight.Release(context.Background(), "https://full", "someone")
+	}()
+	if _, err := svc.Pick(context.Background(), request); err != nil {
+		t.Errorf("a slot freed during the wait, and the pick still failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if _, err := serviceOver(full(), Options{CapacityWait: fixedTTL(time.Minute)}).Pick(ctx, request); err == nil {
+		t.Error("a client that left was given a slot")
+	}
+	if waited := time.Since(started); waited > time.Second {
+		t.Errorf("waited %v for a client that had already left", waited)
+	}
+}

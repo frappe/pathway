@@ -109,6 +109,7 @@ func run() error {
 		Routing: routing.New(store, log.Process, routing.Options{
 			Region:       cfg.Region,
 			SyntheticTTL: func() time.Duration { return live.Get().SyntheticSessionTTL },
+			CapacityWait: func() time.Duration { return live.Get().CapacityWait },
 		}),
 		Metering:       meter,
 		Catalog:        catalog.New(store.Routes),
