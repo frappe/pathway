@@ -59,7 +59,7 @@ func fallbackFixture(t *testing.T, primary http.HandlerFunc) (*fixture, *backupE
 
 func failing(status int) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Primary", "1")
+		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, `{"error":{"message":"primary said no"}}`)
 	}
@@ -250,7 +250,7 @@ func TestAFallbackTheCallerMayNotUseIsSkipped(t *testing.T) {
 func TestEveryModelFailingRelaysTheLastAnswer(t *testing.T) {
 	f := newFixture(t, failing(http.StatusBadGateway))
 	addBackup(t, f, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Backup", "1")
+		w.Header().Set("Retry-After", "2")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"error":{"message":"backup said no"}}`)
 	})
@@ -259,7 +259,7 @@ func TestEveryModelFailingRelaysTheLastAnswer(t *testing.T) {
 	if resp.Code != http.StatusServiceUnavailable || !strings.Contains(resp.Body.String(), "backup said no") {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
-	if resp.Header().Get("X-Backup") == "" || resp.Header().Get("X-Primary") != "" {
+	if got := resp.Header().Values("Retry-After"); len(got) != 1 || got[0] != "2" {
 		t.Errorf("headers = %v, want the backup's only", resp.Header())
 	}
 	if got := f.store.Usage["abc123"]["request_count"]; got != 1 {

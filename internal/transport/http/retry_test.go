@@ -25,7 +25,7 @@ func (v *keyedVendor) handler(w http.ResponseWriter, r *http.Request) {
 	v.keys = append(v.keys, key)
 	if status, refused := v.answers[key]; refused {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Vendor-Answer", key)
+		w.Header().Set("Retry-After", key)
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"error":{"message":"refused ` + key + `"}}`))
 		return
@@ -96,7 +96,7 @@ func TestARateLimitedKeyIsSwappedForAnother(t *testing.T) {
 	if strings.Join(vendor.keys, ",") != "A,B" {
 		t.Errorf("keys dialled = %v", vendor.keys)
 	}
-	if resp.Header().Get("X-Vendor-Answer") != "" {
+	if resp.Header().Get("Retry-After") != "" {
 		t.Errorf("the loser's headers reached the client: %v", resp.Header())
 	}
 	if a, b := f.keyStats("A"), f.keyStats("B"); a.RateLimited != a.Requests || a.LastRateLimited == 0 || b.OK != b.Requests || b.OK == 0 {
@@ -173,7 +173,7 @@ func TestEveryKeyRateLimitedRelaysTheLastAnswer(t *testing.T) {
 	if resp.Code != http.StatusTooManyRequests || !strings.Contains(resp.Body.String(), "refused") {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
-	if resp.Header().Get("X-Vendor-Answer") == "" {
+	if resp.Header().Get("Retry-After") == "" {
 		t.Errorf("the relayed answer lost the vendor's headers: %v", resp.Header())
 	}
 	if len(vendor.keys) != 4 {

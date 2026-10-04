@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -308,6 +309,39 @@ func TestACutStreamKeepsItsLastWholeUsageFrame(t *testing.T) {
 	if out.Cut != domain.CutUpstream || !strings.Contains(out.Usage, `"total_tokens":9`) ||
 		!strings.Contains(out.UsageStart, `"total_tokens":8`) {
 		t.Errorf("cut %q, start %q, last %q", out.Cut, out.UsageStart, out.Usage)
+	}
+}
+
+// A client sees only what it needs of an upstream's headers. A vendor's ids, cookies, rate limits
+// and our own ingress's headers stop at the gateway.
+func TestOnlyTheRelayedHeadersReachTheClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for name, value := range map[string]string{
+			"Content-Type": "application/json", "Cache-Control": "no-store", "Retry-After": "7",
+			"Set-Cookie": "__cf_bm=1", "Alt-Svc": `h3=":443"`, "Via": "1.1 google", "Server": "vendor",
+			"Strict-Transport-Security": "max-age=1", "X-Ratelimit-Remaining-Requests": "9",
+			"X-Baseten-Model-Id": "abc", "Openai-Organization": "org", "X-Request-Id": "theirs",
+			"Request-Id": "theirs", "X-Grove-Engine": "MD-1", "X-Grove-Reason": "no-replica",
+		} {
+			w.Header().Set(name, value)
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(server.Close)
+
+	out, w := forwardOn(New(Options{}, quiet()), server.URL, domain.DialectOpenAI)
+	got := []string{}
+	for name := range w.Header() {
+		if name != "Content-Length" && name != "Date" {
+			got = append(got, name)
+		}
+	}
+	slices.Sort(got)
+	if want := []string{"Cache-Control", "Content-Type", "Retry-After"}; !slices.Equal(got, want) {
+		t.Errorf("headers = %v, want %v", got, want)
+	}
+	if out.Deployment != "MD-1" || out.Reason != "no-replica" {
+		t.Errorf("outcome = %+v; what the gateway reads off an ingress must still be read", out)
 	}
 }
 

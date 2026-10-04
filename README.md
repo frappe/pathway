@@ -510,6 +510,7 @@ What a vendor is sent in place of what the client sent:
   own. `vendorfields` and `streamusage` read it per attempt on the client's own body, so a request
   that moves to another vendor is named afresh for that one. Add a line when the access log's
   `attempt` line, or a probe, shows a vendor differing — and the row below with it.
+- Of an upstream's response headers only a named few reach the client (see [Headers](#headers)).
 - Responses are not rewritten: same shape in, same shape out, with `model` swapped back to the name
   the client knows — whatever the vendor wrote there, since one asked by an alias answers under the
   name behind it.
@@ -529,6 +530,39 @@ one list of it: add a row or a column when a new difference shows up, with the d
 What Baseten bills for a stream that was cut has not been compared with its own usage report.
 
 ---
+
+### Headers
+
+What a client sees on an answer:
+
+| Header | Whose | When |
+|---|---|---|
+| `X-Request-Id`, `Request-Id` | the gateway's | every answer. One id under both names; the second is what Anthropic's SDK reads |
+| `X-Grove-Fallback` | the gateway's | only when a fallback model served: that model's key |
+| `Retry-After` | the gateway's on its own 429 and 503, else the upstream's, relayed | when either says when to come back |
+| `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Disposition`, `Cache-Control` | the upstream's, relayed | as it sent them |
+| `Upgrade`, `Connection`, `Sec-WebSocket-*` | the upstream's, relayed | an upgrade's handshake |
+
+Nothing else an upstream sends reaches the client. The list is `relayed` in
+`internal/transport/http/proxy/proxy.go`; a header joins it by being added there. What stops at the
+gateway: a vendor's ids and timestamps, its cookies, `alt-svc`, `via`, `strict-transport-security`,
+its own request ids, and the rate limits of the account we call it with (`x-ratelimit-*`), which
+are ours and not the caller's. Before the list (2026-10-05) a Baseten answer carried twelve
+`x-baseten-*` and four `x-ratelimit-*` headers to the client.
+
+Which model served has no header of its own: it is the body's `model` on every answer, and
+`X-Grove-Fallback` when it is not the model that was asked for.
+
+Every `X-Grove-*` header, and who it is between:
+
+| Header | From → to | For |
+|---|---|---|
+| `X-Grove-Session` | client → gateway | names the caller's session (see [Session affinity](#session-affinity)) |
+| `X-Grove-Fallback` | gateway → client | the fallback that served |
+| `X-Grove-Model`, `X-Grove-Session-Key` | gateway → ingress | the model to pick a replica of, and the session to keep on it. Taken off a request to anything that is not an ingress |
+| `X-Grove-Engine` | ingress → gateway | the replica that served: how usage reaches a placement the gateway never picked. Read here, not relayed to the client |
+| `X-Grove-Reason` | ingress → gateway | why the ingress refused; `no-replica` keeps that 503 from counting against it. Read here, not relayed |
+| `X-Grove-Admin-Token` | control plane → gateway | gates every admin endpoint |
 
 ## Routing
 

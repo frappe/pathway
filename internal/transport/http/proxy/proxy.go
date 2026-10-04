@@ -166,18 +166,14 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			outcome.Status = resp.StatusCode
 			outcome.Deployment = resp.Header.Get("X-Grove-Engine")
 			outcome.Reason = resp.Header.Get("X-Grove-Reason")
-			// A vendor's id is kept for the access line; an engine or ingress only echoes ours. Either
-			// is taken off the response: ReverseProxy ADDS upstream headers onto the ones the edge
-			// set, so a vendor's x-request-id would give the client two values and its request-id
-			// would replace ours under the Anthropic SDK.
+			// A vendor's id is kept for the access line; an engine or ingress only echoes ours.
 			if external {
 				outcome.UpstreamRID = resp.Header.Get("X-Request-Id")
 				if outcome.UpstreamRID == "" {
 					outcome.UpstreamRID = resp.Header.Get("Request-Id")
 				}
 			}
-			resp.Header.Del("X-Request-Id")
-			resp.Header.Del("Request-Id")
+			keepRelayed(resp.Header)
 			// A 101 hands the connection to ReverseProxy, which needs the body to stay an
 			// io.ReadWriteCloser to write back to the engine. The tee is read-only and would fail
 			// the handshake — and a hijacked stream has no usage frame to scrape anyway.
@@ -232,6 +228,26 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	}
 
 	reverse.ServeHTTP(w, r.WithContext(hop))
+}
+
+// relayed is what a client is shown of an upstream's response headers: what it needs to read the
+// body, to back off, and to finish an upgrade. Everything else stops here — a vendor's ids, its
+// cookies, its `alt-svc`, the rate limits of the account we call it with, and our own ingress's
+// X-Grove-* — and so do its request ids: ReverseProxy ADDS upstream headers onto the ones the edge
+// set, so a vendor's would stand beside ours or replace it.
+var relayed = map[string]bool{
+	"Content-Type": true, "Content-Length": true, "Content-Encoding": true, "Content-Disposition": true,
+	"Cache-Control": true, "Retry-After": true,
+	"Upgrade": true, "Connection": true,
+	"Sec-Websocket-Accept": true, "Sec-Websocket-Protocol": true, "Sec-Websocket-Extensions": true,
+}
+
+func keepRelayed(header http.Header) {
+	for name := range header {
+		if !relayed[name] {
+			delete(header, name)
+		}
+	}
 }
 
 // cutBy names who ended a response that did not finish, blank for one that did. In this order: a
