@@ -232,7 +232,7 @@ func newBody(deps Deps) (Middleware, error) {
 				state.Model = strings.TrimSpace(query.Get("model"))
 				state.Session = strings.TrimSpace(query.Get("user"))
 				applySessionHeader(r, state)
-				next.ServeHTTP(w, r)
+				serveNamed(next, w, r, state)
 				return
 			}
 
@@ -266,7 +266,7 @@ func newBody(deps Deps) (Middleware, error) {
 				}
 				state.Model, state.Session, state.Form = model, session, form
 				applySessionHeader(r, state)
-				next.ServeHTTP(w, r)
+				serveNamed(next, w, r, state)
 				return
 			}
 
@@ -278,25 +278,37 @@ func newBody(deps Deps) (Middleware, error) {
 			}
 			_ = r.Body.Close()
 
-			// A body that is not a JSON object is not an error here: some /v1 endpoints take none
-			// at all, and the engine is the right place to reject a malformed one.
+			// Only the model is this stage's to judge: a body it cannot be read out of has nowhere
+			// to go. What else the body says is the engine's to reject.
 			state.Raw = raw
 			var decoded transform.Body
-			if len(raw) > 0 && json.Unmarshal(raw, &decoded) == nil {
-				state.Body = decoded
-				state.Model = stringField(decoded, "model")
-				state.Session = stringField(decoded, "user")
-				if state.Fallbacks, err = fallbackModels(decoded); err != nil {
-					deny(w, r, err)
-					return
-				}
+			if len(raw) > 0 && json.Unmarshal(raw, &decoded) != nil {
+				deny(w, r, domain.Deny(http.StatusBadRequest, "request body is not a JSON object"))
+				return
+			}
+			state.Body = decoded
+			state.Model = stringField(decoded, "model")
+			state.Session = stringField(decoded, "user")
+			if state.Fallbacks, err = fallbackModels(decoded); err != nil {
+				deny(w, r, err)
+				return
 			}
 			applySessionHeader(r, state)
 			restoreBody(r, raw)
 			rewriteBody(r, state)
-			next.ServeHTTP(w, r)
+			serveNamed(next, w, r, state)
 		})
 	}, nil
+}
+
+// serveNamed hands on a request that names its model. One that names none cannot be routed, and
+// the grant check's 403 for a model called "" would send the caller looking at their access.
+func serveNamed(next http.Handler, w http.ResponseWriter, r *http.Request, state *State) {
+	if state.Model == "" {
+		deny(w, r, domain.Deny(http.StatusBadRequest, "request names no model"))
+		return
+	}
+	next.ServeHTTP(w, r)
 }
 
 // modelaccess is the grant check: the same decision /v1/models filters its list with.

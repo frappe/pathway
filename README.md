@@ -302,7 +302,7 @@ proxy ──► engine (or ingress ──► engine)
 | `drain` | while shutting down: 503 + `Retry-After` + "gateway is restarting" |
 | `auth` | bearer → key → user → groups, once, into the request state |
 | `quota` | the credit flag the control plane pushed, or a prepaid balance spent → 402; then the holder's rate limits → 429 + `Retry-After` |
-| `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Over `max_body_bytes` → 413; not all here within 60s → 408 |
+| `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Not a JSON object, or no `model` in it (or in the form, or an upgrade's query) → 400; over `max_body_bytes` → 413; not all here within 60s → 408 |
 | `modelaccess` | `CanUse` → 403 |
 | `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the user's `log_payloads` is on. See [The payload log](#the-payload-log) |
 | `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot |
@@ -381,7 +381,7 @@ when not the one asked for; else `-`), `path` (after the `/anthropic` strip),
 `status`, `prompt`, `output`, `output_encoding` (only when `base64`), `prompt_bytes`,
 `output_bytes`.
 
-It sits between `modelaccess` and `route`: refusals above it (401, 402, 403, 408, 413) leave no
+It sits between `modelaccess` and `route`: refusals above it (400, 401, 402, 403, 408, 413) leave no
 line; everything from routing down does, once per request whatever `fallback` and `retry` did.
 
 What is kept:
@@ -1356,6 +1356,7 @@ Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except
 
 | | Means | Client should |
 |---|---|---|
+| 400 | the body is not a JSON object, names no `model`, or its `fallbacks` is not a list of at most 3 names | fix the request |
 | 401 | no key, unknown key, revoked key | fix the credential |
 | 403 | the key exists but may not use this model | ask for access |
 | 408 | the body did not arrive within 60s of the headers | resend on a working connection |

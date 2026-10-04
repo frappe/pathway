@@ -149,8 +149,8 @@ func TestARealtimeUpgradeWithNoModelIsRefused(t *testing.T) {
 	resp, _, conn := upgrade(t, front, "/v1/realtime")
 	defer conn.Close()
 
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
 

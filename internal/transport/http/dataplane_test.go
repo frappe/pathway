@@ -394,6 +394,11 @@ func TestDataPathRefusals(t *testing.T) {
 		// 503 says the model is down, 403 says it was never yours.
 		{"a granted model with no placement", `{"model":"drained"}`, secret, http.StatusServiceUnavailable},
 		{"an unknown key", `{"model":"qwen3-4b"}`, "nope", http.StatusUnauthorized},
+		// A body with no model to read has nowhere to go, and says so: not the grant check's 403.
+		{"a body that names no model", `{"messages":[]}`, secret, http.StatusBadRequest},
+		{"an empty body", ``, secret, http.StatusBadRequest},
+		{"a body that is not JSON", `this is not json`, secret, http.StatusBadRequest},
+		{"a body that is JSON but no object", `["qwen3-4b"]`, secret, http.StatusBadRequest},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{}`))
