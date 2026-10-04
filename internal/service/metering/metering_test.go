@@ -271,7 +271,7 @@ func TestCacheBucketsBeyondThePromptBillAsPlain(t *testing.T) {
 func TestRecordAccruesCostAndSpend(t *testing.T) {
 	store := memory.New()
 	store.Users["GU-1"] = domain.UserRecord{Prepaid: true, Budget: 10_000_000}
-	svc := New(store.Repositories().Usage, store.Repositories().Health, quiet())
+	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 
 	svc.Record(context.Background(), Report{
 		Prefix: "abc", Model: "qwen3-4b", Usage: openAIUsage, User: "GU-1", Prepaid: true, Budget: 10_000_000,
@@ -305,7 +305,7 @@ func TestRecordAccruesCostAndSpend(t *testing.T) {
 func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 	store := memory.New()
 	store.Users["GU-1"] = domain.UserRecord{Prepaid: true}
-	svc := New(store.Repositories().Usage, store.Repositories().Health, quiet())
+	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: openAIUsage, User: "GU-1", Prepaid: true})
 
 	usage := store.Usage["abc"]
@@ -323,7 +323,7 @@ func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 func TestAFreeHoldersSpendNeverMoves(t *testing.T) {
 	store := memory.New()
 	store.Users["GU-1"] = domain.UserRecord{Spent: 40}
-	svc := New(store.Repositories().Usage, store.Repositories().Health, quiet())
+	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 	svc.Record(context.Background(), Report{
 		Prefix: "abc", Model: "m", Usage: openAIUsage, User: "GU-1",
 		Pricing: priced(t, "mp1", map[string]int64{"completion_tokens": 15e9}),
@@ -359,7 +359,7 @@ func TestAStreamingFrameParses(t *testing.T) {
 // on that — a broken engine must still be counted as broken.
 func TestOutcomeIsRecordedWithoutAPrefix(t *testing.T) {
 	store := memory.New()
-	New(store.Repositories().Usage, store.Repositories().Health, quiet()).Record(
+	New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet()).Record(
 		context.Background(),
 		Report{Target: "https://a", UpstreamStatus: "502"},
 	)
@@ -375,7 +375,7 @@ func TestOutcomeIsRecordedWithoutAPrefix(t *testing.T) {
 func TestOneSuccessClearsTheFailureStreak(t *testing.T) {
 	store := memory.New()
 	store.Failures["https://a"] = domain.EjectAfter - 1
-	svc := New(store.Repositories().Usage, store.Repositories().Health, quiet())
+	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 
 	svc.Record(context.Background(), Report{Prefix: "abc", Target: "https://a", UpstreamStatus: "200"})
 	if store.Failures["https://a"] != 0 {
@@ -387,7 +387,7 @@ func TestOneSuccessClearsTheFailureStreak(t *testing.T) {
 // still a request.
 func TestAClientThatLeftDoesNotCountAgainstTheTarget(t *testing.T) {
 	store := memory.New()
-	svc := New(store.Repositories().Usage, store.Repositories().Health, quiet())
+	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 	for range domain.EjectAfter {
 		svc.Record(context.Background(), Report{Prefix: "abc", Target: "https://a", Cut: domain.CutClientLeft})
 	}
@@ -405,7 +405,7 @@ func TestAnUpstreamThatBreaksItsAnswerCountsAgainstTheTarget(t *testing.T) {
 	for _, cut := range []string{domain.CutUpstream, domain.CutUpstreamIdle} {
 		store := memory.New()
 		store.Failures["https://a"] = 1
-		New(store.Repositories().Usage, store.Repositories().Health, quiet()).Record(
+		New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet()).Record(
 			context.Background(),
 			Report{Prefix: "abc", Target: "https://a", UpstreamStatus: "200", Cut: cut},
 		)
@@ -418,7 +418,7 @@ func TestAnUpstreamThatBreaksItsAnswerCountsAgainstTheTarget(t *testing.T) {
 // One unplaced model must not take an ingress out of rotation for every other model on it.
 func TestANoReplica503DoesNotCountAgainstTheTarget(t *testing.T) {
 	store := memory.New()
-	New(store.Repositories().Usage, store.Repositories().Health, quiet()).Record(
+	New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet()).Record(
 		context.Background(),
 		Report{Target: "https://ingress", UpstreamStatus: "503", Reason: "no-replica"},
 	)

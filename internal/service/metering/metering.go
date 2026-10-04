@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/repository"
@@ -33,6 +34,8 @@ type Report struct {
 	User    string
 	Prepaid bool
 	Budget  int64
+	// Limits is the holder's rate limits: the answer's tokens are debited from the token ones.
+	Limits []domain.Limit
 	// How the hop went, for passive ejection: the upstream's status, and the X-Grove-Reason an
 	// ingress sets when it is healthy but has no replica for this model.
 	Target         string
@@ -44,15 +47,30 @@ type Report struct {
 
 type Service struct {
 	usage  repository.Usage
+	limits repository.Limits
 	health repository.Health
 	log    *slog.Logger
 	warned sync.Map // models whose cache buckets were once seen exceeding the prompt; pricings pushed without a table
 	// Spool keeps what the store refused, for replay once it answers. Nil keeps nothing.
 	Spool *Spool
+	// Now is the clock the limit windows are read off. A field so a test can move it.
+	Now func() time.Time
 }
 
-func New(usage repository.Usage, health repository.Health, log *slog.Logger) *Service {
-	return &Service{usage: usage, health: health, log: log}
+func New(usage repository.Usage, limits repository.Limits, health repository.Health, log *slog.Logger) *Service {
+	return &Service{usage: usage, limits: limits, health: health, log: log, Now: time.Now}
+}
+
+// debit charges the answer's tokens to the holder's token limits, in the window the answer ended
+// in. Never spooled: replayed later, it would land in a window the tokens were not used in.
+func (s *Service) debit(ctx context.Context, rep Report, tokens int64) {
+	limits := domain.LimitsOn(rep.Limits, domain.LimitTokens)
+	if tokens == 0 || len(limits) == 0 {
+		return
+	}
+	if err := s.limits.Debit(ctx, rep.User, limits, tokens, s.Now()); err != nil {
+		s.log.Error("token limits not debited", "user", rep.User, "tokens", tokens, "err", err)
+	}
 }
 
 // Record writes the usage delta and moves the target's failure count. Errors are logged, never
@@ -88,6 +106,7 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 			s.Spool.Add(accrual)
 		}
 	}
+	s.debit(ctx, rep, fields["total_tokens"])
 }
 
 // UsageFields is the whole accounting rule, pure so it is testable without a store. Each metric is

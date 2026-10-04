@@ -15,7 +15,7 @@ func spoolFixture(t *testing.T, maxBytes int64) (*memory.Store, *Service, string
 	store := memory.New()
 	store.Users["GU-1"] = domain.UserRecord{Prepaid: true, Budget: 1_000}
 	path := filepath.Join(t.TempDir(), "spool.jsonl")
-	svc := New(store.Repositories().Usage, store.Repositories().Health, quiet())
+	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 	svc.Spool = NewSpool(store.Repositories().Usage, quiet(), func() string { return path }, func() int64 { return maxBytes })
 	return store, svc, path
 }

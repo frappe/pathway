@@ -143,3 +143,36 @@ func TestAUserRecordRoundTripsItsGeography(t *testing.T) {
 		t.Errorf("Get = %+v, %v, %v; want geography eu", usr, found, err)
 	}
 }
+
+// The push is hash-gated: a pushed record that expired would stay missing until its section
+// changed. So nothing the control plane pushes may carry a TTL, including after the two gateway
+// writes that touch a pushed record — an accrual and a spend adjustment on the holder.
+func TestPushedStateNeverExpires(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	push := repository.StatePush{
+		Groups: &repository.GroupsPush{Hash: "gh", Records: []repository.GroupUpsert{{Name: "acme", Models: "m"}}},
+		Users: map[string]repository.UserBucket{domain.BucketOf("GU-1"): {
+			Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Prepaid: true, Budget: 1_000, Limits: "requests:1m:5"}},
+		}},
+		Keys: map[string]repository.KeyBucket{domain.BucketOf("aa"): {
+			Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", User: "GU-1", Status: "active"}},
+		}},
+		Routes: &repository.RoutesPush{Hash: "rh", Table: map[string][]domain.Route{"m": {{EngineURL: "http://e", Healthy: true}}}},
+	}
+	if _, err := state.Apply(ctx, push); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := client.Store().Usage.Accrue(ctx, liveAccrual("abc", "GU-1", 250)); err != nil {
+		t.Fatalf("Accrue: %v", err)
+	}
+	if _, _, _, err := client.Store().Users.AdjustSpent(ctx, "GU-1", "adj-1", -50); err != nil {
+		t.Fatalf("AdjustSpent: %v", err)
+	}
+	for _, key := range []string{"model_group:acme", "user:GU-1", "key:aa", "deploy:m", stateHashKey} {
+		// -1 is "exists, no expiry"; -2 would be a record the push never wrote.
+		if ttl := client.rdb.TTL(ctx, key).Val(); ttl != -1 {
+			t.Errorf("%s: ttl = %d, want -1 (no expiry)", key, ttl)
+		}
+	}
+}

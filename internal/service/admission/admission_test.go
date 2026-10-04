@@ -15,7 +15,7 @@ func meterID() string { return domain.SHA256Hex(secret) }
 
 func serviceOver(store *memory.Store) *Service {
 	repos := store.Repositories()
-	return New(repos.Keys, repos.Users, repos.Groups)
+	return New(repos.Keys, repos.Users, repos.Groups, repos.Limits)
 }
 
 // The happy path is three hops — key → user → group — and the whole reason the records are split.

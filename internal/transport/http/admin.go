@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"github.com/phot0n/pathway/internal/service/metering"
 	"net/http"
 	"strings"
@@ -37,14 +38,35 @@ type adminUser struct {
 	// Prepaid gates this user on Budget, a nano-USD ceiling. Absent on an older push: no gate.
 	Prepaid bool  `json:"prepaid"`
 	Budget  int64 `json:"budget"`
+	// Limits is the user's rate limits, a comma list of metric:window:value; "" = none.
+	Limits string `json:"limits"`
 }
 
-func (u adminUser) upsert() repository.UserUpsert {
+// upsert refuses a limit this binary cannot read, the way decodeBody refuses a field it does not
+// know: stored, it would be a limit the control plane believes in and nothing enforces.
+func (u adminUser) upsert() (repository.UserUpsert, error) {
+	if _, err := domain.ParseLimits(u.Limits); err != nil {
+		return repository.UserUpsert{}, fmt.Errorf("user %s: %w", u.Name, err)
+	}
 	return repository.UserUpsert{
 		Name: u.Name, Email: u.Email, Groups: u.Group,
 		Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
-		Geography: u.Geography, Prepaid: u.Prepaid, Budget: u.Budget,
+		Geography: u.Geography, Prepaid: u.Prepaid, Budget: u.Budget, Limits: u.Limits,
+	}, nil
+}
+
+// userUpserts is every pushed user as the store takes it, or a 400 naming the first one refused.
+func userUpserts(w http.ResponseWriter, users []adminUser) ([]repository.UserUpsert, bool) {
+	records := make([]repository.UserUpsert, 0, len(users))
+	for _, u := range users {
+		record, err := u.upsert()
+		if err != nil {
+			http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
+			return nil, false
+		}
+		records = append(records, record)
 	}
+	return records, true
 }
 
 type adminGroup struct {
@@ -91,9 +113,9 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	records := make([]repository.UserUpsert, 0, len(body.Users))
-	for _, u := range body.Users {
-		records = append(records, u.upsert())
+	records, ok := userUpserts(w, body.Users)
+	if !ok {
+		return
 	}
 	if err := s.provisioning.UpsertUsers(r.Context(), records); err != nil {
 		respond.Error(w, http.StatusServiceUnavailable, "user store error")
@@ -207,9 +229,9 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	if body.Users != nil {
 		push.Users = map[string]repository.UserBucket{}
 		for label, bucket := range body.Users.Buckets {
-			records := make([]repository.UserUpsert, 0, len(bucket.Records))
-			for _, u := range bucket.Records {
-				records = append(records, u.upsert())
+			records, ok := userUpserts(w, bucket.Records)
+			if !ok {
+				return
 			}
 			push.Users[label] = repository.UserBucket{Hash: bucket.Hash, Records: records}
 		}

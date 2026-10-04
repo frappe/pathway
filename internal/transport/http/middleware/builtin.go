@@ -181,16 +181,21 @@ func newAuth(deps Deps) (Middleware, error) {
 }
 
 // quota honours the geography pin, the credit flag the control plane pushed, and the prepaid
-// balance this box keeps — all read off the user record, before the body is.
+// balance this box keeps — all read off the user record, before the body is. The rate limits come
+// last: a holder refused above must not use up a request.
 func newQuota(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			usr := From(r).Identity.User
-			if err := domain.GeographyDenial(usr, deps.Geography); err != nil {
+			identity := From(r).Identity
+			if err := domain.GeographyDenial(identity.User, deps.Geography); err != nil {
 				deny(w, r, err)
 				return
 			}
-			if err := domain.ExhaustedDenial(usr); err != nil {
+			if err := domain.ExhaustedDenial(identity.User); err != nil {
+				deny(w, r, err)
+				return
+			}
+			if err := deps.Admission.Admit(r.Context(), identity); err != nil {
 				deny(w, r, err)
 				return
 			}
@@ -357,6 +362,7 @@ func newMeter(deps Deps) (Middleware, error) {
 					User:           state.Identity.Key.User,
 					Prepaid:        state.Identity.User.Prepaid,
 					Budget:         state.Identity.User.Budget,
+					Limits:         state.Identity.User.Limits,
 					Target:         state.Decision.EngineURL(),
 					UpstreamStatus: statusText(state.UpstreamStatus),
 					Reason:         state.Reason,

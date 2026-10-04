@@ -38,6 +38,7 @@ func (c *Client) Store() repository.Store {
 		InFlight: inFlight{c.rdb},
 		Health:   health{c.rdb},
 		Usage:    usage{c.rdb},
+		Limits:   limits{c.rdb},
 		State:    state{c.rdb},
 
 		ProviderKeys: providerKeys{c.rdb},

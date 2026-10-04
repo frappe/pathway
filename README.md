@@ -301,7 +301,7 @@ proxy ──► engine (or ingress ──► engine)
 | `accesslog` | mints the request id, times the request, writes the one durable line per request |
 | `drain` | while shutting down: 503 + `Retry-After` + "gateway is restarting" |
 | `auth` | bearer → key → user → groups, once, into the request state |
-| `quota` | the credit flag the control plane pushed, or a prepaid balance spent → 402 |
+| `quota` | the credit flag the control plane pushed, or a prepaid balance spent → 402; then the holder's rate limits → 429 + `Retry-After` |
 | `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Over `max_body_bytes` → 413; not all here within 60s → 408 |
 | `modelaccess` | `CanUse` → 403 |
 | `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the user's `log_payloads` is on. See [The payload log](#the-payload-log) |
@@ -560,12 +560,41 @@ nothing granted it                                        → false
 `/v1/models` filters its list with the *same function*, so the catalogue can never advertise
 something the inference path would refuse.
 
-### Rate limiting
+### Credit gates
 
-Two credit gates, both read off the user record before the body is, both answering 402
+Two, both read off the user record before the body is, both answering 402
 `credit balance exhausted`. The control plane's: its own balance priced from the pull, flipped as
 `limited` and pushed. This box's own: `prepaid && spent >= budget`, where `spent` is the one counter
 this process keeps (see *The records themselves*). A client cannot tell which one refused it.
+
+### Rate limiting
+
+Per holder, pushed on the user record as `limits`: a comma list of `<metric>:<window>:<value>`,
+e.g. `requests:1m:200,total_tokens:1h:50000`. No entry = uncapped. Checked in `quota`, after the
+credit gates, so a holder with no balance does not use up a request.
+
+| | |
+|---|---|
+| Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |
+| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the holder's first request |
+| Counter | `lim:<user>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
+| Refusal | 429 `rate limit exceeded: 200 requests per 1m` (`rate_limit_error`), `Retry-After` = seconds to the window's end. Over several limits at once, the one that resets last is named |
+
+**Requests are exact, tokens are check-then-debit.** One Lua script reads every counter and, only
+when all have room, counts the request — so a refusal counts nothing and two requests cannot both
+take the last slot. Tokens are unknown until the answer: `meter` adds them to the window the answer
+ended in. The request that crosses a token limit completes; the overshoot is the requests in flight
+times their size. A request with no token usage (audio seconds) moves only the request limits.
+
+What counts: every request `quota` admits, whatever happens below it (a 403 on the model, a full
+engine). `retry` sits below, so a vendor key rotation is still one request. A response cut short
+is debited what usage it reported. A debit the store refuses is logged and dropped, never spooled:
+replayed later, it would land in a window the tokens were not used in.
+
+Scope: the counters live in this gateway's store, so a limit is exact across every gateway sharing
+it and separate on a gateway with its own Redis. The limit store failing is a 503 for a holder with
+limits; one without never reads it. A push carrying a limit this binary cannot read is refused 400,
+naming the user.
 
 ---
 
@@ -918,6 +947,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
+| `lim:<user>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see *Rate limiting* |
 | `usage:<key prefix>` | hash | the gateway; set aside by `GET /grove-admin/usage` |
 | `drained:<drain id>:<key prefix>` | hash, kept `usage_retention` once acked | `GET /grove-admin/usage` renames a live counter here |
 | `drain:unacked` | set of `<drain id>:<key prefix>` | every counter set aside and not yet acked |
@@ -927,6 +957,10 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `inflight:<engine>` | sorted set, member = request id | the gateway |
 | `health:<target>` | counter, 60s | the gateway |
 | `pk:<key id>` | hash, lifetime | the gateway — what each vendor credential answered; read by `GET /grove-admin/provider-keys` |
+
+Nothing the control plane pushes carries a TTL. The push is hash-gated, so a record that expired
+would stay missing until its section changed; only gateway-owned keys expire
+(`TestPushedStateNeverExpires`).
 
 ### How the push works
 
@@ -1002,7 +1036,7 @@ nothing. A holder this store does not hold is a 404; nothing is invented.
 ```
 key:<sha256(secret)>       status  user  prefix
 user:<Grove User>          email  group (comma list)  allow  deny  limited  log_payloads  geography
-                           prepaid  budget  spent
+                           prepaid  budget  spent  limits
 model_group:<Model Group>  models
 usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
@@ -1188,7 +1222,7 @@ Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except
 | 408 | the body did not arrive within 60s of the headers | resend on a working connection |
 | 413 | body over `max_body_bytes` | send less |
 | 402 | out of prepaid credit | top up; nothing to retry |
-| 429 | every replica at capacity | back off and retry |
+| 429 | every replica at capacity, or the holder is over a rate limit | back off and retry — `Retry-After` is set for a rate limit |
 | 499 | the client left before the upstream answered. Only ever in the access line: nobody is there to receive it | – |
 | 502 | the engine could not be reached or failed the hop | retry; another replica may take it |
 | 504 | the engine sent no headers within `upstream_read_timeout`, or could not be dialled in time | retry; another replica may take it |

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/phot0n/pathway/internal/domain"
@@ -71,16 +72,25 @@ func anthropicSurface(r *http.Request) bool {
 func Denial(w http.ResponseWriter, err error) {
 	var denial domain.Denial
 	if errors.As(err, &denial) {
+		retryAfter(w, denial)
 		Error(w, denial.Status, denial.Reason)
 		return
 	}
 	Error(w, http.StatusInternalServerError, "gateway error")
 }
 
+// retryAfter tells the client when a refusal that knows its own end will lift.
+func retryAfter(w http.ResponseWriter, denial domain.Denial) {
+	if denial.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(denial.RetryAfter))
+	}
+}
+
 // DenialFor is Denial in the request surface's own dialect.
 func DenialFor(w http.ResponseWriter, r *http.Request, err error) {
 	var denial domain.Denial
 	if errors.As(err, &denial) {
+		retryAfter(w, denial)
 		ErrorFor(w, r, denial.Status, denial.Reason)
 		return
 	}
