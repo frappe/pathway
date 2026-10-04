@@ -291,6 +291,26 @@ func TestAnUpstreamThatBreaksOffIsMarked(t *testing.T) {
 	}
 }
 
+// A stream cut inside a frame is billed by the last frame that arrived whole: an engine of ours
+// reports the running count on every chunk.
+func TestACutStreamKeepsItsLastWholeUsageFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}`+"\n\n"+
+			`data: {"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`+"\n\n"+
+			`data: {"usage":{"prompt_tokens":7,"comple`)
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	t.Cleanup(server.Close)
+
+	out := forward(New(Options{}, quiet()), server.URL, false)
+	if out.Cut != domain.CutUpstream || !strings.Contains(out.Usage, `"total_tokens":9`) ||
+		!strings.Contains(out.UsageStart, `"total_tokens":8`) {
+		t.Errorf("cut %q, start %q, last %q", out.Cut, out.UsageStart, out.Usage)
+	}
+}
+
 // forwardOn is forward on a surface, keeping what the client received.
 func forwardOn(p *Proxy, target, dialect string) (Outcome, *httptest.ResponseRecorder) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
