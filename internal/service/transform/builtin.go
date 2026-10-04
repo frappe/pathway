@@ -12,14 +12,16 @@ func init() {
 	Register(streamUsage{})
 }
 
-// streamUsage guarantees a usage frame on a streaming response. Without it a streaming request
-// reports nothing and bills as zero, which is the whole reason metering can trust the stream.
+// streamUsage guarantees usage on a streaming response. Without `include_usage` a streaming request
+// reports nothing and bills as zero, which is the whole reason metering can trust the stream. An
+// upstream the `vendors` table says takes it is also asked for the running count on every chunk
+// (`continuous_usage_stats`), so a stream that is cut is billed for what it had generated.
 type streamUsage struct{}
 
 func (streamUsage) Name() string        { return "streamusage" }
 func (streamUsage) Endpoints() []string { return completions }
 
-func (streamUsage) Apply(_ Context, body Body) (bool, error) {
+func (streamUsage) Apply(ctx Context, body Body) (bool, error) {
 	var streaming bool
 	raw, present := body["stream"]
 	if !present {
@@ -38,10 +40,19 @@ func (streamUsage) Apply(_ Context, body Body) (bool, error) {
 			options = map[string]json.RawMessage{}
 		}
 	}
-	if include, ok := options["include_usage"]; ok && string(include) == "true" {
+	forced := []string{"include_usage"}
+	if upstreamOf(ctx).usagePerChunk {
+		forced = append(forced, "continuous_usage_stats")
+	}
+	changed := false
+	for _, option := range forced {
+		if string(options[option]) != "true" {
+			options[option], changed = json.RawMessage("true"), true
+		}
+	}
+	if !changed {
 		return false, nil
 	}
-	options["include_usage"] = json.RawMessage("true")
 
 	encoded, err := json.Marshal(options)
 	if err != nil {

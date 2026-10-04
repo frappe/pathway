@@ -470,6 +470,62 @@ scraper, so usage and the `cut` are read off the upstream's own bytes exactly as
 already cut mid-line still reaches the client broken, ahead of the error. A body that is one JSON
 document cannot be repaired this way and is still just dropped.
 
+### The client interface
+
+Clients speak one of two shapes, and a vendor is only ever reached on one of two paths:
+`/v1/chat/completions` (OpenAI) and `/anthropic/v1/messages` (Anthropic). Nothing converts between
+them. Engines we run take both shapes and their own extras, and are sent what the client sent; what
+follows is about a hop to a vendor.
+
+The fields the gateway knows on each shape:
+
+| Shape | Fields |
+|---|---|
+| OpenAI chat | `model`, `messages`, `max_completion_tokens` (older name `max_tokens`), `temperature`, `top_p`, `n`, `stop`, `stream`, `stream_options`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs`, `seed`, `user`, `tools`, `tool_choice`, `parallel_tool_calls`, `response_format`, `reasoning_effort`, `metadata`, `store`, `service_tier`, `modalities`, `audio`, `prediction`, `prompt_cache_key`, `safety_identifier`, `verbosity`, `web_search_options` |
+| Anthropic messages | `model`, `messages`, `max_tokens`, `system`, `metadata`, `stop_sequences`, `stream`, `temperature`, `top_p`, `top_k`, `tools`, `tool_choice`, `thinking`, `service_tier`, `output_config`, `container`, `mcp_servers`, `context_management` |
+| both, the gateway's own | `fallbacks` — read here, never forwarded |
+
+What a vendor is sent in place of what the client sent:
+
+| Field | Vendor gets |
+|---|---|
+| `model` | its own id for the model (`modelmap`) |
+| `max_completion_tokens` / `max_tokens` (OpenAI shape) | `max_completion_tokens` at OpenAI, `max_tokens` at every other vendor; sent under both names, the newer one's value (`vendorfields`) |
+| `stream_options` (OpenAI shape) | `include_usage: true` added on a stream (`streamusage`). `continuous_usage_stats` is added for Baseten and for an engine of ours, not for OpenAI (400s on it), DeepSeek (ignores it) or a vendor the gateway does not know |
+| `service_tier` | dropped (`servicetier`) |
+| every other field, listed above or not | as the client sent it |
+
+- **A field not on the list is forwarded**, not dropped and not refused: the list is what the
+  gateway stands behind, not a gate, and a vendor's new field works the day it ships. The vendor
+  refuses what it does not take.
+- **A listed field a vendor cannot take is sent anyway**; dropping it would change what the caller
+  asked for. On a fallback, that vendor's refusal moves the request on (see
+  [Fallback models](#fallback-models)).
+- **Where an upstream differs is one table**, `vendors` in `internal/service/transform/vendors.go`,
+  keyed by the vendor's name as the control plane pushes it: the field it reads the output cap from
+  (`outputCap`), and whether it is asked for usage on every chunk of a stream (`usagePerChunk`). It names OpenAI,
+  DeepSeek and Baseten; an engine of ours and a vendor it does not name each have an entry of their
+  own. `vendorfields` and `streamusage` read it per attempt on the client's own body, so a request
+  that moves to another vendor is named afresh for that one. Add a line when the access log's
+  `attempt` line, or a probe, shows a vendor differing — and the row below with it.
+- Responses are not rewritten: same shape in, same shape out, with `model` swapped back to the name
+  the client knows — whatever the vendor wrote there, since one asked by an alias answers under the
+  name behind it.
+
+What each upstream was seen to do, through a gateway, and where the gateway acts on it. This is the
+one list of it: add a row or a column when a new difference shows up, with the date it was measured.
+
+| | Engines we run (vLLM) | OpenAI | DeepSeek | Baseten | Handled by |
+|---|---|---|---|---|---|
+| Output cap field (OpenAI shape) | either name | `max_completion_tokens` only; 400 on `max_tokens` | `max_tokens` (2026-10-04: capped at 16) | `max_tokens` (2026-10-05: capped at 16) | `vendorfields`, from `vendors` |
+| `stream_options.continuous_usage_stats` | taken | 400 (2026-10-05) | ignored (2026-10-05) | taken (2026-10-05) | `streamusage`, from `vendors`: sent to our engines and Baseten |
+| Usage on every chunk of a stream | yes, when asked | no, the last chunk only | no, the last chunk only | yes, asked or not | asked all the same |
+| A stream that is cut is metered | yes, by the last whole chunk | no; OpenAI bills nothing for it either (2026-09-30) | no | yes, by the last chunk received (2026-10-05: 44 + 33 tokens billed) | the usage tee |
+| `model` in the answer | the id it was started under | the id it was asked by | may differ: `deepseek-v4-flash` answers as `deepseek-flash` (2026-10-04) | not checked | the response swap writes the client's id whatever came back |
+| Anthropic shape | yes | no | yes, its own front | not checked | the route's `dialect` |
+
+What Baseten bills for a stream that was cut has not been compared with its own usage report.
+
 ---
 
 ## Routing
@@ -607,7 +663,10 @@ half of one.
 
 - **An event stream** (`text/event-stream`) is read by the line: the last line containing
   `"usage"`, the final frame of an OpenAI stream. Streaming requests only have one because the
-  `streamusage` transform forces `stream_options.include_usage` on the way in.
+  `streamusage` transform forces `stream_options.include_usage` on the way in. An engine of ours
+  and Baseten are also sent `continuous_usage_stats`, so every chunk carries the count so far and
+  a stream that is cut is metered by the last chunk that arrived whole; OpenAI's and DeepSeek's
+  cut stream has reported nothing by then.
 - **Any other body** is one document and is kept whole. It is never split into lines: OpenAI
   prints a body that is not streamed over many lines, and the line that names `"usage"` is then
   `  "usage": {` and holds none of it.
@@ -786,9 +845,9 @@ is not there. The name only, never the value. Top-level fields; a rewritten one 
 | transform | what it does |
 |---|---|
 | `modelmap` | rewrites `model` to the route's `upstream_model` |
-| `streamusage` | forces `stream_options.include_usage` on a streaming completion |
+| `streamusage` | forces `stream_options.include_usage` on a streaming completion, and `continuous_usage_stats` beside it for an upstream the `vendors` table says takes it (our engines, Baseten) |
 | `servicetier` | drops a caller's `service_tier` on every hop: it picks the vendor's price class, which is never the caller's to choose |
-| `maxtokens` | on a vendor chat hop, sends the output cap under the name that vendor honours: `max_completion_tokens` for OpenAI (400s on the old name), `max_tokens` for every other (they ignore the new one, uncapping output). Logged as a drop of the other name |
+| `vendorfields` | on a vendor hop, sends the output cap under the one name that vendor reads, from the `vendors` table of where an upstream differs from the shape (see [The client interface](#the-client-interface)). Today the output cap: `max_completion_tokens` for OpenAI (400s on the old name), `max_tokens` for every other (they ignore the new one, uncapping output). Logged as a drop of the other name |
 | `cachesalt` | prefixes a caller's `cache_salt` with their tenant, strips it on a vendor hop. Not in the default list |
 
 ### Add a storage backend
@@ -844,7 +903,7 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
   "log_level": "info",
   "middleware": ["recover", "accesslog", "drain", "auth", "quota", "body", "modelaccess",
                  "payloadlog", "route", "meter", "retry", "transform", "upstreamauth"],
-  "transforms": ["modelmap", "streamusage", "servicetier", "maxtokens"],
+  "transforms": ["modelmap", "streamusage", "servicetier", "vendorfields"],
   "synthetic_session_ttl": "0s",
   "capacity_wait": "0s",
   "max_body_bytes": 33554432,

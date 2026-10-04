@@ -213,8 +213,8 @@ func TestTheBodyReachesTheEngineTransformed(t *testing.T) {
 		t.Fatalf("engine body: %v", err)
 	}
 	options, _ := body["stream_options"].(map[string]any)
-	if options["include_usage"] != true {
-		t.Errorf("include_usage not forced; body = %s", f.seen.body)
+	if options["include_usage"] != true || options["continuous_usage_stats"] != true {
+		t.Errorf("usage not forced on the stream; body = %s", f.seen.body)
 	}
 }
 
