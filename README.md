@@ -899,6 +899,11 @@ released and whatever usage was captured is recorded.
 
 No lame-duck on an *upgrade* handover: the child is already accepting on the same socket.
 
+Size `lame_duck` to at least one health-check interval of whatever sits in front: shorter, and the
+balancer can still be sending when the socket closes, and those clients get connection refused
+instead of a retryable 503. `0` skips the window and closes the socket at once. Requests already
+running are never refused by it — only new ones are.
+
 ---
 
 ## The contract with the control plane
@@ -1158,6 +1163,7 @@ was unreadable turns one broken dependency into an outage.
 | the client leaves in the middle of a response | the upstream call is cancelled at once; `cut=client_left`. What the upstream had reported by then is metered, the rest is not |
 | the upstream goes silent after its headers | cut after `upstream_read_timeout` of silence, `cut=upstream_idle`, and the hop counts against the target. An event stream ends in an `upstream went silent` error event; any other body is dropped. A stream that keeps talking is never cut, however long it runs |
 | an HTTP/2 upstream connection dies without closing | pinged after 15s with nothing received and closed 90s later: a request waiting on it gets **502** `upstream unavailable` and counts against the target, and the next one dials a fresh connection |
+| pathway outgrows the unit's `MemoryMax` | the kernel kills it inside its own cgroup and systemd starts it again 2s later: live streams drop, the rest of the box is untouched. Without a cap the whole box runs out and the kernel picks what dies |
 | the upstream's body breaks off | `cut=upstream`, and the hop counts against the target. An event stream ends in an `upstream broke off the stream` error event; any other body is dropped |
 | the client drips its body | **408** once 60s pass without the part `body` reads; nothing is routed or billed |
 | every replica is full | waits up to `capacity_wait`, then **429**, distinct from 503 on purpose: the model is up. Nothing is claimed or billed while waiting |
@@ -1324,3 +1330,8 @@ and the button is how it ends.
   until `upstream_read_timeout`, and the connection goes only when the kernel gives up
   retransmitting (about 15 minutes at Linux defaults). It is set through `Transport.HTTP2`, which
   is why `go.mod` asks for Go 1.24.
+- **The memory limits live in the unit, not in this code.** Grove writes a drop-in with `MemoryMax`
+  and `GOMEMLIMIT` at 90% of it, so the collector works harder before the kernel kills anything.
+  `MemoryMax` moves under the running process; `GOMEMLIMIT` is environment, and a SIGHUP child
+  copies its parent's, so a changed one is only read at a full restart. During a handover the
+  draining parent shares the cgroup, each with its own 90%.
