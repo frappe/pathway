@@ -97,6 +97,15 @@ func IsKeyFailure(status int) bool { return status == 429 || IsKeyRejected(statu
 // unpaid or forbidden. A rate limit is not — that key may be back once the others are spent.
 func IsKeyRejected(status int) bool { return status == 401 || status == 402 || status == 403 }
 
+// MaxFallbacks is how many other models one request may name to fall back on: each can cost a dial.
+const MaxFallbacks = 3
+
+// IsModelFailure reports an answer that says this model cannot serve the request here, whoever
+// asks: its upstream broke, or every credential the retry stage had was refused. Only these move
+// a request to a fallback model — any other 4xx is the request's fault, and the next model would
+// say the same.
+func IsModelFailure(status int) bool { return status >= 500 || IsKeyFailure(status) }
+
 // KeyStatusClass is the KeyStats bucket an attempt's status lands in, by the field's JSON name.
 func KeyStatusClass(status int) string {
 	switch {

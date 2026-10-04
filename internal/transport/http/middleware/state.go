@@ -9,6 +9,7 @@ import (
 	"github.com/phot0n/pathway/internal/service/admission"
 	"github.com/phot0n/pathway/internal/service/routing"
 	"github.com/phot0n/pathway/internal/service/transform"
+	"github.com/phot0n/pathway/internal/transport/http/proxy"
 )
 
 // State is what one request accumulates down the chain — one struct in the context rather than a
@@ -32,25 +33,26 @@ type State struct {
 	// naming each file — for the payload log. Never the file itself. Nil on every other path.
 	Form map[string]string
 
+	// Fallbacks is the other models the caller named, in their order, still untried. Fallback is
+	// the one of them serving this request; blank while the model asked for is.
+	Fallbacks []string
+	Fallback  string
+
 	Decision routing.Decision
 	// Attempts is how many times an upstream was dialled for this request; 0 when none was.
 	Attempts int
 
-	// Filled on the way back out, by the proxy.
-	UpstreamStatus int
-	// UpstreamRID is the upstream's own request id: a vendor's ticket key, blank on our engines.
-	UpstreamRID string
-	Usage       string
-	UsageStart  string
-	Deployment  string
-	Reason      string
-	// Cut names who ended a response that did not finish; blank on one that did.
-	Cut string
+	// Outcome is what the proxy learned of the attempt that is serving this request, filled on the
+	// way back out. Blank again before another attempt.
+	Outcome proxy.Outcome
 	// Denied is the status a stage refused with, for the access log. 0 means the request reached
 	// an upstream.
 	Denied       int
 	DeniedReason string
 }
+
+// ServingModel is the model this request is served by: a fallback once one took over.
+func (s *State) ServingModel() string { return or(s.Fallback, s.Model) }
 
 type stateKey struct{}
 

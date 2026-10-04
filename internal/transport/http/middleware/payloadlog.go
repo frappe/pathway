@@ -49,6 +49,7 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 					slog.String("key", or(state.Identity.Prefix(), "-")),
 					slog.String("user", state.Identity.Key.User),
 					slog.String("model", or(state.Model, "-")),
+					slog.String("fallback", or(state.Fallback, "-")),
 					slog.String("path", r.URL.Path),
 					slog.Int("status", recorder.status),
 					slog.String("prompt", string(scrubPayload(prompt))),

@@ -267,6 +267,20 @@ func TestKeyringIsThePushedKeysOrTheOneInternalKey(t *testing.T) {
 	}
 }
 
+// A fallback model is for an upstream that broke or a key nobody could use, never for a request
+// that was wrong, answered, or abandoned.
+func TestIsModelFailure(t *testing.T) {
+	for status, want := range map[int]bool{
+		200: false, 400: false, 404: false, 422: false, 499: false,
+		401: true, 402: true, 403: true, 429: true,
+		500: true, 502: true, 503: true, 504: true, 529: true,
+	} {
+		if got := IsModelFailure(status); got != want {
+			t.Errorf("IsModelFailure(%d) = %v, want %v", status, got, want)
+		}
+	}
+}
+
 func TestKeyStatusClass(t *testing.T) {
 	for status, want := range map[int]string{
 		200: "ok", 400: "ok", 404: "ok", 429: "rate_limited",

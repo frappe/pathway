@@ -289,7 +289,7 @@ It is not architecture for its own sake — it bought three specific things:
 client
   │ TLS, HTTP/2
   ▼
-recover → accesslog → drain → auth → quota → body → modelaccess → payloadlog → route → meter → retry → transform → upstreamauth
+recover → accesslog → drain → auth → quota → body → modelaccess → payloadlog → route → meter → fallback → retry → transform → upstreamauth
   │
   ▼
 proxy ──► engine (or ingress ──► engine)
@@ -307,6 +307,7 @@ proxy ──► engine (or ingress ──► engine)
 | `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the user's `log_payloads` is on. See [The payload log](#the-payload-log) |
 | `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |
+| `fallback` | runs the stages below again on the next model in the body's `fallbacks` when the one serving cannot (5xx, or a key failure `retry` could not rotate away). See [Fallback models](#fallback-models) |
 | `retry` | runs the stages below again with another credential when a vendor refuses the one dialled (429, 401/402/403); counts every attempt against its key |
 | `transform` | the registered body rewrites; re-encodes only if one changed something |
 | `upstreamauth` | swaps in the engine's internal key, sets the forwarding and ingress headers |
@@ -375,12 +376,13 @@ box needs `GROVE_PAYLOAD_LOG`, and the user needs `log_payloads` (pushed on `use
 request, so turning it takes effect on the next one). One JSON line per request, written when the
 request ends — a client that hung up mid-stream still gets one, with what it had received:
 
-`rid` (joins the access line), `key`, `user`, `model`, `path` (after the `/anthropic` strip),
+`rid` (joins the access line), `key`, `user`, `model`, `fallback` (the model whose output this is,
+when not the one asked for; else `-`), `path` (after the `/anthropic` strip),
 `status`, `prompt`, `output`, `output_encoding` (only when `base64`), `prompt_bytes`,
 `output_bytes`.
 
 It sits between `modelaccess` and `route`: refusals above it (401, 402, 403, 408, 413) leave no
-line; everything from routing down does, once per request whatever `retry` did.
+line; everything from routing down does, once per request whatever `fallback` and `retry` did.
 
 What is kept:
 
@@ -585,6 +587,58 @@ One that ends a stream early but cleanly cannot be told from one that finished, 
 This is cheaper than active probing and strictly better informed: a probe tests a path no customer
 is on.
 
+### Fallback models
+
+A caller may name other models to take the request when the one asked for cannot, in a JSON body:
+
+```json
+{"model": "qwen/qwen3-4b", "messages": [], "fallbacks": ["anthropic/claude-sonnet-5-5"]}
+```
+
+At most 3 names; anything else in `fallbacks` is a 400. The field never reaches an upstream. The
+gateway never picks a fallback of its own: the caller named the model, and pays its price.
+
+The list is not judged when the request arrives: a fallback that cannot serve is found at its
+turn and passed over. One with no route on this surface and path — nothing translates between the
+OpenAI and Anthropic shapes, and a model answers only the paths its outputs allow — is skipped
+without a dial, as is one the caller is not granted or one with no routes right now. One that is
+dialled and refuses the request (a text-only model sent an image) costs that dial, and the next
+is tried.
+
+A fallback is tried, in list order, when:
+
+- `route` finds nowhere for the model to go — no healthy server (503) or every one full (429) —
+  before anything is dialled; or
+- the upstream answers 5xx, or with a key failure (429, 401/402/403) after `retry` has walked every
+  key the model has; or
+- the model serving is itself a fallback and refuses the request, with any status from 400 up. A
+  stand-in that will not take the request as written costs one dial, not the request: models on one
+  shape still differ in what they accept.
+
+A 4xx from the model the client asked for is the request's fault and is relayed at once, as is the
+answer of a client that left.
+
+Every attempt starts from the client's own body and is rewritten for the vendor it goes to (see
+[The client interface](#the-client-interface)): a request sent with `max_tokens` reaches DeepSeek
+under that name and OpenAI as `max_completion_tokens`.
+
+A response that has begun is never moved: the decision is made on the status line, and once a 200
+has gone out the client holds part of one model's answer. A stream that breaks after that ends in
+the error event of [Streaming](#streaming), on the model that began it, billed for what it
+reported. The same holds for a vendor that answers 200 and puts its error in the stream's first
+event: the gateway does not read ahead, so that is relayed too.
+
+Each fallback must be granted to the caller like any model; one that is not is skipped. It is
+picked with no session, so the caller's pin stays on the model they asked for. When no model is left, the last
+answer dialled is the client's, headers and body.
+
+The request is billed once, on the model that served: usage lands under that model and its pricing,
+and the access and payload lines carry it as `fallback`. The client reads it off the response:
+`X-Grove-Fallback: <model>` is set on any answer that is not the first model's — an audio body has
+nowhere else to say so — and the body's `model` names it too. The model that failed keeps its
+health mark and gives its slot back, and leaves an `attempt` line on the access log (see
+[Correlation](#correlation)).
+
 ---
 
 ## Admission
@@ -643,7 +697,8 @@ ended in. The request that crosses a token limit completes; the overshoot is the
 times their size. A request with no token usage (audio seconds) moves only the request limits.
 
 What counts: every request `quota` admits, whatever happens below it (a 403 on the model, a full
-engine). `retry` sits below, so a vendor key rotation is still one request. A response cut short
+engine). `fallback` and `retry` sit below, so a fallback model or a vendor key rotation is still
+one request. A response cut short
 is debited what usage it reported. A debit the store refuses is logged and dropped, never spooled:
 replayed later, it would land in a window the tokens were not used in.
 
@@ -783,7 +838,25 @@ An upstream that ends a stream early but cleanly cannot be told from one that fi
 `-`. On a provider route the vendor's own id is `upstream_rid` on that line and never reaches
 the client; ours never reaches the vendor. `attempts` is how many times an upstream was dialled
 for the request — 0 when it was refused before any, more than 1 when `retry` moved it to another
-vendor key.
+vendor key or `fallback` to another model. `model` is the one the client asked for; `fallback` is
+the model that served instead, `-` when the one asked for did.
+
+The access line describes the last attempt only. Every attempt before it — one the client never
+saw, because `retry` or `fallback` held its answer and moved the request on — leaves a line of its
+own in the same log, `msg="attempt"`, under the same `rid`:
+
+| Field | Is |
+|---|---|
+| `attempt` | which dial failed, from 1; `0` for a model `route` could not place, so nothing was dialled |
+| `model` | the model this attempt was on |
+| `upstream`, `deployment`, `engine`, `upstream_rid`, `upstream_status`, `reason`, `cut` | as on the access line, for this attempt; `reason` is the pick's refusal when nothing was dialled, `upstream unavailable` or `upstream timed out` when the dial gave no status |
+| `upstream_key` | id of the vendor credential dialled; `-` on an engine |
+| `rt` | seconds this attempt took |
+| `moved`, `to` | what the request moved to: `key` and the next credential's id, or `model` and the fallback |
+
+A request that dialled three times is two `attempt` lines and one `access` line. A fallback passed
+over without a dial (not granted, no route on this surface) is in the process log, `fallback
+skipped`.
 
 ---
 
@@ -902,7 +975,7 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
 {
   "log_level": "info",
   "middleware": ["recover", "accesslog", "drain", "auth", "quota", "body", "modelaccess",
-                 "payloadlog", "route", "meter", "retry", "transform", "upstreamauth"],
+                 "payloadlog", "route", "meter", "fallback", "retry", "transform", "upstreamauth"],
   "transforms": ["modelmap", "streamusage", "servicetier", "vendorfields"],
   "synthetic_session_ttl": "0s",
   "capacity_wait": "0s",

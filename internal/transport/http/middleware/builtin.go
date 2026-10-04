@@ -59,10 +59,7 @@ func newRecover(deps Deps) (Middleware, error) {
 // accesslog times the request and writes the one durable line per request. It also creates the
 // State, being the outermost stage that needs one.
 func newAccessLog(deps Deps) (Middleware, error) {
-	access := deps.Access
-	if access == nil {
-		access = deps.Log
-	}
+	access := deps.AccessLog()
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Already inside an accesslog: a listener wraps its whole mux in one, and the data
@@ -102,14 +99,15 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.Int("attempts", state.Attempts),
 					slog.String("key", or(state.Identity.Prefix(), "-")),
 					slog.String("model", or(state.Model, "-")),
+					slog.String("fallback", or(state.Fallback, "-")),
 					slog.String("rid", state.RequestID),
 					slog.String("upstream", or(state.Decision.EngineURL(), "-")),
-					slog.String("upstream_rid", or(state.UpstreamRID, "-")),
+					slog.String("upstream_rid", or(state.Outcome.UpstreamRID, "-")),
 					slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
-					slog.String("engine", or(state.Deployment, "-")),
-					slog.Int("upstream_status", state.UpstreamStatus),
-					slog.String("reason", or(state.DeniedReason, state.Reason)),
-					slog.String("cut", or(state.Cut, "-")),
+					slog.String("engine", or(state.Outcome.Deployment, "-")),
+					slog.Int("upstream_status", state.Outcome.Status),
+					slog.String("reason", or(state.DeniedReason, state.Outcome.Reason)),
+					slog.String("cut", or(state.Outcome.Cut, "-")),
 				)
 				access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
 			}()
@@ -288,9 +286,14 @@ func newBody(deps Deps) (Middleware, error) {
 				state.Body = decoded
 				state.Model = stringField(decoded, "model")
 				state.Session = stringField(decoded, "user")
+				if state.Fallbacks, err = fallbackModels(decoded); err != nil {
+					deny(w, r, err)
+					return
+				}
 			}
 			applySessionHeader(r, state)
 			restoreBody(r, raw)
+			rewriteBody(r, state)
 			next.ServeHTTP(w, r)
 		})
 	}, nil
@@ -315,16 +318,18 @@ func newModelAccess(deps Deps) (Middleware, error) {
 func newRoute(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			state := From(r)
-			decision, err := deps.Routing.Pick(r.Context(), routing.Request{
-				Model:     state.Model,
-				Session:   state.Session,
-				MeterID:   state.Identity.MeterID,
-				KeyPrefix: state.Identity.Prefix(),
-				Path:      r.URL.Path,
-				Dialect:   respond.Dialect(r.Context()),
-				RequestID: state.RequestID,
-			})
+			state, started := From(r), time.Now()
+			decision, err := deps.Routing.Pick(r.Context(), pickRequest(r, state, state.Model, state.Session))
+			// A model with nowhere to go hands the request to the caller's fallbacks before any
+			// dial; a pick refused for the request's own fault (the wrong surface) does not.
+			var denial domain.Denial
+			if errors.As(err, &denial) && domain.IsModelFailure(denial.Status) {
+				if winner, model := nextFallback(deps, r, state); model != "" {
+					logAttempt(deps, r, state, started, denial.Reason, "model", model)
+					serveFallback(w, r, state, model, winner)
+					decision, err = winner, nil
+				}
+			}
 			if err != nil {
 				deny(w, r, err)
 				return
@@ -337,6 +342,19 @@ func newRoute(deps Deps) (Middleware, error) {
 			next.ServeHTTP(w, r)
 		})
 	}, nil
+}
+
+// pickRequest asks for an engine of `model` on this request's surface.
+func pickRequest(r *http.Request, state *State, model, session string) routing.Request {
+	return routing.Request{
+		Model:     model,
+		Session:   session,
+		MeterID:   state.Identity.MeterID,
+		KeyPrefix: state.Identity.Prefix(),
+		Path:      r.URL.Path,
+		Dialect:   respond.Dialect(r.Context()),
+		RequestID: state.RequestID,
+	}
 }
 
 // meter releases the slot and records what the request cost. Deferred, so it runs on a panic, a
@@ -354,19 +372,19 @@ func newMeter(deps Deps) (Middleware, error) {
 				deps.Metering.Record(ctx, metering.Report{
 					RequestID:      state.RequestID,
 					Prefix:         state.Identity.Prefix(),
-					Model:          state.Model,
-					Deployment:     or(state.Deployment, state.Decision.Route.Deployment),
-					Usage:          state.Usage,
-					UsageStart:     state.UsageStart,
+					Model:          state.ServingModel(),
+					Deployment:     or(state.Outcome.Deployment, state.Decision.Route.Deployment),
+					Usage:          state.Outcome.Usage,
+					UsageStart:     state.Outcome.UsageStart,
 					Pricing:        state.Decision.Route.Pricing,
 					User:           state.Identity.Key.User,
 					Prepaid:        state.Identity.User.Prepaid,
 					Budget:         state.Identity.User.Budget,
 					Limits:         state.Identity.User.Limits,
 					Target:         state.Decision.EngineURL(),
-					UpstreamStatus: statusText(state.UpstreamStatus),
-					Reason:         state.Reason,
-					Cut:            state.Cut,
+					UpstreamStatus: statusText(state.Outcome.Status),
+					Reason:         state.Outcome.Reason,
+					Cut:            state.Outcome.Cut,
 				})
 			}()
 			next.ServeHTTP(w, r)
@@ -475,7 +493,7 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 				// An ingress reads no body, so the model it would otherwise have parsed goes as a
 				// header — and the session key with it, hashed, because it is the one tier that
 				// must not learn whose request this is.
-				r.Header.Set("X-Grove-Model", state.Model)
+				r.Header.Set("X-Grove-Model", state.ServingModel())
 				r.Header.Set("X-Grove-Session-Key", state.Decision.SessionKey)
 			} else {
 				// A direct route reaches vLLM, which adopts X-Request-Id and nothing else.
