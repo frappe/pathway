@@ -36,8 +36,9 @@ type Outcome struct {
 	// Deployment is the placement an ingress chose, off its response header. On a direct route the
 	// gateway already knows; this is the only way usage reaches a placement it never picked.
 	Deployment string
-	// Reason is an ingress's X-Grove-Reason. A no-replica 503 means the ingress answered correctly
-	// and must not count against it.
+	// Reason is why the hop gave no usable answer: an ingress's X-Grove-Reason — a no-replica 503
+	// means the ingress answered correctly and must not count against it — or, on a hop that
+	// produced no status, what the gateway told the client instead.
 	Reason string
 	// Cut names who ended a response that did not finish: one of domain's Cut values. Blank on a
 	// response that finished, and on a hop that never produced one.
@@ -219,6 +220,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			if errors.As(err, &timeout) && timeout.Timeout() {
 				status, message = http.StatusGatewayTimeout, "upstream timed out"
 			}
+			outcome.Reason = message
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			if respond.Dialect(r.Context()) == domain.DialectAnthropic {

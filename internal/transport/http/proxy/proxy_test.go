@@ -336,6 +336,17 @@ func TestAHeaderTimeoutIsA504(t *testing.T) {
 	if out.Status != 0 {
 		t.Errorf("outcome status = %d; a hop with no answer must stay 0 to count against the upstream", out.Status)
 	}
+	if out.Reason != "upstream timed out" {
+		t.Errorf("reason = %q; the access log must say why a hop gave no status", out.Reason)
+	}
+
+	// A refused connection is the other way a hop gives no status.
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	out, w = forwardOn(New(Options{}, quiet()), dead.URL, domain.DialectOpenAI)
+	if w.Code != http.StatusBadGateway || out.Status != 0 || out.Reason != "upstream unavailable" {
+		t.Errorf("refused: status %d, outcome %d, reason %q", w.Code, out.Status, out.Reason)
+	}
 }
 
 // mutedListener hands out connections whose writes can be switched off: the far end still reads
