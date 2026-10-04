@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -313,6 +315,69 @@ func TestAHeaderTimeoutIsA504(t *testing.T) {
 	}
 	if out.Status != 0 {
 		t.Errorf("outcome status = %d; a hop with no answer must stay 0 to count against the upstream", out.Status)
+	}
+}
+
+// mutedListener hands out connections whose writes can be switched off: the far end still reads
+// and thinks it answers, and nothing arrives — a peer that vanished without a FIN.
+type mutedListener struct {
+	net.Listener
+	muted *atomic.Bool
+}
+
+func (l mutedListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return mutedConn{Conn: conn, muted: l.muted}, nil
+}
+
+type mutedConn struct {
+	net.Conn
+	muted *atomic.Bool
+}
+
+func (c mutedConn) Write(p []byte) (int, error) {
+	if c.muted.Load() {
+		return len(p), nil
+	}
+	return c.Conn.Write(p)
+}
+
+// An HTTP/2 connection that dies without a FIN would otherwise keep taking requests, each one
+// hanging for the read timeout, until the kernel gave up on it. The ping closes it instead, and the
+// next request dials a fresh one.
+func TestAnUpstreamConnectionThatDiesQuietlyIsPingedOut(t *testing.T) {
+	var muted, sawHTTP2 atomic.Bool
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHTTP2.Store(r.ProtoMajor == 2)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	server.Listener = mutedListener{Listener: server.Listener, muted: &muted}
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	const ping = 50 * time.Millisecond
+	p := New(Options{ReadTimeout: 100 * ping, PingAfter: ping, PingTimeout: ping}, quiet())
+	if out := forward(p, server.URL, false); out.Status != http.StatusOK || !sawHTTP2.Load() {
+		t.Fatalf("first hop: status %d, HTTP/2 %t, want 200 over HTTP/2", out.Status, sawHTTP2.Load())
+	}
+
+	muted.Store(true)
+	start := time.Now()
+	out, w := forwardOn(p, server.URL, domain.DialectOpenAI)
+	if out.Status != 0 || w.Code != http.StatusBadGateway {
+		t.Errorf("hop on the dead connection: outcome %d, client saw %d, want a failed hop and a 502", out.Status, w.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 20*ping {
+		t.Errorf("the dead connection held its request for %s, want it pinged out in about %s", elapsed, 2*ping)
+	}
+
+	muted.Store(false)
+	if out := forward(p, server.URL, false); out.Status != http.StatusOK {
+		t.Errorf("hop after the dead connection was closed returned %d, want 200 on a fresh one", out.Status)
 	}
 }
 

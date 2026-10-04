@@ -61,6 +61,11 @@ type Options struct {
 	// so it is a fleet default rather than the ceiling nginx's per-location directive imposed.
 	// It does not reach an external hop, which always verifies.
 	VerifyUpstream bool
+	// PingAfter is how long an HTTP/2 upstream connection may deliver nothing before it is pinged,
+	// PingTimeout how long the answer may take before the connection is closed. A connection that
+	// died without a FIN is never idle under traffic, and would keep taking requests without it.
+	PingAfter   time.Duration
+	PingTimeout time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -69,6 +74,12 @@ func (o Options) withDefaults() Options {
 	}
 	if o.DialTimeout <= 0 {
 		o.DialTimeout = 10 * time.Second
+	}
+	if o.PingAfter <= 0 {
+		o.PingAfter = 15 * time.Second
+	}
+	if o.PingTimeout <= 0 {
+		o.PingTimeout = 90 * time.Second
 	}
 	return o
 }
@@ -284,6 +295,7 @@ func (p *Proxy) transportFor(base *url.URL, external bool) http.RoundTripper {
 		// Streaming responses must not be buffered on the way in either.
 		DisableCompression: true,
 		ForceAttemptHTTP2:  true,
+		HTTP2:              &http.HTTP2Config{SendPingTimeout: opts.PingAfter, PingTimeout: opts.PingTimeout},
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !verify, //nolint:gosec // see Options.VerifyUpstream
 			MinVersion:         tls.VersionTLS12,

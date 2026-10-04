@@ -230,6 +230,30 @@ One goroutine per request, as net/http gives it. What is shared between them:
 
 Nothing takes a lock across an I/O call, and no request-scoped value is shared between requests.
 
+### Upstream connections
+
+Kept open and reused. `proxy.Proxy` holds one `http.Transport` per target host and verification
+setting, with Go's keep-alive: up to 64 idle connections per host, each closed after 90s unused.
+`ForceAttemptHTTP2` is on, so a target that offers h2 — OpenAI, Anthropic and Baseten all do —
+carries its concurrent requests as streams on one connection, whichever of the vendor's keys each
+one dials with: the key is a header, not a connection. An HTTP/1.1 target takes one connection per
+request in flight, out of the same pool.
+
+A dial and a TLS handshake are paid only by the first request to a host after:
+
+- a start or a binary upgrade;
+- 90s with no traffic to that host;
+- a SIGUSR1 that changed any tunable, because `Reconfigure` drops the whole pool.
+
+Each of those is a full handshake: no TLS session cache is set. Neither number is a tunable; both
+are set in `proxy.transportFor`.
+
+An HTTP/2 connection that has delivered nothing for 15s is pinged, and closed if no answer comes
+within another 90s (`PingAfter` and `PingTimeout` in `proxy.Options`). A quiet one that answers is
+pinged again every 15s; one that does not gets the single ping, which TCP keeps retransmitting, so
+a blip shorter than 90s costs nothing. That is what finds a connection that died without a FIN:
+under traffic it is never idle, so the 90s idle close never reaches it.
+
 ### Why the layering earns its keep here
 
 It is not architecture for its own sake — it bought three specific things:
@@ -1133,6 +1157,7 @@ was unreadable turns one broken dependency into an outage.
 | the client leaves before the upstream answers | the upstream call is cancelled at once; the access line reads **499** `cut=client_left`, and the hop does not count against the target |
 | the client leaves in the middle of a response | the upstream call is cancelled at once; `cut=client_left`. What the upstream had reported by then is metered, the rest is not |
 | the upstream goes silent after its headers | cut after `upstream_read_timeout` of silence, `cut=upstream_idle`, and the hop counts against the target. An event stream ends in an `upstream went silent` error event; any other body is dropped. A stream that keeps talking is never cut, however long it runs |
+| an HTTP/2 upstream connection dies without closing | pinged after 15s with nothing received and closed 90s later: a request waiting on it gets **502** `upstream unavailable` and counts against the target, and the next one dials a fresh connection |
 | the upstream's body breaks off | `cut=upstream`, and the hop counts against the target. An event stream ends in an `upstream broke off the stream` error event; any other body is dropped |
 | the client drips its body | **408** once 60s pass without the part `body` reads; nothing is routed or billed |
 | every replica is full | waits up to `capacity_wait`, then **429**, distinct from 503 on purpose: the model is up. Nothing is claimed or billed while waiting |
@@ -1293,3 +1318,9 @@ and the button is how it ends.
   slot before the next pick, so both replicas read zero and the tie takes the first. Fine for one
   chatty client — it keeps a prefix cache warm — but a fleet of many sequential clients pins them
   all to one engine.
+- **The HTTP/2 ping is what stops a dead upstream connection eating requests.** One that dies
+  quietly (no FIN, no RST) keeps taking new requests for as long as traffic keeps it busy: the 90s
+  idle close only runs on a connection with no request on it. Without the ping each request hangs
+  until `upstream_read_timeout`, and the connection goes only when the kernel gives up
+  retransmitting (about 15 minutes at Linux defaults). It is set through `Transport.HTTP2`, which
+  is why `go.mod` asks for Go 1.24.
