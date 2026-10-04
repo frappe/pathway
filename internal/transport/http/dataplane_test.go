@@ -31,7 +31,7 @@ import (
 // what landed in the store. Every one of these was untestable while nginx owned the bytes.
 
 const (
-	secret      = "gr_sk_demo"
+	secret      = "gr_demo"
 	usageObject = `"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,` +
 		`"prompt_tokens_details":{"cached_tokens":80}}`
 )

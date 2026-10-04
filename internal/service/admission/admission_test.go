@@ -9,7 +9,7 @@ import (
 	"github.com/phot0n/pathway/internal/repository/memory"
 )
 
-const secret = "gr_sk_test"
+const secret = "gr_test"
 
 func meterID() string { return domain.SHA256Hex(secret) }
 

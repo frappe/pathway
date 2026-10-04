@@ -366,8 +366,7 @@ What is kept:
 - **Inline media up to 256 KiB, as sent.** Past it — a `data:` URI anywhere, or base64 under
   `data` / `b64_json` (OpenAI `input_audio`, `audio`, generated images; Anthropic `source`) — the
   item becomes `[media image/png 834512 bytes sha256:9f2c…]`: its type, decoded size and the first
-  16 hex of its hash, enough to match a file the customer sends without keeping it. A body with
-  nothing replaced is logged byte-for-byte; one with something replaced is re-encoded.
+  16 hex of its hash, enough to match a file the customer sends without keeping it.
 - **A file response** (`audio/*`, `image/*`, `video/*`, `application/octet-stream` — speech) is
   base64 with `output_encoding: "base64"` up to 256 KiB, else `[media audio/mpeg 2097152 bytes]`;
   the recorder stops holding it at the limit. The client gets every byte either way.
@@ -377,6 +376,25 @@ What is kept:
   `Content-Length`, `-1` when chunked.
 - **Realtime sessions are not logged**: once the connection is hijacked nothing passes the
   recorder.
+- **Secrets, never.** Every format OpenRouter's Secrets guardrail detects ([the
+  list](https://openrouter.ai/docs/guides/features/guardrails/secret-formats) — AWS, GitHub, GitLab,
+  OpenAI, Anthropic, OpenRouter, Google, Stripe, Slack, npm, SendGrid, Hugging Face, Databricks,
+  Atlassian, Doppler, Linear, Shopify, Telegram, age, JWTs, Bitcoin extended and Ethereum keys, PEM
+  private keys, PyPI, DigitalOcean), and Grove's own keys (`gr_…`), becomes `[SECRET:<format>]`
+  under OpenRouter's labels (`payloadsecrets.go`). A known prefix followed by at least 16 key
+  characters is enough, whatever the length past that — OpenRouter's own rule for most formats, and
+  a superset of its match where it pins a length or marker, so a key of an odd size still goes; the
+  floor keeps names like `hf_token` intact. Two keep a strict shape because their prefix says too
+  little: Ethereum (`0x` + exactly 64 hex) and JWT (three dotted parts). OpenRouter's two Bitcoin
+  WIF formats are left out on purpose: they have no prefix, only a length and an alphabet ordinary
+  ids share. A `BEGIN … PRIVATE KEY` cut off before its `END` line is redacted to the end of the
+  text. It runs on every string in the prompt, output (each stream event on its own) and upload
+  fields — but not inside inline media, where a base64 image can hold runs shaped like a key and
+  redacting them would corrupt it — and not on a file response. What it misses: a secret the model
+  streams across several events, anything without a known prefix (a password), and the shape-alikes
+  it catches wrongly (an Ethereum transaction hash looks like a private key, as OpenRouter also
+  accepts). A body with no secret and no big media is logged byte-for-byte; one with either is
+  re-encoded.
 
 A text response is held in memory until its line is written; a long stream for an opted-in user
 costs its size.
@@ -1175,11 +1193,11 @@ curl -XPUT localhost:8080/grove-admin/groups -H 'X-Grove-Admin-Token: tok' \
 curl -XPUT localhost:8080/grove-admin/users -H 'X-Grove-Admin-Token: tok' \
   -d '{"users":[{"name":"you","group":"acme,beta"}]}'
 curl -XPUT localhost:8080/grove-admin/keys -H 'X-Grove-Admin-Token: tok' \
-  -d "{\"keys\":[{\"key_hash\":\"$(printf gr_sk_demo | sha256sum | cut -d' ' -f1)\",\"prefix\":\"dev\",\"user\":\"you\",\"status\":\"active\"}]}"
+  -d "{\"keys\":[{\"key_hash\":\"$(printf gr_demo | sha256sum | cut -d' ' -f1)\",\"prefix\":\"dev\",\"user\":\"you\",\"status\":\"active\"}]}"
 curl -XPUT localhost:8080/grove-admin/routes -H 'X-Grove-Admin-Token: tok' \
   -d '{"routes":{"qwen3-4b":[{"engine_url":"http://127.0.0.1:8000","internal_key":"k","healthy":true,"deployment":"MD-1","kind":"direct"}]}}'
 
-curl localhost:8080/v1/chat/completions -H 'Authorization: Bearer gr_sk_demo' \
+curl localhost:8080/v1/chat/completions -H 'Authorization: Bearer gr_demo' \
   -d '{"model":"qwen3-4b","messages":[]}'
 redis-cli -p 6399 HGETALL usage:dev
 ```
