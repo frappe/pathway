@@ -28,7 +28,7 @@ type Request struct {
 	Session   string
 	MeterID   string
 	KeyPrefix string
-	// Path is the surface being asked for, checked against the model's modality. An ASR model and
+	// Path is the surface being asked for, checked against what the model gives. An ASR model and
 	// a chat model are indistinguishable by name alone.
 	Path string
 	// Dialect is the surface the request arrived on; a vendor serves only its own.

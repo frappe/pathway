@@ -28,10 +28,13 @@ type Route struct {
 	// "ingress" when this row is an Ingress Server that will pick a replica of its own, "direct"
 	// (or empty, on a route pushed before this field existed) when it is an engine to dial.
 	Kind string `json:"kind"`
-	// Which OpenAI surface the model answers on — the control plane's Model.modality, stamped on
-	// every row of the model because deploy:<model> is the only thing pushed per model. Blank on a
-	// route pushed before this field existed, which reads as unrestricted.
-	Modality string `json:"modality"`
+	// InputModalities and OutputModalities are what the model takes ("text", "image", …) and what
+	// it gives ("text", "embeddings", …), stamped on every row of the model because deploy:<model>
+	// is the only thing pushed per model. The outputs say which surfaces it answers on; the inputs
+	// are carried, not read. Empty on a row pushed before the control plane declared them, which
+	// reads as unrestricted.
+	InputModalities  []string `json:"input_modalities,omitempty"`
+	OutputModalities []string `json:"output_modalities,omitempty"`
 	// What this upstream answers to, when that is not the id the caller sent. The control plane
 	// owns the mapping. Blank on every route we run ourselves — an engine is started under the
 	// Grove id — and on any route pushed before this field existed, which reads as "send unchanged".

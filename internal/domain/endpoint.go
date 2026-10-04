@@ -1,23 +1,21 @@
 package domain
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
-var endpointModalities = map[string]map[string]bool{
-	"/v1/chat/completions":     {"text": true, "multimodal": true},
-	"/v1/messages":             {"text": true, "multimodal": true},
-	"/v1/embeddings":           {"embedding": true},
-	"/v1/audio/transcriptions": {"audio": true},
-	"/v1/audio/translations":   {"audio": true},
+// endpointOutputs is the output a model must give to answer on a path. Only the paths one kind of
+// model serves are here; any other is nobody's to refuse.
+var endpointOutputs = map[string]string{
+	"/v1/chat/completions":     "text",
+	"/v1/messages":             "text",
+	"/v1/embeddings":           "embeddings",
+	"/v1/audio/transcriptions": "transcription",
+	"/v1/audio/translations":   "transcription",
 }
 
-// knownModalities is what this build understands. A value outside it comes from a control plane
-// newer than this binary, and is treated as unrestricted — a fleet mid-upgrade must not start
-// refusing traffic because one side learned a word first.
-var knownModalities = map[string]bool{
-	"text": true, "multimodal": true, "embedding": true, "audio": true,
-}
-
-// ServesRoute reports whether this route answers on this surface and path — the model's modality
+// ServesRoute reports whether this route answers on this surface and path — what the model gives
 // when it is an engine of ours, and the pushed dialect when it is a vendor. A provider is a closed
 // set where an engine is not: anything but its dialect's own paths is a 404 from it, after a
 // round trip we paid for — so it is our 404 instead.
@@ -25,19 +23,13 @@ func ServesRoute(r Route, dialect, path string) bool {
 	if r.IsProvider() {
 		return PathDialect(path) == dialect && r.SpeaksDialect(dialect)
 	}
-	return Serves(r.Modality, path)
+	return Serves(r.OutputModalities, path)
 }
 
-// Serves reports whether a model of this modality answers on this path. Pure, and deliberately
-// generous: it refuses only when the path is claimed by a modality this model does not have.
-func Serves(modality, path string) bool {
-	modality = strings.TrimSpace(modality)
-	if modality == "" || !knownModalities[modality] {
-		return true
-	}
-	allowed, claimed := endpointModalities[strings.TrimRight(path, "/")]
-	if !claimed {
-		return true
-	}
-	return allowed[modality]
+// Serves reports whether a model giving `outputs` answers on this path. Pure, and deliberately
+// generous: it refuses only a path claimed by an output the model does not give. A model that
+// declares nothing — a row from before the control plane said — is unrestricted.
+func Serves(outputs []string, path string) bool {
+	need, claimed := endpointOutputs[strings.TrimRight(path, "/")]
+	return !claimed || len(outputs) == 0 || slices.Contains(outputs, need)
 }

@@ -236,7 +236,7 @@ func TestAHangupLeavesTheCount(t *testing.T) {
 // A realtime session is in flight until it closes, which is when its usage is metered.
 func TestARealtimeSessionIsInFlightUntilItCloses(t *testing.T) {
 	engine := echoEngine(t)
-	m := newMaintained(t, realtimeStore(t, engine.URL, "audio"))
+	m := newMaintained(t, realtimeStore(t, engine.URL, "transcription"))
 
 	resp, _, conn := upgrade(t, m.front, "/v1/realtime?model=nemotron-asr")
 	if resp.StatusCode != http.StatusSwitchingProtocols {

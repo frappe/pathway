@@ -356,7 +356,7 @@ so `body` takes the model from the **query string**, which is where the OpenAI r
 `Content-Length` on an upgrade breaks the handshake before it reaches an engine.
 
 Everything else applies unchanged — the key is resolved, the grant is checked, a route is picked,
-and `/v1/realtime` is not a modality-claimed path so any model may serve it. Two consequences:
+and `/v1/realtime` is not a path any output claims, so any model may serve it. Two consequences:
 
 - **Usage lands at disconnect, not at connect.** `meter` is deferred, and for a hijacked connection
   the handler does not return until the session ends, so an open session is unbilled for as long as
@@ -1081,6 +1081,13 @@ negative balance on the control plane.
 
 `engine_url` is a **base**; the path the client asked for is appended to it. `in_flight` is
 computed here and never pushed — the control plane has no view of what is running right now.
+`input_modalities` and `output_modalities` are what the model takes and gives (`["text","image"]`,
+`["text"]`), stamped on every row of the model. The outputs are the path gate: chat and messages
+need `text`, `/v1/embeddings` needs `embeddings`, `/v1/audio/transcriptions` and `/translations`
+need `transcription`; a model that does not give it is our own 404 before anything is dialled, and
+any other path is nobody's to refuse. The inputs are carried, not read. A row that declares nothing — one pushed before
+the control plane said — is unrestricted and not judged. There is no `modality` field: a push
+that carries one is refused like any unknown field.
 `pricing` is the Model Pricing in force — its id and its sell price per counter, nano-USD per unit
 (Mtok, minute, request) — stamped on every row of the model. Absent on an unpriced model, and such
 a request costs 0.
