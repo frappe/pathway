@@ -88,7 +88,14 @@ func (u users) Get(ctx context.Context, name string) (domain.UserRecord, bool, e
 	if len(h) == 0 {
 		return domain.UserRecord{}, false, nil
 	}
+	// A push is refused unless every limit reads, so one that does not was written by a newer
+	// binary. Serving that holder uncapped would hide it.
+	limits, err := domain.ParseLimits(h["limits"])
+	if err != nil {
+		return domain.UserRecord{}, false, err
+	}
 	return domain.UserRecord{
+		Limits:      limits,
 		Email:       h["email"],
 		Groups:      domain.ModelSet(h["group"]),
 		Allow:       domain.ModelSet(h["allow"]),
@@ -127,6 +134,7 @@ func userFields(rec repository.UserUpsert) map[string]any {
 		"geography":    rec.Geography,
 		"prepaid":      flag(rec.Prepaid),
 		"budget":       strconv.FormatInt(rec.Budget, 10),
+		"limits":       rec.Limits, // always written: blank is what clears a removed limit
 	}
 }
 

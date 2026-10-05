@@ -52,6 +52,14 @@ type Deps struct {
 	Geography string
 }
 
+// AccessLog is where a request's record goes: Access, or Log on a box with no file of its own for it.
+func (d Deps) AccessLog() *slog.Logger {
+	if d.Access == nil {
+		return d.Log
+	}
+	return d.Access
+}
+
 // DrainState reports whether the process is shutting down. An interface so the lifecycle owns the
 // flag and the middleware only reads it.
 type DrainState interface {
@@ -84,12 +92,13 @@ func Registered() []string {
 // GatewayChain's order is load-bearing: recover outermost so a panic below is still answered,
 // accesslog around everything it times, drain above auth so a restarting box answers the same
 // whatever the key, meter directly below route because route claims a slot that must come back,
-// and retry below meter (one bill however many attempts) but above transform and upstreamauth
-// (each attempt rewrites the body and the credential).
+// fallback and retry below meter (one bill however many attempts) but above transform and
+// upstreamauth (each attempt rewrites the body and the credential), and fallback above retry (a
+// model's keys are all tried before the next model is).
 var GatewayChain = []string{
 	"recover", "accesslog", "drain",
 	"auth", "quota", "body", "modelaccess", "payloadlog",
-	"route", "meter", "retry", "transform", "upstreamauth",
+	"route", "meter", "fallback", "retry", "transform", "upstreamauth",
 }
 
 // IngressChain is the same machinery with the tenant stages absent — not disabled, absent. An

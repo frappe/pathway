@@ -31,7 +31,7 @@ import (
 // what landed in the store. Every one of these was untestable while nginx owned the bytes.
 
 const (
-	secret      = "gr_sk_demo"
+	secret      = "gr_demo"
 	usageObject = `"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,` +
 		`"prompt_tokens_details":{"cached_tokens":80}}`
 )
@@ -113,9 +113,9 @@ func newServer(t *testing.T, store *memory.Store, cfg config.Config, maxBody int
 	}
 	cfg.AdminToken = "admin-token"
 	services := Services{
-		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
+		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups, repos.Limits),
 		Routing:      routing.New(repos, logs.Process, routing.Options{}),
-		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
+		Metering:     metering.New(repos.Usage, repos.Limits, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),
 		ProviderKeys: repos.ProviderKeys,
@@ -213,8 +213,8 @@ func TestTheBodyReachesTheEngineTransformed(t *testing.T) {
 		t.Fatalf("engine body: %v", err)
 	}
 	options, _ := body["stream_options"].(map[string]any)
-	if options["include_usage"] != true {
-		t.Errorf("include_usage not forced; body = %s", f.seen.body)
+	if options["include_usage"] != true || options["continuous_usage_stats"] != true {
+		t.Errorf("usage not forced on the stream; body = %s", f.seen.body)
 	}
 }
 
@@ -394,6 +394,11 @@ func TestDataPathRefusals(t *testing.T) {
 		// 503 says the model is down, 403 says it was never yours.
 		{"a granted model with no placement", `{"model":"drained"}`, secret, http.StatusServiceUnavailable},
 		{"an unknown key", `{"model":"qwen3-4b"}`, "nope", http.StatusUnauthorized},
+		// A body with no model to read has nowhere to go, and says so: not the grant check's 403.
+		{"a body that names no model", `{"messages":[]}`, secret, http.StatusBadRequest},
+		{"an empty body", ``, secret, http.StatusBadRequest},
+		{"a body that is not JSON", `this is not json`, secret, http.StatusBadRequest},
+		{"a body that is JSON but no object", `["qwen3-4b"]`, secret, http.StatusBadRequest},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{}`))
@@ -546,9 +551,9 @@ func drainingHandler(t *testing.T, store *memory.Store) http.Handler {
 	repos := store.Repositories()
 	transforms, _ := transform.NewChain(transform.Default)
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
-		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
+		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups, repos.Limits),
 		Routing:      routing.New(repos, logs.Process, routing.Options{}),
-		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
+		Metering:     metering.New(repos.Usage, repos.Limits, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),
 		ProviderKeys: repos.ProviderKeys,
@@ -571,9 +576,9 @@ func TestAnUnknownMiddlewareRefusesToStart(t *testing.T) {
 	logs := observability.Discard()
 	repos := store.Repositories()
 	server := New(config.Config{AdminToken: "t"}, Services{
-		Admission: admission.New(repos.Keys, repos.Users, repos.Groups),
+		Admission: admission.New(repos.Keys, repos.Users, repos.Groups, repos.Limits),
 		Routing:   routing.New(repos, logs.Process, routing.Options{}),
-		Metering:  metering.New(repos.Usage, repos.Health, logs.Process),
+		Metering:  metering.New(repos.Usage, repos.Limits, repos.Health, logs.Process),
 		Proxy:     proxy.New(proxy.Options{}, logs.Process),
 	}, logs.Process)
 

@@ -4,6 +4,7 @@ package admission
 
 import (
 	"context"
+	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/repository"
@@ -25,10 +26,30 @@ type Service struct {
 	keys   repository.Keys
 	users  repository.Users
 	groups repository.Groups
+	limits repository.Limits
+	// Now is the clock the limit windows are read off. A field so a test can move it.
+	Now func() time.Time
 }
 
-func New(keys repository.Keys, users repository.Users, groups repository.Groups) *Service {
-	return &Service{keys: keys, users: users, groups: groups}
+func New(keys repository.Keys, users repository.Users, groups repository.Groups, limits repository.Limits) *Service {
+	return &Service{keys: keys, users: users, groups: groups, limits: limits, Now: time.Now}
+}
+
+// Admit counts this request against the holder's rate limits, and refuses with a 429 naming the
+// limit already spent. A holder with none costs no store call.
+func (s *Service) Admit(ctx context.Context, id Identity) error {
+	if len(id.User.Limits) == 0 {
+		return nil
+	}
+	now := s.Now()
+	exceeded, err := s.limits.Admit(ctx, id.Key.User, id.User.Limits, now)
+	if err != nil {
+		return domain.Deny(503, "limit store error")
+	}
+	if len(exceeded) > 0 {
+		return domain.LimitDenial(exceeded, now)
+	}
+	return nil
 }
 
 // Identify resolves an Authorization header to its holder. Two reads plus one per group they are

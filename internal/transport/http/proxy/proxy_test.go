@@ -5,9 +5,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -289,6 +292,59 @@ func TestAnUpstreamThatBreaksOffIsMarked(t *testing.T) {
 	}
 }
 
+// A stream cut inside a frame is billed by the last frame that arrived whole: an engine of ours
+// reports the running count on every chunk.
+func TestACutStreamKeepsItsLastWholeUsageFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}`+"\n\n"+
+			`data: {"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`+"\n\n"+
+			`data: {"usage":{"prompt_tokens":7,"comple`)
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	t.Cleanup(server.Close)
+
+	out := forward(New(Options{}, quiet()), server.URL, false)
+	if out.Cut != domain.CutUpstream || !strings.Contains(out.Usage, `"total_tokens":9`) ||
+		!strings.Contains(out.UsageStart, `"total_tokens":8`) {
+		t.Errorf("cut %q, start %q, last %q", out.Cut, out.UsageStart, out.Usage)
+	}
+}
+
+// A client sees only what it needs of an upstream's headers. A vendor's ids, cookies, rate limits
+// and our own ingress's headers stop at the gateway.
+func TestOnlyTheRelayedHeadersReachTheClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for name, value := range map[string]string{
+			"Content-Type": "application/json", "Cache-Control": "no-store", "Retry-After": "7",
+			"Set-Cookie": "__cf_bm=1", "Alt-Svc": `h3=":443"`, "Via": "1.1 google", "Server": "vendor",
+			"Strict-Transport-Security": "max-age=1", "X-Ratelimit-Remaining-Requests": "9",
+			"X-Baseten-Model-Id": "abc", "Openai-Organization": "org", "X-Request-Id": "theirs",
+			"Request-Id": "theirs", "X-Grove-Engine": "MD-1", "X-Grove-Reason": "no-replica",
+		} {
+			w.Header().Set(name, value)
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(server.Close)
+
+	out, w := forwardOn(New(Options{}, quiet()), server.URL, domain.DialectOpenAI)
+	got := []string{}
+	for name := range w.Header() {
+		if name != "Content-Length" && name != "Date" {
+			got = append(got, name)
+		}
+	}
+	slices.Sort(got)
+	if want := []string{"Cache-Control", "Content-Type", "Retry-After"}; !slices.Equal(got, want) {
+		t.Errorf("headers = %v, want %v", got, want)
+	}
+	if out.Deployment != "MD-1" || out.Reason != "no-replica" {
+		t.Errorf("outcome = %+v; what the gateway reads off an ingress must still be read", out)
+	}
+}
+
 // forwardOn is forward on a surface, keeping what the client received.
 func forwardOn(p *Proxy, target, dialect string) (Outcome, *httptest.ResponseRecorder) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
@@ -313,6 +369,80 @@ func TestAHeaderTimeoutIsA504(t *testing.T) {
 	}
 	if out.Status != 0 {
 		t.Errorf("outcome status = %d; a hop with no answer must stay 0 to count against the upstream", out.Status)
+	}
+	if out.Reason != "upstream timed out" {
+		t.Errorf("reason = %q; the access log must say why a hop gave no status", out.Reason)
+	}
+
+	// A refused connection is the other way a hop gives no status.
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	out, w = forwardOn(New(Options{}, quiet()), dead.URL, domain.DialectOpenAI)
+	if w.Code != http.StatusBadGateway || out.Status != 0 || out.Reason != "upstream unavailable" {
+		t.Errorf("refused: status %d, outcome %d, reason %q", w.Code, out.Status, out.Reason)
+	}
+}
+
+// mutedListener hands out connections whose writes can be switched off: the far end still reads
+// and thinks it answers, and nothing arrives — a peer that vanished without a FIN.
+type mutedListener struct {
+	net.Listener
+	muted *atomic.Bool
+}
+
+func (l mutedListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return mutedConn{Conn: conn, muted: l.muted}, nil
+}
+
+type mutedConn struct {
+	net.Conn
+	muted *atomic.Bool
+}
+
+func (c mutedConn) Write(p []byte) (int, error) {
+	if c.muted.Load() {
+		return len(p), nil
+	}
+	return c.Conn.Write(p)
+}
+
+// An HTTP/2 connection that dies without a FIN would otherwise keep taking requests, each one
+// hanging for the read timeout, until the kernel gave up on it. The ping closes it instead, and the
+// next request dials a fresh one.
+func TestAnUpstreamConnectionThatDiesQuietlyIsPingedOut(t *testing.T) {
+	var muted, sawHTTP2 atomic.Bool
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHTTP2.Store(r.ProtoMajor == 2)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	server.Listener = mutedListener{Listener: server.Listener, muted: &muted}
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	const ping = 50 * time.Millisecond
+	p := New(Options{ReadTimeout: 100 * ping, PingAfter: ping, PingTimeout: ping}, quiet())
+	if out := forward(p, server.URL, false); out.Status != http.StatusOK || !sawHTTP2.Load() {
+		t.Fatalf("first hop: status %d, HTTP/2 %t, want 200 over HTTP/2", out.Status, sawHTTP2.Load())
+	}
+
+	muted.Store(true)
+	start := time.Now()
+	out, w := forwardOn(p, server.URL, domain.DialectOpenAI)
+	if out.Status != 0 || w.Code != http.StatusBadGateway {
+		t.Errorf("hop on the dead connection: outcome %d, client saw %d, want a failed hop and a 502", out.Status, w.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 20*ping {
+		t.Errorf("the dead connection held its request for %s, want it pinged out in about %s", elapsed, 2*ping)
+	}
+
+	muted.Store(false)
+	if out := forward(p, server.URL, false); out.Status != http.StatusOK {
+		t.Errorf("hop after the dead connection was closed returned %d, want 200 on a fresh one", out.Status)
 	}
 }
 

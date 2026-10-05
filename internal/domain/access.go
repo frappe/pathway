@@ -57,6 +57,8 @@ type UserRecord struct {
 	Prepaid bool
 	Budget  int64
 	Spent   int64
+	// Limits caps the holder's requests and tokens per reset window; none = uncapped.
+	Limits []Limit
 
 	// Set only by SynthUser off a pre-group key, where the control plane had already resolved
 	// access down to one model set. Nothing read from Redis sets it.

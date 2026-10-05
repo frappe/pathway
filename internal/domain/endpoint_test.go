@@ -1,54 +1,100 @@
 package domain
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-// A model is just a name in the route table, so nothing but its modality distinguishes an ASR
+// A model is just a name in the route table, so nothing but what it gives distinguishes an ASR
 // container from a chat engine. These are the rules that keep a transcription off a chat model.
 
 func TestServes(t *testing.T) {
+	chat, pooling, asr := []string{"text"}, []string{"embeddings"}, []string{"transcription"}
 	for _, c := range []struct {
-		modality string
-		path     string
-		want     bool
-		why      string
+		outputs []string
+		path    string
+		want    bool
+		why     string
 	}{
-		{"text", "/v1/chat/completions", true, "the ordinary case"},
-		{"text", "/v1/completions", true, "legacy completions is still text"},
-		{"multimodal", "/v1/chat/completions", true, "images ride inside the chat body"},
-		{"embedding", "/v1/embeddings", true, ""},
-		{"audio", "/v1/audio/transcriptions", true, ""},
-		{"audio", "/v1/audio/translations", true, ""},
-		{"multimodal", "/v1/audio/transcriptions", false, "images ride the chat body; audio in is an ASR box"},
-		{"multimodal", "/v1/audio/translations", false, ""},
-		{"multimodal", "/v1/embeddings", false, "nor is it a pooling model"},
+		{chat, "/v1/chat/completions", true, "the ordinary case"},
+		{chat, "/v1/completions", true, "legacy completions is unclaimed"},
+		{[]string{"text", "image"}, "/v1/chat/completions", true, "a model that also draws still talks"},
+		{pooling, "/v1/embeddings", true, ""},
+		{asr, "/v1/audio/transcriptions", true, ""},
+		{asr, "/v1/audio/translations", true, ""},
 
-		{"text", "/v1/audio/transcriptions", false, "a chat engine would 404 this after a round trip"},
-		{"audio", "/v1/chat/completions", false, "an ASR box cannot hold a conversation"},
-		{"embedding", "/v1/chat/completions", false, ""},
-		{"text", "/v1/embeddings", false, ""},
+		{chat, "/v1/audio/transcriptions", false, "a chat engine would 404 this after a round trip"},
+		{chat, "/v1/embeddings", false, "nor is it a pooling model"},
+		{asr, "/v1/chat/completions", false, "an ASR box cannot hold a conversation"},
+		{pooling, "/v1/chat/completions", false, ""},
+		{[]string{"image"}, "/v1/chat/completions", false, "a model that only draws gives no text"},
 
 		// /v1/messages is the same request as /v1/chat/completions in Anthropic's spelling, so it
-		// is claimed by the same modalities. Enforcing one spelling and not the other was an
-		// omission, not a policy.
-		{"text", "/v1/messages", true, ""},
-		{"multimodal", "/v1/messages", true, ""},
-		{"embedding", "/v1/messages", false, "a pooling model cannot hold a conversation either way"},
-		{"audio", "/v1/messages", false, ""},
+		// asks for the same output.
+		{chat, "/v1/messages", true, ""},
+		{pooling, "/v1/messages", false, "a pooling model cannot hold a conversation either way"},
+		{asr, "/v1/messages", false, ""},
 
-		// Generosity is deliberate: this refuses only what another modality has claimed.
-		{"text", "/v1/rerank", true, "engines serve more than the OpenAI core"},
-		{"audio", "/tokenize", true, "an unclaimed path is nobody's to refuse"},
-		{"embedding", "/v1/score", true, ""},
+		// Generosity is deliberate: this refuses only a path some output has claimed.
+		{chat, "/v1/rerank", true, "engines serve more than the OpenAI core"},
+		{asr, "/tokenize", true, "an unclaimed path is nobody's to refuse"},
+		{pooling, "/v1/score", true, ""},
 
-		// Never take traffic away over a value this build does not recognise.
-		{"", "/v1/audio/transcriptions", true, "blank = a control plane predating the field"},
-		{"   ", "/v1/audio/transcriptions", true, "blank after trimming is still blank"},
-		{"video", "/v1/chat/completions", true, "newer control plane, older binary — must not refuse"},
+		// Never take traffic away from a model that declares nothing.
+		{nil, "/v1/audio/transcriptions", true, "nothing declared = a control plane predating the lists"},
+		{[]string{}, "/v1/chat/completions", true, "an empty list is nothing declared"},
 
-		{"audio", "/v1/audio/transcriptions/", true, "a trailing slash is the same endpoint"},
+		{asr, "/v1/audio/transcriptions/", true, "a trailing slash is the same endpoint"},
 	} {
-		if got := Serves(c.modality, c.path); got != c.want {
-			t.Errorf("Serves(%q, %q) = %v, want %v — %s", c.modality, c.path, got, c.want, c.why)
+		if got := Serves(c.outputs, c.path); got != c.want {
+			t.Errorf("Serves(%v, %q) = %v, want %v — %s", c.outputs, c.path, got, c.want, c.why)
+		}
+	}
+}
+
+// What a request carries is read off its content parts, in either surface's spelling, and a model
+// is held to it only when it has said what it takes.
+func TestSentInputsAndTakes(t *testing.T) {
+	for _, c := range []struct {
+		body string
+		want []string
+		why  string
+	}{
+		{`{"messages":[{"content":"hi"}]}`, nil, "a string is text"},
+		{`{"messages":[{"content":[{"type":"text","text":"hi"}]}]}`, nil, "every model takes text"},
+		{`{"messages":[{"content":[{"type":"image_url","image_url":{"url":"u"}}]}]}`, []string{"image"}, "OpenAI's image"},
+		{`{"messages":[{"content":[{"type":"image"},{"type":"image"},{"type":"document"},{"type":"input_audio"}]}]}`,
+			[]string{"image", "file"}, "Anthropic's, each word once; a clip is not looked for yet"},
+		{`{"messages":[{"content":[{"type":"file","file":{"file_data":"data:application/pdf;base64,JVBERi0="}}]}]}`, []string{"file"}, "OpenAI's file"},
+		{`{"messages":[{"content":[{"type":"tool_result","content":[{"type":"image"}]}]}]}`,
+			[]string{"image"}, "a tool result's own parts are sent too"},
+		{`{"messages":[{"content":[{"type":"tool_result","content":[{"type":"document",` +
+			`"source":{"type":"content","content":[{"type":"text"},{"type":"image"}]}}]}]}]}`,
+			[]string{"file", "image"}, "so are the parts an Anthropic document is built of"},
+		{`{"messages":[{"content":[{"type":"text","source":"odd"},{"type":"image_url"}]}]}`,
+			[]string{"image"}, "one odd part does not hide the rest"},
+		{`{"messages":[{"content":[{"type":"tool_use","input":{"type":"image"}}]}]}`, nil, "a tool call's input is not a part"},
+		{`{"input":"hi"}`, nil, "no messages"},
+		{`not json`, nil, "unreadable is the upstream's to refuse"},
+	} {
+		if got := SentInputs([]byte(c.body)); !slices.Equal(got, c.want) {
+			t.Errorf("SentInputs(%s) = %v, want %v — %s", c.body, got, c.want, c.why)
+		}
+	}
+
+	for _, c := range []struct {
+		inputs, sent []string
+		want         bool
+		why          string
+	}{
+		{nil, []string{"image"}, true, "nothing declared = unrestricted"},
+		{[]string{"text"}, nil, true, "a text request goes anywhere"},
+		{[]string{"text", "image"}, []string{"image"}, true, ""},
+		{[]string{"text"}, []string{"image"}, false, "a text-only model sent an image"},
+		{[]string{"text", "image"}, []string{"image", "audio"}, false, "every part must be taken"},
+	} {
+		if got := Takes(c.inputs, c.sent); got != c.want {
+			t.Errorf("Takes(%v, %v) = %v, want %v — %s", c.inputs, c.sent, got, c.want, c.why)
 		}
 	}
 }
@@ -57,10 +103,10 @@ func TestServes(t *testing.T) {
 // rather than a round trip that comes back as theirs. The engine table is generous for the
 // opposite reason — an engine serves more than we have written down.
 func TestServesRoute(t *testing.T) {
-	vendor := Route{Kind: "provider", Modality: "text", Dialect: DialectAnthropic}
-	openaiVendor := Route{Kind: "provider", Modality: "text", Dialect: DialectOpenAI}
-	blankVendor := Route{Kind: "provider", Modality: "text"}
-	engine := Route{Kind: "direct", Modality: "text"}
+	vendor := Route{Kind: "provider", OutputModalities: []string{"text"}, Dialect: DialectAnthropic}
+	openaiVendor := Route{Kind: "provider", OutputModalities: []string{"text"}, Dialect: DialectOpenAI}
+	blankVendor := Route{Kind: "provider", OutputModalities: []string{"text"}}
+	engine := Route{Kind: "direct", OutputModalities: []string{"text"}}
 
 	for _, c := range []struct {
 		name    string
@@ -88,7 +134,7 @@ func TestServesRoute(t *testing.T) {
 		{"engine", engine, DialectOpenAI, "/v1/rerank", true, "engines still serve more than the OpenAI core"},
 		{"engine", engine, DialectOpenAI, "/v1/chat/completions", true, ""},
 		{"engine", engine, DialectAnthropic, "/v1/messages", true, "vLLM answers both dialects natively"},
-		{"engine", engine, DialectOpenAI, "/v1/embeddings", false, "a text engine is still held to its modality"},
+		{"engine", engine, DialectOpenAI, "/v1/embeddings", false, "a text engine is still held to what it gives"},
 	} {
 		if got := ServesRoute(c.route, c.dialect, c.path); got != c.want {
 			t.Errorf("ServesRoute(%s, %s, %q) = %v, want %v — %s", c.name, c.dialect, c.path, got, c.want, c.why)
@@ -98,7 +144,7 @@ func TestServesRoute(t *testing.T) {
 
 // A route pushed before the vendor split has no Kind, and must keep being read as one of ours.
 func TestABlankKindIsStillAnEngine(t *testing.T) {
-	if !ServesRoute(Route{Modality: "text"}, DialectOpenAI, "/v1/rerank") {
+	if !ServesRoute(Route{OutputModalities: []string{"text"}}, DialectOpenAI, "/v1/rerank") {
 		t.Error("a route with no kind was treated as a vendor")
 	}
 }

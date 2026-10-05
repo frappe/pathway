@@ -290,12 +290,12 @@ func TestAModelWithNoReplicaIsNamedAsSuch(t *testing.T) {
 	}
 }
 
-// A model whose modality does not cover the requested surface is refused before an engine is
+// A model that does not give what the requested surface asks for is refused before an engine is
 // chosen — so nothing is dialled, no slot is claimed, and the meter stage below never runs.
 func TestAWrongSurfaceIsRefusedBeforeAnythingIsClaimed(t *testing.T) {
 	store := memory.New()
 	store.Routes["nemotron-asr"] = []domain.Route{{
-		EngineURL: "https://asr", Healthy: true, Deployment: "pod-1", Modality: "audio",
+		EngineURL: "https://asr", Healthy: true, Deployment: "pod-1", OutputModalities: []string{"transcription"},
 	}}
 	svc := serviceOver(store, Options{})
 
@@ -320,7 +320,7 @@ func TestAWrongSurfaceIsRefusedBeforeAnythingIsClaimed(t *testing.T) {
 func TestTheRightSurfaceStillRoutes(t *testing.T) {
 	store := memory.New()
 	store.Routes["nemotron-asr"] = []domain.Route{{
-		EngineURL: "https://asr", Healthy: true, Deployment: "pod-1", Modality: "audio",
+		EngineURL: "https://asr", Healthy: true, Deployment: "pod-1", OutputModalities: []string{"transcription"},
 	}}
 	svc := serviceOver(store, Options{})
 
@@ -336,15 +336,16 @@ func TestTheRightSurfaceStillRoutes(t *testing.T) {
 	}
 }
 
-// A route pushed before modality existed carries none, and must keep serving what it always did.
-func TestARouteWithoutAModalityIsUnrestricted(t *testing.T) {
+// A route pushed before the control plane said what a model gives carries nothing, and must keep
+// serving what it always did.
+func TestARouteThatDeclaresNothingIsUnrestricted(t *testing.T) {
 	svc := serviceOver(twoEngines(), Options{})
 
 	if _, err := svc.Pick(context.Background(), Request{
 		Model: "qwen3-4b", MeterID: "meter", KeyPrefix: "abc123",
 		Path: "/v1/audio/transcriptions",
 	}); err != nil {
-		t.Fatalf("a blank modality refused a request: %v", err)
+		t.Fatalf("a route that declares nothing refused a request: %v", err)
 	}
 }
 

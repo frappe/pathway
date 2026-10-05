@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"io"
+
+	"github.com/phot0n/pathway/internal/domain"
 )
 
 // carryLimit bounds what is held across reads — a partial line of a stream, or a body that is one
@@ -77,8 +79,13 @@ func (t *usageTee) scan(chunk []byte) {
 	t.carry = append([]byte(nil), data...)
 }
 
+// flush keeps what was left without a newline: a whole document, or a stream's last line. A
+// stream cut inside a line leaves half a frame, kept only when its usage is whole — else it would
+// take the place of the last frame whose usage was.
 func (t *usageTee) flush() {
-	t.keep(t.carry)
+	if _, whole := domain.ParseUsage(t.carry); whole || !t.stream {
+		t.keep(t.carry)
+	}
 	t.carry = nil
 }
 

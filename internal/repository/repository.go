@@ -78,6 +78,17 @@ type ProviderKeys interface {
 	Stats(ctx context.Context, ids []string) (map[string]domain.KeyStats, error)
 }
 
+// Limits counts what a holder has used inside each limit's current window. now picks the window:
+// the caller's clock decides it, so a test can move it.
+type Limits interface {
+	// Admit checks every limit and, only when all have room, counts the request on the request
+	// limits — one atomic step, so two requests cannot both take the last slot. → the limits
+	// already spent; none when admitted.
+	Admit(ctx context.Context, user string, limits []domain.Limit, now time.Time) ([]domain.Limit, error)
+	// Debit adds tokens to the current window of each of these limits.
+	Debit(ctx context.Context, user string, limits []domain.Limit, tokens int64, now time.Time) error
+}
+
 // Usage accrues token counters per API key prefix. The field names are the service's business —
 // this only adds numbers to them.
 type Usage interface {
@@ -119,6 +130,7 @@ type Store struct {
 	InFlight InFlight
 	Health   Health
 	Usage    Usage
+	Limits   Limits
 	State    State
 	// ProviderKeys is unused on an ingress, which dials no vendor.
 	ProviderKeys ProviderKeys
@@ -145,7 +157,8 @@ type UserUpsert struct {
 	LogPayloads bool
 	Geography   string
 	Prepaid     bool
-	Budget      int64 // nano-USD
+	Budget      int64  // nano-USD
+	Limits      string // comma list of metric:window:value
 }
 
 type GroupUpsert struct {

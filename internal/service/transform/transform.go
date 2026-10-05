@@ -67,7 +67,7 @@ func Registered() []string {
 
 // Default is what runs when nothing is configured. Order matters only in that a later transform
 // sees an earlier one's output.
-var Default = []string{"modelmap", "streamusage", "cachesalt", "servicetier", "maxtokens"}
+var Default = []string{"modelmap", "streamusage", "cachesalt", "servicetier", "vendorfields"}
 
 // Chain is an ordered, resolved set of transforms, replaceable in place under its own lock — the
 // middleware holds a pointer, and rebuilding the whole chain to change which rewrites run would be

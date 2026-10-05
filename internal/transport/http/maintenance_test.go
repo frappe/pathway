@@ -41,9 +41,9 @@ func newMaintained(t *testing.T, store *memory.Store) *maintained {
 	transforms, _ := transform.NewChain(transform.Default)
 	on := new(atomic.Bool)
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
-		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups),
+		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups, repos.Limits),
 		Routing:      routing.New(repos, logs.Process, routing.Options{}),
-		Metering:     metering.New(repos.Usage, repos.Health, logs.Process),
+		Metering:     metering.New(repos.Usage, repos.Limits, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),
 		Provisioning: provisioning.New(repos, logs.Process),
 		Transform:    transforms,
@@ -236,7 +236,7 @@ func TestAHangupLeavesTheCount(t *testing.T) {
 // A realtime session is in flight until it closes, which is when its usage is metered.
 func TestARealtimeSessionIsInFlightUntilItCloses(t *testing.T) {
 	engine := echoEngine(t)
-	m := newMaintained(t, realtimeStore(t, engine.URL, "audio"))
+	m := newMaintained(t, realtimeStore(t, engine.URL, "transcription"))
 
 	resp, _, conn := upgrade(t, m.front, "/v1/realtime?model=nemotron-asr")
 	if resp.StatusCode != http.StatusSwitchingProtocols {

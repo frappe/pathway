@@ -28,11 +28,14 @@ type Request struct {
 	Session   string
 	MeterID   string
 	KeyPrefix string
-	// Path is the surface being asked for, checked against the model's modality. An ASR model and
+	// Path is the surface being asked for, checked against what the model gives. An ASR model and
 	// a chat model are indistinguishable by name alone.
 	Path string
 	// Dialect is the surface the request arrived on; a vendor serves only its own.
 	Dialect string
+	// Inputs is what the request carries besides text (domain.SentInputs), checked against what
+	// the model takes. Set only for a fallback: the model asked for is the caller's to get wrong.
+	Inputs []string
 	// RequestID was minted at the edge; the claim and the decision carry it. Blank is minted here
 	// rather than claimed as "" — a blank member would silently undercount the engine.
 	RequestID string
@@ -137,6 +140,14 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	table = serving(table, req.Dialect, req.Path)
 	if len(table) == 0 {
 		return Decision{}, domain.Deny(404, req.Model+" does not serve "+req.Path)
+	}
+	// A row that declares its inputs and lacks one the request carries would refuse it after a
+	// dial. Rows of one model are stamped alike, so this empties the table or leaves it whole.
+	table = slices.DeleteFunc(table, func(candidate domain.Route) bool {
+		return !domain.Takes(candidate.InputModalities, req.Inputs)
+	})
+	if len(table) == 0 {
+		return Decision{}, domain.Deny(404, req.Model+" does not take "+strings.Join(req.Inputs, ", ")+" input")
 	}
 
 	var stickyURL string

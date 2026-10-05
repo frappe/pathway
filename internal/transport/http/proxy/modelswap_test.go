@@ -29,6 +29,7 @@ func TestTheModelFieldIsSwappedBackToTheClientsID(t *testing.T) {
 	for name, input := range map[string]string{
 		"compact":     `{"id":"msg_1","model":"` + vendorID + `","stop_reason":null}`,
 		"spaced":      `{"id":"msg_1","model": "` + vendorID + `","stop_reason":null}`,
+		"wide":        `{"id":"msg_1","model":   "` + vendorID + `","stop_reason":null}`,
 		"every frame": `data: {"model":"` + vendorID + `"}` + "\n\n" + `data: {"model":"` + vendorID + `"}` + "\n\n",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -65,5 +66,34 @@ func TestBytesAroundTheFieldAreUntouched(t *testing.T) {
 	want := strings.ReplaceAll(input, vendorID, groveID)
 	if got := swapped(t, input, nil); got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A vendor answers an alias under the name behind it (asked for deepseek-v4-flash, DeepSeek says
+// deepseek-flash). Whatever it wrote, the client reads the id it knows the model by.
+func TestAnotherSpellingFromTheVendorIsSwappedToo(t *testing.T) {
+	for name, wrap := range map[string]func(io.Reader) io.Reader{"whole": nil, "byte by byte": iotest.OneByteReader} {
+		t.Run(name, func(t *testing.T) {
+			got := swapped(t, `{"id":"1","model":"claude-sonnet-latest","x":"model"}`, wrap)
+			if got != `{"id":"1","model":"`+groveID+`","x":"model"}` {
+				t.Errorf("got %q", got)
+			}
+		})
+	}
+}
+
+// Only a string value that closes is a model id: anything else passes through as it came.
+func TestAValueThatIsNotAModelIDIsLeftAlone(t *testing.T) {
+	for name, input := range map[string]string{
+		"null":         `{"model":null,"x":1}`,
+		"never closed": `{"model":"claude-son`,
+		"too long":     `{"model":"` + strings.Repeat("a", maxModelValue+1) + `","x":1}`,
+		"other field":  `{"fine_tuned_model":"ft:claude","x":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := swapped(t, input, iotest.OneByteReader); got != input {
+				t.Errorf("got %q, want it untouched", got)
+			}
+		})
 	}
 }

@@ -49,7 +49,7 @@ func echoEngine(t *testing.T) *httptest.Server {
 	return engine
 }
 
-func realtimeStore(t *testing.T, engineURL, modality string) *memory.Store {
+func realtimeStore(t *testing.T, engineURL, output string) *memory.Store {
 	t.Helper()
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
@@ -59,7 +59,7 @@ func realtimeStore(t *testing.T, engineURL, modality string) *memory.Store {
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("nemotron-asr")}
 	store.Routes["nemotron-asr"] = []domain.Route{{
 		EngineURL: engineURL, Healthy: true, Deployment: "pod-1",
-		Kind: "direct", Modality: modality,
+		Kind: "direct", OutputModalities: []string{output},
 	}}
 	return store
 }
@@ -94,7 +94,7 @@ func upgrade(t *testing.T, front *httptest.Server, target string) (*http.Respons
 // the connection carries bytes both ways afterwards.
 func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 	engine := echoEngine(t)
-	store := realtimeStore(t, engine.URL, "audio")
+	store := realtimeStore(t, engine.URL, "transcription")
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
@@ -142,22 +142,22 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 // No model in the query is the same refusal a body with no model gets. It must not reach an engine.
 func TestARealtimeUpgradeWithNoModelIsRefused(t *testing.T) {
 	engine := echoEngine(t)
-	store := realtimeStore(t, engine.URL, "audio")
+	store := realtimeStore(t, engine.URL, "transcription")
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
 	resp, _, conn := upgrade(t, front, "/v1/realtime")
 	defer conn.Close()
 
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
 
 // The grant check still applies — an upgrade is not a way around it.
 func TestARealtimeUpgradeStillNeedsTheGrant(t *testing.T) {
 	engine := echoEngine(t)
-	store := realtimeStore(t, engine.URL, "audio")
+	store := realtimeStore(t, engine.URL, "transcription")
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("something-else")}
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
@@ -188,7 +188,7 @@ func TestARealtimeUpgradeCarriesTheUpstreamsOwnModelID(t *testing.T) {
 	}))
 	t.Cleanup(engine.Close)
 
-	store := realtimeStore(t, engine.URL, "audio")
+	store := realtimeStore(t, engine.URL, "transcription")
 	route := store.Routes["nemotron-asr"][0]
 	route.UpstreamModel = "nemotron-3.5-asr-streaming-0.6b"
 	store.Routes["nemotron-asr"] = []domain.Route{route}
@@ -229,7 +229,7 @@ func TestARealtimeUpgradeWithNoUpstreamModelIsUntouched(t *testing.T) {
 	}))
 	t.Cleanup(engine.Close)
 
-	front := httptest.NewServer(buildHandler(t, realtimeStore(t, engine.URL, "audio"), config.Config{}, 0))
+	front := httptest.NewServer(buildHandler(t, realtimeStore(t, engine.URL, "transcription"), config.Config{}, 0))
 	t.Cleanup(front.Close)
 
 	_, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")

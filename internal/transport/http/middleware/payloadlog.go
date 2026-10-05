@@ -49,9 +49,10 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 					slog.String("key", or(state.Identity.Prefix(), "-")),
 					slog.String("user", state.Identity.Key.User),
 					slog.String("model", or(state.Model, "-")),
+					slog.String("fallback", or(state.Fallback, "-")),
 					slog.String("path", r.URL.Path),
 					slog.Int("status", recorder.status),
-					slog.String("prompt", string(redactMedia(prompt))),
+					slog.String("prompt", string(scrubPayload(prompt))),
 				}
 				output, encoding := recorder.output()
 				attrs = append(attrs, slog.String("output", output))
@@ -98,8 +99,8 @@ func (p *payloadRecorder) Write(b []byte) (int, error) {
 	return p.ResponseWriter.Write(b)
 }
 
-// output is what the line records: text as received with big media replaced; a file as base64
-// when it fits mediaKeep, a placeholder when it does not.
+// output is what the line records: text as received with big media and secrets replaced; a file
+// as base64 when it fits mediaKeep, a placeholder when it does not — never scanned for secrets.
 func (p *payloadRecorder) output() (text, encoding string) {
 	contentType := p.Header().Get("Content-Type")
 	switch {
@@ -109,9 +110,9 @@ func (p *payloadRecorder) output() (text, encoding string) {
 		mediaType, _, _ := strings.Cut(contentType, ";")
 		return fmt.Sprintf("[media %s %d bytes]", strings.TrimSpace(mediaType), p.total), ""
 	case strings.HasPrefix(contentType, "text/event-stream"):
-		return string(redactStreamMedia(p.body)), ""
+		return string(scrubStream(p.body)), ""
 	}
-	return string(redactMedia(p.body)), ""
+	return string(scrubPayload(p.body)), ""
 }
 
 // Unwrap lets net/http find the underlying writer for Flush — without it a stream would buffer.

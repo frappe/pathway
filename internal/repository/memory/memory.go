@@ -31,7 +31,10 @@ type Store struct {
 	// KeyStats is what each vendor credential answered, the memory twin of pk:<id>.
 	KeyStats map[string]domain.KeyStats
 	Usage    map[string]map[string]int64
-	Hashes   map[string]string // grove:state_hash — section/bucket → hash
+	// Limits is every limit counter, "<user>:<metric>:<window>:<bucket>" → count: the memory twin
+	// of lim:….
+	Limits map[string]int64
+	Hashes map[string]string // grove:state_hash — section/bucket → hash
 
 	// Drained is every counter set aside, drain id → prefix → counters; Unacked the "<id>:<prefix>"
 	// pairs not yet acknowledged; Retained how long each acknowledged pair is kept. Adjusted is
@@ -44,7 +47,7 @@ type Store struct {
 	Adjusted map[string]bool
 
 	// Fail names the repositories that should error, by interface name ("routes", "inflight",
-	// "health", "sessions", "keys", "users", "groups", "usage", "state", "providerkeys").
+	// "health", "sessions", "keys", "users", "groups", "usage", "limits", "state", "providerkeys").
 	Fail map[string]bool
 }
 
@@ -56,7 +59,7 @@ func New() *Store {
 		Groups: map[string]domain.GroupRecord{}, Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
-		Hashes: map[string]string{}, Fail: map[string]bool{},
+		Limits: map[string]int64{}, Hashes: map[string]string{}, Fail: map[string]bool{},
 		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{}, Accrued: map[string]bool{},
 		Retained: map[string]time.Duration{}, Adjusted: map[string]bool{},
 	}
@@ -67,7 +70,7 @@ func (s *Store) Repositories() repository.Store {
 	return repository.Store{
 		Keys: keys{s}, Users: users{s}, Groups: groups{s}, Routes: routes{s},
 		Sessions: sessions{s}, InFlight: inFlight{s}, Health: health{s},
-		Usage: usage{s}, State: state{s}, ProviderKeys: providerKeys{s},
+		Usage: usage{s}, Limits: limits{s}, State: state{s}, ProviderKeys: providerKeys{s},
 	}
 }
 
@@ -80,11 +83,13 @@ func (s *Store) failed(name string) error {
 
 // putUser matches the real store's HSET-merge: a push writes its fields and leaves Spent alone.
 func (s *Store) putUser(rec repository.UserUpsert) {
+	limits, _ := domain.ParseLimits(rec.Limits) // the push handler already refused one that does not read
 	s.Users[rec.Name] = domain.UserRecord{
 		Email: rec.Email, Groups: domain.ModelSet(rec.Groups),
 		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
 		Prepaid: rec.Prepaid, Budget: rec.Budget, Spent: s.Users[rec.Name].Spent,
+		Limits: limits,
 	}
 }
 
@@ -381,6 +386,49 @@ func (p providerKeys) Stats(_ context.Context, ids []string) (map[string]domain.
 		stats[id] = p.s.KeyStats[id]
 	}
 	return stats, nil
+}
+
+type limits struct{ s *Store }
+
+func limitKey(user string, limit domain.Limit, now time.Time) string {
+	label, _, _ := limit.Bucket(now)
+	return user + ":" + limit.Metric + ":" + limit.Window + ":" + label
+}
+
+// Admit matches the real script: every limit is checked before any is counted, under one lock.
+func (l limits) Admit(_ context.Context, user string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
+	l.s.mu.Lock()
+	defer l.s.mu.Unlock()
+	if err := l.s.failed("limits"); err != nil {
+		return nil, err
+	}
+	var exceeded []domain.Limit
+	for _, limit := range lims {
+		if l.s.Limits[limitKey(user, limit, now)] >= limit.Value {
+			exceeded = append(exceeded, limit)
+		}
+	}
+	if len(exceeded) > 0 {
+		return exceeded, nil
+	}
+	for _, limit := range lims {
+		if limit.Metric == domain.LimitRequests {
+			l.s.Limits[limitKey(user, limit, now)]++
+		}
+	}
+	return nil, nil
+}
+
+func (l limits) Debit(_ context.Context, user string, lims []domain.Limit, tokens int64, now time.Time) error {
+	l.s.mu.Lock()
+	defer l.s.mu.Unlock()
+	if err := l.s.failed("limits"); err != nil {
+		return err
+	}
+	for _, limit := range lims {
+		l.s.Limits[limitKey(user, limit, now)] += tokens
+	}
+	return nil
 }
 
 type usage struct{ s *Store }

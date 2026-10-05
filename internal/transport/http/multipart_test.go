@@ -147,16 +147,16 @@ func TestAnUploadPastTheSpillThresholdStillArrivesIntact(t *testing.T) {
 	}
 }
 
-// A form with no model part is still unroutable, and refused for the same reason a JSON body with no
-// model is: the grant check has nothing to match.
+// A form with no model part is unroutable, and refused the way a JSON body with no model is: a 400
+// that says so, not the grant check's 403 for a model called "".
 func TestAMultipartUploadWithNoModelIsRefused(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{"text":"hello"}`))
 	body, contentType := multipartForm(t, "@file", "RIFFfake")
 
 	resp := f.postForm("/v1/audio/transcriptions", body, contentType)
 
-	if resp.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", resp.Code)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "names no model") {
+		t.Errorf("status = %d, body = %s, want 400 naming the fault", resp.Code, resp.Body)
 	}
 	if f.seen.path != "" {
 		t.Errorf("engine was reached at %q, want no upstream call", f.seen.path)

@@ -36,8 +36,9 @@ type Outcome struct {
 	// Deployment is the placement an ingress chose, off its response header. On a direct route the
 	// gateway already knows; this is the only way usage reaches a placement it never picked.
 	Deployment string
-	// Reason is an ingress's X-Grove-Reason. A no-replica 503 means the ingress answered correctly
-	// and must not count against it.
+	// Reason is why the hop gave no usable answer: an ingress's X-Grove-Reason — a no-replica 503
+	// means the ingress answered correctly and must not count against it — or, on a hop that
+	// produced no status, what the gateway told the client instead.
 	Reason string
 	// Cut names who ended a response that did not finish: one of domain's Cut values. Blank on a
 	// response that finished, and on a hop that never produced one.
@@ -61,6 +62,11 @@ type Options struct {
 	// so it is a fleet default rather than the ceiling nginx's per-location directive imposed.
 	// It does not reach an external hop, which always verifies.
 	VerifyUpstream bool
+	// PingAfter is how long an HTTP/2 upstream connection may deliver nothing before it is pinged,
+	// PingTimeout how long the answer may take before the connection is closed. A connection that
+	// died without a FIN is never idle under traffic, and would keep taking requests without it.
+	PingAfter   time.Duration
+	PingTimeout time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -69,6 +75,12 @@ func (o Options) withDefaults() Options {
 	}
 	if o.DialTimeout <= 0 {
 		o.DialTimeout = 10 * time.Second
+	}
+	if o.PingAfter <= 0 {
+		o.PingAfter = 15 * time.Second
+	}
+	if o.PingTimeout <= 0 {
+		o.PingTimeout = 90 * time.Second
 	}
 	return o
 }
@@ -154,18 +166,14 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			outcome.Status = resp.StatusCode
 			outcome.Deployment = resp.Header.Get("X-Grove-Engine")
 			outcome.Reason = resp.Header.Get("X-Grove-Reason")
-			// A vendor's id is kept for the access line; an engine or ingress only echoes ours. Either
-			// is taken off the response: ReverseProxy ADDS upstream headers onto the ones the edge
-			// set, so a vendor's x-request-id would give the client two values and its request-id
-			// would replace ours under the Anthropic SDK.
+			// A vendor's id is kept for the access line; an engine or ingress only echoes ours.
 			if external {
 				outcome.UpstreamRID = resp.Header.Get("X-Request-Id")
 				if outcome.UpstreamRID == "" {
 					outcome.UpstreamRID = resp.Header.Get("Request-Id")
 				}
 			}
-			resp.Header.Del("X-Request-Id")
-			resp.Header.Del("Request-Id")
+			keepRelayed(resp.Header)
 			// A 101 hands the connection to ReverseProxy, which needs the body to stay an
 			// io.ReadWriteCloser to write back to the engine. The tee is read-only and would fail
 			// the handshake — and a hijacked stream has no usage frame to scrape anyway.
@@ -208,6 +216,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			if errors.As(err, &timeout) && timeout.Timeout() {
 				status, message = http.StatusGatewayTimeout, "upstream timed out"
 			}
+			outcome.Reason = message
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			if respond.Dialect(r.Context()) == domain.DialectAnthropic {
@@ -219,6 +228,26 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	}
 
 	reverse.ServeHTTP(w, r.WithContext(hop))
+}
+
+// relayed is what a client is shown of an upstream's response headers: what it needs to read the
+// body, to back off, and to finish an upgrade. Everything else stops here — a vendor's ids, its
+// cookies, its `alt-svc`, the rate limits of the account we call it with, and our own ingress's
+// X-Grove-* — and so do its request ids: ReverseProxy ADDS upstream headers onto the ones the edge
+// set, so a vendor's would stand beside ours or replace it.
+var relayed = map[string]bool{
+	"Content-Type": true, "Content-Length": true, "Content-Encoding": true, "Content-Disposition": true,
+	"Cache-Control": true, "Retry-After": true,
+	"Upgrade": true, "Connection": true,
+	"Sec-Websocket-Accept": true, "Sec-Websocket-Protocol": true, "Sec-Websocket-Extensions": true,
+}
+
+func keepRelayed(header http.Header) {
+	for name := range header {
+		if !relayed[name] {
+			delete(header, name)
+		}
+	}
 }
 
 // cutBy names who ended a response that did not finish, blank for one that did. In this order: a
@@ -284,6 +313,7 @@ func (p *Proxy) transportFor(base *url.URL, external bool) http.RoundTripper {
 		// Streaming responses must not be buffered on the way in either.
 		DisableCompression: true,
 		ForceAttemptHTTP2:  true,
+		HTTP2:              &http.HTTP2Config{SendPingTimeout: opts.PingAfter, PingTimeout: opts.PingTimeout},
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: !verify, //nolint:gosec // see Options.VerifyUpstream
 			MinVersion:         tls.VersionTLS12,

@@ -89,31 +89,49 @@ func TestAnUnknownTransformIsAStartupError(t *testing.T) {
 	}
 }
 
-// Without this a streaming request reports no usage at all and bills as zero.
+// Without this a streaming request reports no usage at all and bills as zero. An upstream known to
+// take it is also asked for the count on every chunk, which is what bills a stream that was cut;
+// one that refuses the field (OpenAI), ignores it (DeepSeek) or is not known is not.
 func TestStreamUsageIsForcedOnAStreamingCompletion(t *testing.T) {
-	body := decode(t, `{"model":"m","stream":true}`)
-	changed, err := chain(t, "streamusage").Apply(Context{Path: "/v1/chat/completions"}, body)
-	if err != nil || !changed {
-		t.Fatalf("changed=%v err=%v", changed, err)
+	const both, final = `{"continuous_usage_stats":true,"include_usage":true}`, `{"include_usage":true}`
+	for name, tc := range map[string]struct{ vendor, raw, want string }{
+		"engine":                 {"", `{"model":"m","stream":true}`, both},
+		"engine, caller said no": {"", `{"stream":true,"stream_options":{"include_usage":false,"continuous_usage_stats":false}}`, both},
+		"baseten":                {"baseten", `{"model":"m","stream":true}`, both},
+		"openai":                 {"openai", `{"model":"m","stream":true}`, final},
+		"deepseek":               {"deepseek", `{"model":"m","stream":true}`, final},
+		"not known":              {"mistral", `{"model":"m","stream":true}`, final},
+	} {
+		body := decode(t, tc.raw)
+		ctx := Context{Path: "/v1/chat/completions", Provider: tc.vendor != "", Vendor: tc.vendor}
+		changed, err := chain(t, "streamusage").Apply(ctx, body)
+		if err != nil || !changed {
+			t.Fatalf("%s: changed=%v err=%v", name, changed, err)
+		}
+		if got := string(body["stream_options"]); got != tc.want {
+			t.Errorf("%s: stream_options = %s, want %s", name, got, tc.want)
+		}
 	}
-	if got := string(body["stream_options"]); got != `{"include_usage":true}` {
-		t.Errorf("stream_options = %s", got)
+
+	set := decode(t, `{"stream":true,"stream_options":{"include_usage":true,"continuous_usage_stats":true}}`)
+	if changed, _ := chain(t, "streamusage").Apply(Context{Path: "/v1/chat/completions"}, set); changed {
+		t.Error("a body that already asks for both was rewritten")
 	}
 }
 
 // A caller may have set other stream options. Replacing the object wholesale would be a silent
 // rewrite of their request.
 func TestStreamUsageKeepsTheCallersOtherOptions(t *testing.T) {
-	body := decode(t, `{"stream":true,"stream_options":{"continuous_usage_stats":true}}`)
-	if _, err := chain(t, "streamusage").Apply(Context{Path: "/v1/chat/completions"}, body); err != nil {
+	body := decode(t, `{"stream":true,"stream_options":{"include_obfuscation":false}}`)
+	if _, err := chain(t, "streamusage").Apply(Context{Path: "/v1/chat/completions", Provider: true}, body); err != nil {
 		t.Fatal(err)
 	}
 	var options map[string]any
 	if err := json.Unmarshal(body["stream_options"], &options); err != nil {
 		t.Fatal(err)
 	}
-	if options["continuous_usage_stats"] != true {
-		t.Error("the caller's own stream option was dropped")
+	if options["include_obfuscation"] != false || len(options) != 2 {
+		t.Errorf("the caller's own stream option was not kept as sent: %v", options)
 	}
 	if options["include_usage"] != true {
 		t.Error("include_usage was not set")
