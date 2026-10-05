@@ -41,7 +41,7 @@ func newMaintained(t *testing.T, store *memory.Store) *maintained {
 	transforms, _ := transform.NewChain(transform.Default)
 	on := new(atomic.Bool)
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
-		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups, repos.Limits),
+		Admission:    admission.New(repos.Keys, repos.Groups, repos.Limits),
 		Routing:      routing.New(repos, logs.Process, routing.Options{}),
 		Metering:     metering.New(repos.Usage, repos.Limits, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),

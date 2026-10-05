@@ -33,7 +33,7 @@ func accessFixture(t *testing.T, f *fixture) *bytes.Buffer {
 		t.Fatalf("transform chain: %v", err)
 	}
 	server := New(config.Config{AdminToken: "admin-token"}, Services{
-		Admission:    admission.New(repos.Keys, repos.Users, repos.Groups, repos.Limits),
+		Admission:    admission.New(repos.Keys, repos.Groups, repos.Limits),
 		Routing:      routing.New(repos, logs.Process, routing.Options{}),
 		Metering:     metering.New(repos.Usage, repos.Limits, repos.Health, logs.Process),
 		Catalog:      catalog.New(repos.Routes),

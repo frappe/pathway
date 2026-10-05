@@ -96,9 +96,32 @@ func TestPickClaimsASlotAndReleaseGivesItBack(t *testing.T) {
 	if got := len(store.InFlight[decision.EngineURL()]); got != 1 {
 		t.Fatalf("in-flight = %d, want 1", got)
 	}
-	svc.Release(context.Background(), decision.EngineURL(), decision.RequestID)
+	svc.Release(context.Background(), decision.Route, decision.RequestID)
 	if got := len(store.InFlight[decision.EngineURL()]); got != 0 {
 		t.Errorf("in-flight = %d after release, want 0 — the engine stays out of rotation", got)
+	}
+}
+
+// A vendor row has no capacity of ours and nothing to balance against, so it costs no in-flight
+// call: with that store failing, the pick and the release never reach it.
+func TestAVendorRowHoldsNoSlot(t *testing.T) {
+	store := memory.New()
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect = "provider", domain.DialectOpenAI
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	store.Fail["inflight"] = true
+	logs := &strings.Builder{}
+	svc := New(store.Repositories(), slog.New(slog.NewTextHandler(logs, nil)), Options{})
+
+	decision, err := svc.Pick(context.Background(), Request{
+		Model: "qwen3-4b", RequestID: "rid", Dialect: domain.DialectOpenAI, Path: "/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("Pick: %v", err)
+	}
+	svc.Release(context.Background(), decision.Route, decision.RequestID)
+	if strings.Contains(logs.String(), "in-flight") {
+		t.Errorf("a vendor row reached the in-flight store:\n%s", logs)
 	}
 }
 

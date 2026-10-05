@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -17,19 +18,89 @@ import (
 
 type keys struct{ rdb *redis.Client }
 
-func (k keys) Get(ctx context.Context, meterID string) (domain.KeyRecord, bool, error) {
-	h, err := k.rdb.HGetAll(ctx, "key:"+meterID).Result()
+// resolveScript follows a credential to its user and that user's groups in one call: each read
+// needs the one before it, so a pipeline could not join them. It only fetches. Which groups to read
+// comes from the user record's list, or from the key's own when it has no user record; every
+// decision over what comes back is made in Go. Replies {key, user, {name, group, ...}}, each
+// record as HGETALL answers it and empty when absent.
+//
+// It reads user: and model_group: keys it is not handed, so the store must be a single Redis.
+//
+// KEYS[1] key:<meter id>
+var resolveScript = redis.NewScript(`
+local key = redis.call('HGETALL', KEYS[1])
+local user, names = {}, nil
+for i = 1, #key, 2 do
+  if key[i] == 'user' and key[i + 1] ~= '' then
+    user = redis.call('HGETALL', 'user:' .. key[i + 1])
+  elseif key[i] == 'group' then
+    names = key[i + 1]
+  end
+end
+if #user > 0 then
+  names = nil
+  for i = 1, #user, 2 do
+    if user[i] == 'group' then
+      names = user[i + 1]
+    end
+  end
+end
+local groups = {}
+for name in string.gmatch(names or '', '[^,]+') do
+  name = string.match(name, '^%s*(.-)%s*$')
+  if name ~= '' then
+    groups[#groups + 1] = name
+    groups[#groups + 1] = redis.call('HGETALL', 'model_group:' .. name)
+  end
+end
+return {key, user, groups}
+`)
+
+func (k keys) Resolve(ctx context.Context, meterID string) (repository.Holder, bool, error) {
+	res, err := resolveScript.Run(ctx, k.rdb, []string{"key:" + meterID}).Slice()
 	if err != nil {
-		return domain.KeyRecord{}, false, err
+		return repository.Holder{}, false, err
 	}
-	if len(h) == 0 {
-		return domain.KeyRecord{}, false, nil
+	if len(res) != 3 {
+		return repository.Holder{}, false, fmt.Errorf("resolve answered %d records, want 3", len(res))
 	}
+	key, user := hashOf(res[0]), hashOf(res[1])
+	if len(key) == 0 {
+		return repository.Holder{}, false, nil
+	}
+	holder := repository.Holder{Key: keyRecord(key), Groups: map[string]domain.GroupRecord{}}
+	if len(user) > 0 {
+		if holder.User, err = userRecord(user); err != nil {
+			return repository.Holder{}, false, err
+		}
+		holder.HasUser = true
+	}
+	groups, _ := res[2].([]any)
+	for i := 0; i+1 < len(groups); i += 2 {
+		name, _ := groups[i].(string)
+		holder.Groups[name] = domain.GroupRecord{Models: domain.ModelSet(hashOf(groups[i+1])["models"])}
+	}
+	return holder, true, nil
+}
+
+// hashOf reads a script's field, value, ... reply as the map HGETALL would have answered.
+func hashOf(reply any) map[string]string {
+	flat, _ := reply.([]any)
+	h := make(map[string]string, len(flat)/2)
+	for i := 0; i+1 < len(flat); i += 2 {
+		field, _ := flat[i].(string)
+		h[field], _ = flat[i+1].(string)
+	}
+	return h
+}
+
+func keyRecord(h map[string]string) domain.KeyRecord {
 	group, hasGroup := h["group"] // present-but-blank = ungrouped; absent = a pre-group record
 	rec := domain.KeyRecord{
-		Status:    h["status"],
-		User:      h["user"],
-		KeyPrefix: h["prefix"],
+		Status:         h["status"],
+		User:           h["user"],
+		KeyPrefix:      h["prefix"],
+		CanReadBalance: h["can_read_balance"] == "1",
 		Legacy: domain.LegacyKey{
 			HasGroup: hasGroup,
 			Group:    strings.TrimSpace(group),
@@ -43,7 +114,7 @@ func (k keys) Get(ctx context.Context, meterID string) (domain.KeyRecord, bool, 
 	if rec.Status == "rate_limited" {
 		rec.Status, rec.Legacy.Limited = "active", true
 	}
-	return rec, true, nil
+	return rec
 }
 
 func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error {
@@ -57,9 +128,10 @@ func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error 
 		// stale legacy ones — inert today, a torn read regardless, and free to fix.
 		_, err := k.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
 			p.HSet(ctx, redisKey, map[string]any{
-				"status": rec.Status,
-				"user":   rec.User,
-				"prefix": rec.Prefix,
+				"status":           rec.Status,
+				"user":             rec.User,
+				"prefix":           rec.Prefix,
+				"can_read_balance": flag(rec.CanReadBalance),
 			})
 			// A pre-group control plane flattened access onto the key; that set is stale the moment a
 			// group is pushed. `group`/`allow`/`deny` stay: this cannot tell a current push from an
@@ -88,11 +160,16 @@ func (u users) Get(ctx context.Context, name string) (domain.UserRecord, bool, e
 	if len(h) == 0 {
 		return domain.UserRecord{}, false, nil
 	}
+	rec, err := userRecord(h)
+	return rec, err == nil, err
+}
+
+func userRecord(h map[string]string) (domain.UserRecord, error) {
 	// A push is refused unless every limit reads, so one that does not was written by a newer
 	// binary. Serving that holder uncapped would hide it.
 	limits, err := domain.ParseLimits(h["limits"])
 	if err != nil {
-		return domain.UserRecord{}, false, err
+		return domain.UserRecord{}, err
 	}
 	return domain.UserRecord{
 		Limits:      limits,
@@ -106,7 +183,7 @@ func (u users) Get(ctx context.Context, name string) (domain.UserRecord, bool, e
 		Prepaid:     strings.TrimSpace(h["prepaid"]) == "1",
 		Budget:      int64Field(h, "budget"),
 		Spent:       int64Field(h, "spent"),
-	}, true, nil
+	}, nil
 }
 
 func (u users) Upsert(ctx context.Context, records []repository.UserUpsert) error {

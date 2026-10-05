@@ -12,9 +12,22 @@ import (
 
 // Keys holds credentials. A key's only fact of its own is whether it has been revoked.
 type Keys interface {
-	Get(ctx context.Context, meterID string) (domain.KeyRecord, bool, error)
+	// Resolve reads a credential and what stands behind it in one step: the key, the user it names
+	// and each group that user is in. found=false for a key that was never pushed.
+	Resolve(ctx context.Context, meterID string) (holder Holder, found bool, err error)
 	Upsert(ctx context.Context, records []KeyUpsert) error
 	Delete(ctx context.Context, ids []string) (int, error)
+}
+
+// Holder is a credential and what stands behind it, as the store read them.
+type Holder struct {
+	Key  domain.KeyRecord
+	User domain.UserRecord
+	// HasUser is false when the key names no user, or one that was never pushed.
+	HasUser bool
+	// Groups is each group read, by name: those the user record lists or, without one, the key's
+	// own. One never pushed is here as the zero value.
+	Groups map[string]domain.GroupRecord
 }
 
 // Users holds the access and budget state behind a person — one record however many keys.
@@ -145,6 +158,8 @@ type KeyUpsert struct {
 	Prefix  string
 	User    string
 	Status  string
+	// CanReadBalance is whether the key may read its holder's credit.
+	CanReadBalance bool
 }
 
 type UserUpsert struct {

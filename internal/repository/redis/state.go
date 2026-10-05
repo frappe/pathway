@@ -110,6 +110,7 @@ func applyKeys(ctx context.Context, p redis.Pipeliner, buckets map[string]reposi
 			count++
 			p.HSet(ctx, "key:"+rec.MeterID, map[string]any{
 				"status": rec.Status, "user": rec.User, "prefix": rec.Prefix,
+				"can_read_balance": flag(rec.CanReadBalance),
 			})
 			// A pre-group control plane flattened access onto the key; stale the moment this lands.
 			p.HDel(ctx, "key:"+rec.MeterID, "models", "priority")

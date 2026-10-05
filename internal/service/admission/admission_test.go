@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/repository"
 	"github.com/phot0n/pathway/internal/repository/memory"
 )
 
@@ -15,7 +16,7 @@ func meterID() string { return domain.SHA256Hex(secret) }
 
 func serviceOver(store *memory.Store) *Service {
 	repos := store.Repositories()
-	return New(repos.Keys, repos.Users, repos.Groups, repos.Limits)
+	return New(repos.Keys, repos.Groups, repos.Limits)
 }
 
 // The happy path is three hops — key → user → group — and the whole reason the records are split.
@@ -203,6 +204,35 @@ func TestIdentifyDoesNotMutateTheStoredGroup(t *testing.T) {
 	}
 	if len(store.Groups["acme"].Models) != 1 {
 		t.Errorf("group acme now grants %v — the union aliased the store's map", store.Groups["acme"].Models)
+	}
+}
+
+// forgetful answers every credential without its groups, as a store that split a group list
+// differently from domain.ModelSet would.
+type forgetful struct{ repository.Keys }
+
+func (f forgetful) Resolve(ctx context.Context, meterID string) (repository.Holder, bool, error) {
+	holder, found, err := f.Keys.Resolve(ctx, meterID)
+	holder.Groups = nil
+	return holder, found, err
+}
+
+// The user record says which groups; reading them beside the key only saves round trips. One the
+// store did not read is read on its own, never taken for a group that grants nothing.
+func TestAGroupTheStoreDidNotReadIsReadOnItsOwn(t *testing.T) {
+	store := memory.New()
+	store.Keys[meterID()] = domain.KeyRecord{Status: "active", User: "test-user"}
+	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
+	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
+	repos := store.Repositories()
+	svc := New(forgetful{repos.Keys}, repos.Groups, repos.Limits)
+
+	id, err := svc.Identify(context.Background(), "Bearer "+secret)
+	if err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+	if err := svc.Authorize(id, "qwen3-4b"); err != nil {
+		t.Errorf("Authorize = %v, want the group read on its own to admit", err)
 	}
 }
 

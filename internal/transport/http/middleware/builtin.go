@@ -380,7 +380,7 @@ func newMeter(deps Deps) (Middleware, error) {
 				// The request's own context is cancelled the moment the client hangs up, which is
 				// exactly when this matters most. context.WithoutCancel keeps the store call alive.
 				ctx := withoutCancel(r.Context())
-				deps.Routing.Release(ctx, state.Decision.EngineURL(), state.Decision.RequestID)
+				deps.Routing.Release(ctx, state.Decision.Route, state.Decision.RequestID)
 				deps.Metering.Record(ctx, metering.Report{
 					RequestID:      state.RequestID,
 					Prefix:         state.Identity.Prefix(),
@@ -575,7 +575,7 @@ func newPick(deps Deps) (Middleware, error) {
 			// never chose.
 			w.Header().Set("X-Grove-Engine", or(route.Deployment, "-"))
 			defer func() {
-				deps.Routing.Release(withoutCancel(r.Context()), route.EngineURL, requestID)
+				deps.Routing.Release(withoutCancel(r.Context()), route, requestID)
 			}()
 			next.ServeHTTP(w, r)
 		})

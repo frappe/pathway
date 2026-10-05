@@ -26,7 +26,7 @@ never registered, so no handler on that box could read a key store even if one w
    the engine's own.
 5. Proxies it, streaming the response through untouched, and reads the usage frame out on the way.
 6. Records tokens and the hop's outcome, on every request including the ones that were abandoned.
-7. Answers `/v1/models` itself, and `/metrics/node` behind basic auth.
+7. Answers `/v1/models` and `/v1/credits` itself, and `/metrics/node` behind basic auth.
 8. Upgrades its own binary and reloads its own configuration without dropping a connection.
 
 Requirements: Redis (loopback, or the Network's shared store), a certificate on disk, and an admin token. It refuses to start
@@ -79,7 +79,9 @@ every route pushed before the split carried.
 gateways share (`GROVE_REDIS_ADDR` + `GROVE_REDIS_PASSWORD`). Its contents are either pushed (keys,
 users, groups, routes) or derived (sticky, in-flight, health, usage). On a shared store in-flight is
 one counter, so a directly dialled replica's cap holds across those gateways. A dead store fails its
-gateways closed: nothing authenticates and `/healthz` reports it.
+gateways closed: nothing authenticates and `/healthz` reports it. The store has to be a single Redis,
+not a Cluster: authentication is one script that follows a key to its user and groups, records it is
+not handed by name.
 
 ---
 
@@ -225,8 +227,8 @@ One goroutine per request, as net/http gives it. What is shared between them:
 - **The transport pool** — `RWMutex` with double-checked insert; replaced wholesale on
   `Reconfigure`, so in-flight requests finish on the transport they started with.
 - **The drain flag** — `atomic.Bool`.
-- **Redis** — `go-redis` pools connections; every multi-key read is a pipeline, and the usage write
-  is a transaction so a drain never sees half a request.
+- **Redis** — `go-redis` pools connections; every multi-key read is a pipeline or one script, and the
+  usage write is a transaction so a drain never sees half a request.
 
 Nothing takes a lock across an I/O call, and no request-scoped value is shared between requests.
 
@@ -305,7 +307,7 @@ proxy ──► engine (or ingress ──► engine)
 | `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Not a JSON object, or no `model` in it (or in the form, or an upgrade's query) → 400; over `max_body_bytes` → 413; not all here within 60s → 408 |
 | `modelaccess` | `CanUse` → 403 |
 | `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the user's `log_payloads` is on. See [The payload log](#the-payload-log) |
-| `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot |
+| `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot, except on a vendor row |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |
 | `fallback` | runs the stages below again on the next model in the body's `fallbacks` when the one serving cannot (5xx, or a key failure `retry` could not rotate away). See [Fallback models](#fallback-models) |
 | `retry` | runs the stages below again with another credential when a vendor refuses the one dialled (429, 401/402/403); counts every attempt against its key |
@@ -433,8 +435,8 @@ What each layer contributes, for one `POST /v1/chat/completions`:
 |---|---|---|
 | 1 | `transport/http` | TLS handshake, `ServeMux` matches host + path |
 | 2 | `middleware/auth` | reads the `Authorization` header |
-| 3 | `service/admission` | `Identify` → three store reads |
-| 4 | `repository/redis` | `HGETALL key:… user:… group:…` |
+| 3 | `service/admission` | `Identify` → one store read |
+| 4 | `repository/redis` | one script: `HGETALL key:…`, then the `user:…` it names and each `model_group:…` that names |
 | 5 | `domain` | `Evaluate` — pure, no I/O |
 | 6 | `middleware/body` | bounded read, JSON decode, model out |
 | 7 | `service/routing` | `Pick` — sticky read, in-flight counts, health |
@@ -1048,9 +1050,8 @@ did and the lever to pull if balancing goes wrong.
 
 `capacity_wait` is how long a request waits for a slot when every upstream of its model is at its
 `capacity`, before the 429. `0s` refuses at once. Nothing is claimed or billed while it waits, and a
-client that leaves stops the wait. A vendor's cap is its rows' `capacity`: rows sharing a base URL
-share one in-flight count across every gateway, so the control plane pushes the vendor's whole limit,
-not a share of it.
+client that leaves stops the wait. A vendor row is never counted and has no cap here: the vendor's
+own 429 is its cap.
 
 `maintenance: true` refuses every new data request with 503 `maintenance` (`Retry-After: 30`) and
 fails `/healthz`, while requests already running finish. It lives in the file, so a box restarted
@@ -1123,7 +1124,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `adjust:<id>` | string, 7 days | `POST /grove-admin/spend-adjust` — ids already applied |
 | `accrued:<request id>` | string, 7 days | the spool's replay — requests already landed from it |
 | `sticky:<session>` | string, 30m | the gateway |
-| `inflight:<engine>` | sorted set, member = request id | the gateway |
+| `inflight:<engine>` | sorted set, member = request id; never a vendor's URL | the gateway |
 | `health:<target>` | counter, 60s | the gateway |
 | `pk:<key id>` | hash, lifetime | the gateway — what each vendor credential answered; read by `GET /grove-admin/provider-keys` |
 
@@ -1203,7 +1204,7 @@ nothing. A holder this store does not hold is a 404; nothing is invented.
 ### The records themselves
 
 ```
-key:<sha256(secret)>       status  user  prefix
+key:<sha256(secret)>       status  user  prefix  can_read_balance
 user:<Grove User>          email  group (comma list)  allow  deny  limited  log_payloads  geography
                            prepaid  budget  spent  limits
 model_group:<Model Group>  models
@@ -1349,6 +1350,7 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 | `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` only — anything else under it is a 404 in Anthropic's shape — keyed by `x-api-key` or a Bearer |
 | `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
+| `GET /v1/credits` | answered here: what the key's holder has left on this store, in US dollars — `{"balance", "spent", "is_free_user"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Only for a key pushed with `can_read_balance`; any other key gets 403 `this key cannot read the balance`. A free holder reads zeros and `"is_free_user": true` |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
 | `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |

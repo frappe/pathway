@@ -68,7 +68,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 		},
 		Keys: map[string]repository.KeyBucket{
 			pushed: {Hash: "kh", Records: []repository.KeyUpsert{
-				{MeterID: kept, Prefix: "K-kept", User: "GU-1", Status: "active"},
+				{MeterID: kept, Prefix: "K-kept", User: "GU-1", Status: "active", CanReadBalance: true},
 			}},
 		},
 		Routes: &repository.RoutesPush{
@@ -83,6 +83,9 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	}
 	if counts.Groups != 1 || counts.Keys != 1 || counts.Routes != 1 {
 		t.Errorf("counts = %+v", counts)
+	}
+	if rec, _, err := client.Store().Keys.Resolve(ctx, kept); err != nil || !rec.Key.CanReadBalance {
+		t.Errorf("pushed key = %+v, %v; want it allowed to read the balance", rec, err)
 	}
 
 	for key, want := range map[string]bool{

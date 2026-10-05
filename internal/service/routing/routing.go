@@ -184,10 +184,13 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	if route.IsIngress() && session != "" {
 		decision.SessionKey = domain.SHA256Hex(session)
 	}
-	if err := s.inFlight.Claim(ctx, route.EngineURL, decision.RequestID); err != nil {
-		// Undercounting an engine biases it toward more traffic; refusing the request over a
-		// counter would be worse.
-		s.log.Warn("in-flight claim failed", "engine", route.EngineURL, "err", err)
+	// A vendor row holds no slot: it has no capacity of ours and no engine to balance against.
+	if !route.IsProvider() {
+		if err := s.inFlight.Claim(ctx, route.EngineURL, decision.RequestID); err != nil {
+			// Undercounting an engine biases it toward more traffic; refusing the request over a
+			// counter would be worse.
+			s.log.Warn("in-flight claim failed", "engine", route.EngineURL, "err", err)
+		}
 	}
 	s.log.Debug("route picked",
 		"model", req.Model, "engine", route.EngineURL, "deployment", route.Deployment,
@@ -331,28 +334,38 @@ func (s *Service) CanServe(ctx context.Context) error {
 	return ErrNoEngine
 }
 
-// Release crosses a finished request off its engine.
-func (s *Service) Release(ctx context.Context, engineURL, requestID string) {
-	if err := s.inFlight.Release(ctx, engineURL, requestID); err != nil {
-		s.log.Warn("in-flight release failed", "engine", engineURL, "rid", requestID, "err", err)
+// Release crosses a finished request off its engine. A vendor row claimed nothing.
+func (s *Service) Release(ctx context.Context, route domain.Route, requestID string) {
+	if route.IsProvider() {
+		return
+	}
+	if err := s.inFlight.Release(ctx, route.EngineURL, requestID); err != nil {
+		s.log.Warn("in-flight release failed", "engine", route.EngineURL, "rid", requestID, "err", err)
 	}
 }
 
-// fillInFlight sets each route's InFlight to what its engine is running now. A store failure leaves
-// every count at zero, degrading to the first healthy route — refusing instead would 503 a working
-// engine over an unreadable counter.
+// fillInFlight sets each route's InFlight to what its engine is running now; a vendor row is never
+// counted. A store failure leaves every count at zero, degrading to the first healthy route —
+// refusing instead would 503 a working engine over an unreadable counter.
 func (s *Service) fillInFlight(ctx context.Context, table []domain.Route) {
-	urls := make([]string, len(table))
+	rows := make([]int, 0, len(table))
+	urls := make([]string, 0, len(table))
 	for i, r := range table {
-		urls[i] = r.EngineURL
+		if !r.IsProvider() {
+			rows = append(rows, i)
+			urls = append(urls, r.EngineURL)
+		}
+	}
+	if len(urls) == 0 {
+		return
 	}
 	counts, err := s.inFlight.Counts(ctx, urls)
 	if err != nil {
 		s.log.Warn("in-flight counts unavailable, falling back to the first healthy route", "err", err)
 		return
 	}
-	for i := range table {
-		table[i].InFlight = counts[i]
+	for i, row := range rows {
+		table[row].InFlight = counts[i]
 	}
 }
 

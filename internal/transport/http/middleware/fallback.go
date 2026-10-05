@@ -50,10 +50,10 @@ func newFallback(deps Deps) (Middleware, error) {
 				loser := state.Decision
 				logAttempt(deps, r, state, marks.started, or(state.DeniedReason, state.Outcome.Reason), "model", model)
 				// The loser's slot and its failure are settled here: meter only ever sees the
-				// winner. Two models of one vendor share an engine, and so the slot.
+				// winner. Two models behind one ingress share its URL, and so the slot.
 				ctx := withoutCancel(r.Context())
 				if loser.EngineURL() != winner.EngineURL() {
-					deps.Routing.Release(ctx, loser.EngineURL(), loser.RequestID)
+					deps.Routing.Release(ctx, loser.Route, loser.RequestID)
 				}
 				deps.Metering.Record(ctx, metering.Report{
 					Target:         loser.EngineURL(),
