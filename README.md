@@ -305,7 +305,7 @@ proxy ──► engine (or ingress ──► engine)
 | `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Not a JSON object, or no `model` in it (or in the form, or an upgrade's query) → 400; over `max_body_bytes` → 413; not all here within 60s → 408 |
 | `modelaccess` | `CanUse` → 403 |
 | `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the user's `log_payloads` is on. See [The payload log](#the-payload-log) |
-| `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot |
+| `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot, except on a vendor row |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |
 | `fallback` | runs the stages below again on the next model in the body's `fallbacks` when the one serving cannot (5xx, or a key failure `retry` could not rotate away). See [Fallback models](#fallback-models) |
 | `retry` | runs the stages below again with another credential when a vendor refuses the one dialled (429, 401/402/403); counts every attempt against its key |
@@ -1048,9 +1048,8 @@ did and the lever to pull if balancing goes wrong.
 
 `capacity_wait` is how long a request waits for a slot when every upstream of its model is at its
 `capacity`, before the 429. `0s` refuses at once. Nothing is claimed or billed while it waits, and a
-client that leaves stops the wait. A vendor's cap is its rows' `capacity`: rows sharing a base URL
-share one in-flight count across every gateway, so the control plane pushes the vendor's whole limit,
-not a share of it.
+client that leaves stops the wait. A vendor row is never counted and has no cap here: the vendor's
+own 429 is its cap.
 
 `maintenance: true` refuses every new data request with 503 `maintenance` (`Retry-After: 30`) and
 fails `/healthz`, while requests already running finish. It lives in the file, so a box restarted
@@ -1123,7 +1122,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `adjust:<id>` | string, 7 days | `POST /grove-admin/spend-adjust` — ids already applied |
 | `accrued:<request id>` | string, 7 days | the spool's replay — requests already landed from it |
 | `sticky:<session>` | string, 30m | the gateway |
-| `inflight:<engine>` | sorted set, member = request id | the gateway |
+| `inflight:<engine>` | sorted set, member = request id; never a vendor's URL | the gateway |
 | `health:<target>` | counter, 60s | the gateway |
 | `pk:<key id>` | hash, lifetime | the gateway — what each vendor credential answered; read by `GET /grove-admin/provider-keys` |
 
