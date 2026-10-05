@@ -84,7 +84,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	if counts.Groups != 1 || counts.Keys != 1 || counts.Routes != 1 {
 		t.Errorf("counts = %+v", counts)
 	}
-	if rec, _, err := client.Store().Keys.Get(ctx, kept); err != nil || !rec.CanReadBalance {
+	if rec, _, err := client.Store().Keys.Resolve(ctx, kept); err != nil || !rec.Key.CanReadBalance {
 		t.Errorf("pushed key = %+v, %v; want it allowed to read the balance", rec, err)
 	}
 

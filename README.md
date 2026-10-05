@@ -79,7 +79,9 @@ every route pushed before the split carried.
 gateways share (`GROVE_REDIS_ADDR` + `GROVE_REDIS_PASSWORD`). Its contents are either pushed (keys,
 users, groups, routes) or derived (sticky, in-flight, health, usage). On a shared store in-flight is
 one counter, so a directly dialled replica's cap holds across those gateways. A dead store fails its
-gateways closed: nothing authenticates and `/healthz` reports it.
+gateways closed: nothing authenticates and `/healthz` reports it. The store has to be a single Redis,
+not a Cluster: authentication is one script that follows a key to its user and groups, records it is
+not handed by name.
 
 ---
 
@@ -225,8 +227,8 @@ One goroutine per request, as net/http gives it. What is shared between them:
 - **The transport pool** — `RWMutex` with double-checked insert; replaced wholesale on
   `Reconfigure`, so in-flight requests finish on the transport they started with.
 - **The drain flag** — `atomic.Bool`.
-- **Redis** — `go-redis` pools connections; every multi-key read is a pipeline, and the usage write
-  is a transaction so a drain never sees half a request.
+- **Redis** — `go-redis` pools connections; every multi-key read is a pipeline or one script, and the
+  usage write is a transaction so a drain never sees half a request.
 
 Nothing takes a lock across an I/O call, and no request-scoped value is shared between requests.
 
@@ -433,8 +435,8 @@ What each layer contributes, for one `POST /v1/chat/completions`:
 |---|---|---|
 | 1 | `transport/http` | TLS handshake, `ServeMux` matches host + path |
 | 2 | `middleware/auth` | reads the `Authorization` header |
-| 3 | `service/admission` | `Identify` → three store reads |
-| 4 | `repository/redis` | `HGETALL key:… user:… group:…` |
+| 3 | `service/admission` | `Identify` → one store read |
+| 4 | `repository/redis` | one script: `HGETALL key:…`, then the `user:…` it names and each `model_group:…` that names |
 | 5 | `domain` | `Evaluate` — pure, no I/O |
 | 6 | `middleware/body` | bounded read, JSON decode, model out |
 | 7 | `service/routing` | `Pick` — sticky read, in-flight counts, health |

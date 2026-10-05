@@ -24,15 +24,14 @@ func (i Identity) Prefix() string { return i.Key.KeyPrefix }
 
 type Service struct {
 	keys   repository.Keys
-	users  repository.Users
 	groups repository.Groups
 	limits repository.Limits
 	// Now is the clock the limit windows are read off. A field so a test can move it.
 	Now func() time.Time
 }
 
-func New(keys repository.Keys, users repository.Users, groups repository.Groups, limits repository.Limits) *Service {
-	return &Service{keys: keys, users: users, groups: groups, limits: limits, Now: time.Now}
+func New(keys repository.Keys, groups repository.Groups, limits repository.Limits) *Service {
+	return &Service{keys: keys, groups: groups, limits: limits, Now: time.Now}
 }
 
 // Admit counts this request against the holder's rate limits, and refuses with a 429 naming the
@@ -52,9 +51,8 @@ func (s *Service) Admit(ctx context.Context, id Identity) error {
 	return nil
 }
 
-// Identify resolves an Authorization header to its holder. Two reads plus one per group they are
-// in, and only the two for an ungrouped user — who reaches nothing but their own Allow list, so a
-// group read would cost a round trip to learn nothing.
+// Identify resolves an Authorization header to its holder. One read: the key, its user and the
+// groups that user is in come back together.
 func (s *Service) Identify(ctx context.Context, authorization string) (Identity, error) {
 	secret := domain.Bearer(authorization)
 	if secret == "" {
@@ -62,7 +60,7 @@ func (s *Service) Identify(ctx context.Context, authorization string) (Identity,
 	}
 	meterID := domain.SHA256Hex(secret)
 
-	rec, found, err := s.keys.Get(ctx, meterID)
+	holder, found, err := s.keys.Resolve(ctx, meterID)
 	if err != nil {
 		return Identity{}, domain.Deny(503, "key store error")
 	}
@@ -70,31 +68,31 @@ func (s *Service) Identify(ctx context.Context, authorization string) (Identity,
 		return Identity{}, domain.Deny(401, "unknown api key")
 	}
 
-	usr, err := s.resolveUser(ctx, rec)
-	if err != nil {
-		return Identity{}, domain.Deny(503, "user store error")
-	}
-	grant, err := s.grant(ctx, usr.Groups)
+	usr := resolveUser(holder)
+	grant, err := s.grant(ctx, usr.Groups, holder.Groups)
 	if err != nil {
 		return Identity{}, domain.Deny(503, "group store error")
 	}
-	return Identity{MeterID: meterID, Key: rec, User: usr, Grant: grant}, nil
+	return Identity{MeterID: meterID, Key: holder.Key, User: usr, Grant: grant}, nil
 }
 
 // grant is the union of what every group the user is in grants. Always a fresh map: the store hands
 // back its own set by reference, and unioning into that would edit the group itself.
 //
-// ponytail: one sequential HGETALL per group, which is one round trip for the overwhelmingly common
-// single-group user. Add a Groups.GetMany that pipelines if anyone ever holds more than a handful.
-func (s *Service) grant(ctx context.Context, names map[string]bool) (domain.GroupRecord, error) {
+// The names are the user's; read is what the store fetched beside the key. A name it did not fetch
+// is read on its own, so a store that splits a group list differently costs a round trip, not a grant.
+func (s *Service) grant(ctx context.Context, names map[string]bool, read map[string]domain.GroupRecord) (domain.GroupRecord, error) {
 	if len(names) == 0 {
 		return domain.GroupRecord{}, nil
 	}
 	models := map[string]bool{}
 	for name := range names {
-		grp, err := s.groups.Get(ctx, name)
-		if err != nil {
-			return domain.GroupRecord{}, err
+		grp, ok := read[name]
+		if !ok {
+			var err error
+			if grp, err = s.groups.Get(ctx, name); err != nil {
+				return domain.GroupRecord{}, err
+			}
 		}
 		for model := range grp.Models {
 			models[model] = true
@@ -115,18 +113,12 @@ func (s *Service) Authorize(id Identity, model string) error {
 // resolveUser is the second hop: key → user. A key whose user record is missing falls back to what
 // the key itself carries, which is how a box still holding pre-split records keeps serving. A key
 // with nothing to fall back to reaches nothing.
-func (s *Service) resolveUser(ctx context.Context, rec domain.KeyRecord) (domain.UserRecord, error) {
-	if rec.User != "" {
-		usr, found, err := s.users.Get(ctx, rec.User)
-		if err != nil {
-			return domain.UserRecord{}, err
-		}
-		if found {
-			return usr, nil
-		}
+func resolveUser(holder repository.Holder) domain.UserRecord {
+	if holder.HasUser {
+		return holder.User
 	}
-	if !rec.Legacy.HasProjection() {
-		return domain.UserRecord{}, nil
+	if !holder.Key.Legacy.HasProjection() {
+		return domain.UserRecord{}
 	}
-	return domain.SynthUser(rec), nil
+	return domain.SynthUser(holder.Key)
 }

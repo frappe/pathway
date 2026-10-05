@@ -95,14 +95,37 @@ func (s *Store) putUser(rec repository.UserUpsert) {
 
 type keys struct{ s *Store }
 
-func (k keys) Get(_ context.Context, meterID string) (domain.KeyRecord, bool, error) {
+// Resolve matches the real script: a record is asked for only when it is read, so a failing users
+// or groups store is felt only by a key that reaches it.
+func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, bool, error) {
 	k.s.mu.Lock()
 	defer k.s.mu.Unlock()
 	if err := k.s.failed("keys"); err != nil {
-		return domain.KeyRecord{}, false, err
+		return repository.Holder{}, false, err
 	}
 	rec, ok := k.s.Keys[meterID]
-	return rec, ok, nil
+	if !ok {
+		return repository.Holder{}, false, nil
+	}
+	holder := repository.Holder{Key: rec, Groups: map[string]domain.GroupRecord{}}
+	names := domain.ModelSet(rec.Legacy.Group)
+	if rec.User != "" {
+		if err := k.s.failed("users"); err != nil {
+			return repository.Holder{}, false, err
+		}
+		if holder.User, holder.HasUser = k.s.Users[rec.User]; holder.HasUser {
+			names = holder.User.Groups
+		}
+	}
+	if len(names) > 0 {
+		if err := k.s.failed("groups"); err != nil {
+			return repository.Holder{}, false, err
+		}
+	}
+	for name := range names {
+		holder.Groups[name] = k.s.Groups[name]
+	}
+	return holder, true, nil
 }
 
 func (k keys) Upsert(_ context.Context, records []repository.KeyUpsert) error {
