@@ -635,9 +635,12 @@ gateway never picks a fallback of its own: the caller named the model, and pays 
 The list is not judged when the request arrives: a fallback that cannot serve is found at its
 turn and passed over. One with no route on this surface and path — nothing translates between the
 OpenAI and Anthropic shapes, and a model answers only the paths its outputs allow — is skipped
-without a dial, as is one the caller is not granted or one with no routes right now. One that is
-dialled and refuses the request (a text-only model sent an image) costs that dial, and the next
-is tried.
+without a dial, as is one the caller is not granted or one with no routes right now. So is one
+that declares its inputs and lacks what the request carries: a model that takes `["text"]` is not
+sent a request with an image in it. The image and file parts of `messages` are what is
+looked for, on either shape; the model asked for is never held to this, only its stand-ins. One
+that is dialled and refuses the request (a model that declares no inputs sent an image, or any
+model sent a field it does not take) costs that dial, and the next is tried.
 
 A fallback is tried, in list order, when:
 
@@ -889,8 +892,8 @@ own in the same log, `msg="attempt"`, under the same `rid`:
 | `moved`, `to` | what the request moved to: `key` and the next credential's id, or `model` and the fallback |
 
 A request that dialled three times is two `attempt` lines and one `access` line. A fallback passed
-over without a dial (not granted, no route on this surface) is in the process log, `fallback
-skipped`.
+over without a dial (not granted, no route on this surface, takes less than the request carries)
+is in the process log, `fallback skipped`.
 
 ---
 
@@ -1251,7 +1254,8 @@ computed here and never pushed — the control plane has no view of what is runn
 `["text"]`), stamped on every row of the model. The outputs are the path gate: chat and messages
 need `text`, `/v1/embeddings` needs `embeddings`, `/v1/audio/transcriptions` and `/translations`
 need `transcription`; a model that does not give it is our own 404 before anything is dialled, and
-any other path is nobody's to refuse. The inputs are carried, not read. A row that declares nothing — one pushed before
+any other path is nobody's to refuse. The inputs are read only for a fallback, which is passed over
+when it lacks what the request carries (see [Fallback models](#fallback-models)). A row that declares nothing — one pushed before
 the control plane said — is unrestricted and not judged. There is no `modality` field: a push
 that carries one is refused like any unknown field.
 `pricing` is the Model Pricing in force — its id and its sell price per counter, nano-USD per unit

@@ -535,6 +535,49 @@ func TestAFallbackThatCannotServeIsPassedOver(t *testing.T) {
 	}
 }
 
+// A fallback that has said what it takes is not dialled with more: what the request carries goes
+// past a stand-in that lacks it to the next, on either surface. One that has said nothing is still
+// dialled.
+func TestAFallbackThatTakesLessThanTheRequestCarriesIsNotDialled(t *testing.T) {
+	const openaiAnswer = `{"id":"chatcmpl-2",` + usageObject + `}`
+	for _, c := range []struct {
+		name, path, part string
+		takes            []string
+		answer           string
+	}{
+		{"an OpenAI image", "/v1/chat/completions",
+			`{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}`, []string{"text"}, openaiAnswer},
+		{"an Anthropic image", "/anthropic/v1/messages",
+			`{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}`, []string{"text"}, anthropicMessage},
+		// Held to each word, not to "text only or not": this one takes images and is still passed over.
+		{"an OpenAI file", "/v1/chat/completions",
+			`{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0="}}`, []string{"text", "image"}, openaiAnswer},
+	} {
+		body := `{"model":"qwen3-4b","max_tokens":16,"fallbacks":["limited","backup"],` +
+			`"messages":[{"role":"user","content":[` + c.part + `]}]}`
+		f := newFixture(t, failing(http.StatusBadGateway))
+		backup := addBackup(t, f, jsonEngine(c.answer))
+		limited := addModel(t, f, "limited", jsonEngine(c.answer))
+		f.store.Routes["limited"][0].InputModalities = c.takes
+
+		resp := f.post(c.path, body)
+		if resp.Code != http.StatusOK || resp.Header().Get("X-Grove-Fallback") != "backup" {
+			t.Errorf("%s: status = %d, fallback = %q, body = %s",
+				c.name, resp.Code, resp.Header().Get("X-Grove-Fallback"), resp.Body)
+		}
+		if len(limited.bodies) != 0 || len(backup.bodies) != 1 {
+			t.Errorf("%s: dials: limited = %d, backup = %d, want 0 and 1", c.name, len(limited.bodies), len(backup.bodies))
+		}
+
+		f.store.Routes["limited"][0].InputModalities = nil
+		resp = f.post(c.path, body)
+		if resp.Header().Get("X-Grove-Fallback") != "limited" || len(limited.bodies) != 1 {
+			t.Errorf("%s, undeclared: fallback = %q, limited dials = %d, want it dialled",
+				c.name, resp.Header().Get("X-Grove-Fallback"), len(limited.bodies))
+		}
+	}
+}
+
 // A dial that gave no status still says why on its attempt line.
 func TestADeadDialLeavesItsReasonOnTheAttemptLine(t *testing.T) {
 	f, _ := fallbackFixture(t, failing(http.StatusBadGateway))

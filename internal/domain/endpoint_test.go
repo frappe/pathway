@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // A model is just a name in the route table, so nothing but what it gives distinguishes an ASR
 // container from a chat engine. These are the rules that keep a transcription off a chat model.
@@ -45,6 +48,53 @@ func TestServes(t *testing.T) {
 	} {
 		if got := Serves(c.outputs, c.path); got != c.want {
 			t.Errorf("Serves(%v, %q) = %v, want %v — %s", c.outputs, c.path, got, c.want, c.why)
+		}
+	}
+}
+
+// What a request carries is read off its content parts, in either surface's spelling, and a model
+// is held to it only when it has said what it takes.
+func TestSentInputsAndTakes(t *testing.T) {
+	for _, c := range []struct {
+		body string
+		want []string
+		why  string
+	}{
+		{`{"messages":[{"content":"hi"}]}`, nil, "a string is text"},
+		{`{"messages":[{"content":[{"type":"text","text":"hi"}]}]}`, nil, "every model takes text"},
+		{`{"messages":[{"content":[{"type":"image_url","image_url":{"url":"u"}}]}]}`, []string{"image"}, "OpenAI's image"},
+		{`{"messages":[{"content":[{"type":"image"},{"type":"image"},{"type":"document"},{"type":"input_audio"}]}]}`,
+			[]string{"image", "file"}, "Anthropic's, each word once; a clip is not looked for yet"},
+		{`{"messages":[{"content":[{"type":"file","file":{"file_data":"data:application/pdf;base64,JVBERi0="}}]}]}`, []string{"file"}, "OpenAI's file"},
+		{`{"messages":[{"content":[{"type":"tool_result","content":[{"type":"image"}]}]}]}`,
+			[]string{"image"}, "a tool result's own parts are sent too"},
+		{`{"messages":[{"content":[{"type":"tool_result","content":[{"type":"document",` +
+			`"source":{"type":"content","content":[{"type":"text"},{"type":"image"}]}}]}]}]}`,
+			[]string{"file", "image"}, "so are the parts an Anthropic document is built of"},
+		{`{"messages":[{"content":[{"type":"text","source":"odd"},{"type":"image_url"}]}]}`,
+			[]string{"image"}, "one odd part does not hide the rest"},
+		{`{"messages":[{"content":[{"type":"tool_use","input":{"type":"image"}}]}]}`, nil, "a tool call's input is not a part"},
+		{`{"input":"hi"}`, nil, "no messages"},
+		{`not json`, nil, "unreadable is the upstream's to refuse"},
+	} {
+		if got := SentInputs([]byte(c.body)); !slices.Equal(got, c.want) {
+			t.Errorf("SentInputs(%s) = %v, want %v — %s", c.body, got, c.want, c.why)
+		}
+	}
+
+	for _, c := range []struct {
+		inputs, sent []string
+		want         bool
+		why          string
+	}{
+		{nil, []string{"image"}, true, "nothing declared = unrestricted"},
+		{[]string{"text"}, nil, true, "a text request goes anywhere"},
+		{[]string{"text", "image"}, []string{"image"}, true, ""},
+		{[]string{"text"}, []string{"image"}, false, "a text-only model sent an image"},
+		{[]string{"text", "image"}, []string{"image", "audio"}, false, "every part must be taken"},
+	} {
+		if got := Takes(c.inputs, c.sent); got != c.want {
+			t.Errorf("Takes(%v, %v) = %v, want %v — %s", c.inputs, c.sent, got, c.want, c.why)
 		}
 	}
 }

@@ -77,9 +77,12 @@ func serveFallback(w http.ResponseWriter, r *http.Request, state *State, model s
 	w.Header().Set("X-Grove-Fallback", model)
 }
 
-// nextFallback takes the caller's fallbacks in order until one is theirs to use and has an engine
-// to go to, and claims a slot on it. A blank model means the list is spent.
+// nextFallback takes the caller's fallbacks in order until one is theirs to use, takes what the
+// request carries and has an engine to go to, and claims a slot on it. A blank model means the
+// list is spent.
 func nextFallback(deps Deps, r *http.Request, state *State) (routing.Decision, string) {
+	// Read off the client's own bytes: the decoded body is the transforms' to change.
+	sent := domain.SentInputs(state.Raw)
 	for len(state.Fallbacks) > 0 {
 		model := state.Fallbacks[0]
 		state.Fallbacks = state.Fallbacks[1:]
@@ -87,7 +90,9 @@ func nextFallback(deps Deps, r *http.Request, state *State) (routing.Decision, s
 		if err == nil {
 			var decision routing.Decision
 			// No session: the caller's pin is to an engine of the model they asked for.
-			if decision, err = deps.Routing.Pick(r.Context(), pickRequest(r, state, model, "")); err == nil {
+			request := pickRequest(r, state, model, "")
+			request.Inputs = sent
+			if decision, err = deps.Routing.Pick(r.Context(), request); err == nil {
 				return decision, model
 			}
 		}

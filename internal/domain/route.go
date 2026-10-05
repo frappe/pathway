@@ -31,8 +31,9 @@ type Route struct {
 	// InputModalities and OutputModalities are what the model takes ("text", "image", …) and what
 	// it gives ("text", "embeddings", …), stamped on every row of the model because deploy:<model>
 	// is the only thing pushed per model. The outputs say which surfaces it answers on; the inputs
-	// are carried, not read. Empty on a row pushed before the control plane declared them, which
-	// reads as unrestricted.
+	// say whether a fallback can take what the request carries, and are not read for the model
+	// asked for. Empty on a row pushed before the control plane declared them, which reads as
+	// unrestricted.
 	InputModalities  []string `json:"input_modalities,omitempty"`
 	OutputModalities []string `json:"output_modalities,omitempty"`
 	// What this upstream answers to, when that is not the id the caller sent. The control plane
