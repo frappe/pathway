@@ -27,9 +27,10 @@ func (k keys) Get(ctx context.Context, meterID string) (domain.KeyRecord, bool, 
 	}
 	group, hasGroup := h["group"] // present-but-blank = ungrouped; absent = a pre-group record
 	rec := domain.KeyRecord{
-		Status:    h["status"],
-		User:      h["user"],
-		KeyPrefix: h["prefix"],
+		Status:         h["status"],
+		User:           h["user"],
+		KeyPrefix:      h["prefix"],
+		CanReadBalance: h["can_read_balance"] == "1",
 		Legacy: domain.LegacyKey{
 			HasGroup: hasGroup,
 			Group:    strings.TrimSpace(group),
@@ -57,9 +58,10 @@ func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error 
 		// stale legacy ones — inert today, a torn read regardless, and free to fix.
 		_, err := k.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
 			p.HSet(ctx, redisKey, map[string]any{
-				"status": rec.Status,
-				"user":   rec.User,
-				"prefix": rec.Prefix,
+				"status":           rec.Status,
+				"user":             rec.User,
+				"prefix":           rec.Prefix,
+				"can_read_balance": flag(rec.CanReadBalance),
 			})
 			// A pre-group control plane flattened access onto the key; that set is stale the moment a
 			// group is pushed. `group`/`allow`/`deny` stay: this cannot tell a current push from an

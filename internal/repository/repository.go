@@ -145,6 +145,8 @@ type KeyUpsert struct {
 	Prefix  string
 	User    string
 	Status  string
+	// CanReadBalance is whether the key may read its holder's credit.
+	CanReadBalance bool
 }
 
 type UserUpsert struct {

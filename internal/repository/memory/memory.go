@@ -116,7 +116,7 @@ func (k keys) Upsert(_ context.Context, records []repository.KeyUpsert) error {
 			continue
 		}
 		k.s.Keys[rec.MeterID] = domain.KeyRecord{
-			Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix,
+			Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix, CanReadBalance: rec.CanReadBalance,
 		}
 	}
 	return nil
@@ -614,7 +614,7 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 				named[rec.MeterID] = true
 				counts.Keys++
 				st.s.Keys[rec.MeterID] = domain.KeyRecord{
-					Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix,
+					Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix, CanReadBalance: rec.CanReadBalance,
 				}
 			}
 			st.setBucketHash("keys:"+label, bucket.Hash, len(bucket.Records))

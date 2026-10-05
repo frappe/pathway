@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/service/admission"
 	"github.com/phot0n/pathway/internal/transport/http/middleware"
 	"github.com/phot0n/pathway/internal/transport/respond"
 )
@@ -45,31 +46,40 @@ func modelListIsGetOnly(w http.ResponseWriter, r *http.Request) {
 // modelsForCaller resolves the caller to the models they may see, writing the refusal itself
 // when there are none to show.
 func (s *Server) modelsForCaller(w http.ResponseWriter, r *http.Request) ([]string, bool) {
-	ctx := r.Context()
-	identity, err := s.admission.Identify(ctx, middleware.Credential(r))
-	if err != nil {
-		respond.DenialFor(w, r, err)
+	identity, ok := s.identifyCaller(w, r)
+	if !ok {
 		return nil, false
 	}
-	// Attribute the access line: auth happens here rather than in the chain, so the accesslog
-	// stage wrapped around this handler would otherwise log every keyed listing as anonymous.
-	middleware.From(r).Identity = identity
-	// Revoked/inactive cannot list. Over budget still can: this shows what the key is entitled to,
-	// and that lives on the user, so only inference is blocked.
-	if identity.Key.Status != "active" {
-		respond.ErrorFor(w, r, http.StatusUnauthorized, "unknown or revoked api key")
-		return nil, false
-	}
-	if err := domain.GeographyDenial(identity.User, s.deps.Geography); err != nil {
-		respond.DenialFor(w, r, err)
-		return nil, false
-	}
-	models, err := s.catalog.ForIdentity(ctx, identity)
+	models, err := s.catalog.ForIdentity(r.Context(), identity)
 	if err != nil {
 		respond.DenialFor(w, r, err)
 		return nil, false
 	}
 	return models, true
+}
+
+// identifyCaller resolves the caller of an endpoint the gateway answers itself, writing the
+// refusal when there is no one to answer.
+func (s *Server) identifyCaller(w http.ResponseWriter, r *http.Request) (admission.Identity, bool) {
+	identity, err := s.admission.Identify(r.Context(), middleware.Credential(r))
+	if err != nil {
+		respond.DenialFor(w, r, err)
+		return admission.Identity{}, false
+	}
+	// Attribute the access line: auth happens here rather than in the chain, so the accesslog
+	// stage wrapped around this handler would otherwise log every keyed call as anonymous.
+	middleware.From(r).Identity = identity
+	// Revoked/inactive is refused. Over budget is not: what a key is entitled to and what its
+	// holder has left live on the user, so only inference is blocked.
+	if identity.Key.Status != "active" {
+		respond.ErrorFor(w, r, http.StatusUnauthorized, "unknown or revoked api key")
+		return admission.Identity{}, false
+	}
+	if err := domain.GeographyDenial(identity.User, s.deps.Geography); err != nil {
+		respond.DenialFor(w, r, err)
+		return admission.Identity{}, false
+	}
+	return identity, true
 }
 
 // The id is `<provider>/<model>`, so owned_by is read off the id itself rather than pushed as a

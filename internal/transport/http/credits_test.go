@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/phot0n/pathway/internal/domain"
@@ -139,5 +141,47 @@ func TestAUsersPushCarriesTheCeilingAndLeavesSpentAlone(t *testing.T) {
 	usr := store.Users["GU-1"]
 	if !usr.Prepaid || usr.Budget != 5_000_000 || usr.Spent != 700 || !usr.Groups["acme"] {
 		t.Errorf("user = %+v, want prepaid, budget 5000000, spent 700", usr)
+	}
+}
+
+// GET /v1/credits is the holder's balance on this store, in dollars, for a key allowed to read
+// it — overspent or not, since that is when it is asked — and a refusal for any other key.
+func TestCreditsAreReadByAnAllowedKey(t *testing.T) {
+	funded := domain.UserRecord{Prepaid: true, Budget: 15_750_000_000, Spent: 3_250_000_000}
+	cases := []struct {
+		name      string
+		keyStatus string
+		allowed   bool
+		user      domain.UserRecord
+		status    int
+		want      string
+	}{
+		{"prepaid", "active", true, funded, 200, `{"balance":12.5,"spent":3.25,"is_free_user":false}`},
+		{"overspent still reads", "active", true,
+			domain.UserRecord{Prepaid: true, Budget: 1_000_000_000, Spent: 1_500_000_000},
+			200, `{"balance":-0.5,"spent":1.5,"is_free_user":false}`},
+		{"free", "active", true, domain.UserRecord{}, 200, `{"balance":0,"spent":0,"is_free_user":true}`},
+		{"key not allowed", "active", false, funded, 403, "this key cannot read the balance"},
+		{"revoked key", "revoked", true, funded, 401, "unknown or revoked api key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, jsonEngine(`{}`))
+			f.store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
+				Status: tc.keyStatus, User: "test-user", KeyPrefix: "abc123", CanReadBalance: tc.allowed,
+			}
+			f.store.Users["test-user"] = tc.user
+			r := httptest.NewRequest(http.MethodGet, "/v1/credits", nil)
+			r.Header.Set("Authorization", "Bearer "+secret)
+			w := httptest.NewRecorder()
+			f.handler.ServeHTTP(w, r)
+
+			if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.want) {
+				t.Fatalf("status = %d, body = %s; want %d with %s", w.Code, w.Body, tc.status, tc.want)
+			}
+			if f.seen.path != "" {
+				t.Error("/v1/credits was forwarded to an engine")
+			}
+		})
 	}
 }

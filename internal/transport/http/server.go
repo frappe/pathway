@@ -134,6 +134,8 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 	// Any other method. Left to the proxy it reads a model out of the body and answers that the
 	// MODEL does not serve the path, which sends the caller looking at the wrong thing.
 	mux.Handle("/v1/models", drain(http.HandlerFunc(modelListIsGetOnly)))
+	// The gateway's own answer too: the holder's credit as this store counts it.
+	mux.Handle("GET /v1/credits", drain(http.HandlerFunc(s.handleCredits)))
 	mux.Handle("/v1/", openaiRoot(&s.chain))
 	// Anthropic clients live under the provider convention they arrive with,
 	// ANTHROPIC_BASE_URL=<base>/anthropic, their SDK appending /v1/*. Root is the OpenAI surface.

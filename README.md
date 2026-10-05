@@ -26,7 +26,7 @@ never registered, so no handler on that box could read a key store even if one w
    the engine's own.
 5. Proxies it, streaming the response through untouched, and reads the usage frame out on the way.
 6. Records tokens and the hop's outcome, on every request including the ones that were abandoned.
-7. Answers `/v1/models` itself, and `/metrics/node` behind basic auth.
+7. Answers `/v1/models` and `/v1/credits` itself, and `/metrics/node` behind basic auth.
 8. Upgrades its own binary and reloads its own configuration without dropping a connection.
 
 Requirements: Redis (loopback, or the Network's shared store), a certificate on disk, and an admin token. It refuses to start
@@ -1202,7 +1202,7 @@ nothing. A holder this store does not hold is a 404; nothing is invented.
 ### The records themselves
 
 ```
-key:<sha256(secret)>       status  user  prefix
+key:<sha256(secret)>       status  user  prefix  can_read_balance
 user:<Grove User>          email  group (comma list)  allow  deny  limited  log_payloads  geography
                            prepaid  budget  spent  limits
 model_group:<Model Group>  models
@@ -1348,6 +1348,7 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 | `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` only — anything else under it is a 404 in Anthropic's shape — keyed by `x-api-key` or a Bearer |
 | `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
+| `GET /v1/credits` | answered here: what the key's holder has left on this store, in US dollars — `{"balance", "spent", "is_free_user"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Only for a key pushed with `can_read_balance`; any other key gets 403 `this key cannot read the balance`. A free holder reads zeros and `"is_free_user": true` |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
 | `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |

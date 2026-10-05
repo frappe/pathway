@@ -22,6 +22,16 @@ type adminKey struct {
 	Prefix  string `json:"prefix"`
 	User    string `json:"user"`   // Grove User doc name — the pointer to the user record
 	Status  string `json:"status"` // active | revoked
+	// CanReadBalance opens GET /v1/credits to this key. Absent on an older control plane's push,
+	// which decodes false.
+	CanReadBalance bool `json:"can_read_balance"`
+}
+
+func (k adminKey) upsert() repository.KeyUpsert {
+	return repository.KeyUpsert{
+		MeterID: k.KeyHash, Prefix: k.Prefix, User: k.User, Status: k.Status,
+		CanReadBalance: k.CanReadBalance,
+	}
 }
 
 type adminUser struct {
@@ -89,9 +99,7 @@ func (s *Server) handleAdminKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	records := make([]repository.KeyUpsert, 0, len(body.Keys))
 	for _, k := range body.Keys {
-		records = append(records, repository.KeyUpsert{
-			MeterID: k.KeyHash, Prefix: k.Prefix, User: k.User, Status: k.Status,
-		})
+		records = append(records, k.upsert())
 	}
 	if err := s.provisioning.UpsertKeys(r.Context(), records); err != nil {
 		respond.Error(w, http.StatusServiceUnavailable, "key store error")
@@ -241,9 +249,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 		for label, bucket := range body.Keys.Buckets {
 			records := make([]repository.KeyUpsert, 0, len(bucket.Records))
 			for _, k := range bucket.Records {
-				records = append(records, repository.KeyUpsert{
-					MeterID: k.KeyHash, Prefix: k.Prefix, User: k.User, Status: k.Status,
-				})
+				records = append(records, k.upsert())
 			}
 			push.Keys[label] = repository.KeyBucket{Hash: bucket.Hash, Records: records}
 		}

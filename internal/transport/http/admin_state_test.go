@@ -74,7 +74,8 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	body := fmt.Sprintf(`{
 		"groups": {"hash": "gh", "records": [{"name": "acme", "models": "m1"}]},
 		"keys": {"buckets": {"%s": {"hash": "kh", "records": [
-			{"key_hash": "aa", "prefix": "K-1", "user": "GU-1", "status": "active"}]}}},
+			{"key_hash": "aa", "prefix": "K-1", "user": "GU-1", "status": "active",
+			 "can_read_balance": true}]}}},
 		"routes": {"hash": "rh", "table": {"m1": [
 			{"engine_url": "https://box/e/md1", "internal_key": "ek", "healthy": true,
 			 "capacity": 8, "deployment": "MD-1", "server": "INF-1", "kind": "direct"}]}}
@@ -97,7 +98,7 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	if _, ok := store.Groups["stale"]; ok {
 		t.Error("unnamed group survived")
 	}
-	if store.Keys["aa"].KeyPrefix != "K-1" {
+	if store.Keys["aa"].KeyPrefix != "K-1" || !store.Keys["aa"].CanReadBalance {
 		t.Errorf("key record = %+v", store.Keys["aa"])
 	}
 	if len(store.Routes["m1"]) != 1 || store.Routes["m1"][0].EngineURL != "https://box/e/md1" {

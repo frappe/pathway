@@ -11,6 +11,9 @@ type KeyRecord struct {
 	Status    string // "active" | "revoked"
 	User      string // Grove User doc name — the pointer to the UserRecord below
 	KeyPrefix string // display id, for logs and usage attribution
+	// CanReadBalance lets this key read its holder's credit at GET /v1/credits. A record from
+	// before the field existed reads false.
+	CanReadBalance bool
 
 	// Read only when user:<User> is absent, i.e. a record written before access moved off the
 	// credential. SynthUser turns it into a UserRecord so the decision path stays single.
