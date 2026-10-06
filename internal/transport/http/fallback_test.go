@@ -279,8 +279,8 @@ func TestAVendorFallbackAnswersUnderItsOwnName(t *testing.T) {
 	})
 	f.store.Groups["acme"].Models["deepseek/chat"] = true
 	f.store.Routes["deepseek/chat"] = []domain.Route{{
-		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true, Deployment: "deepseek",
-		Server: "deepseek", Kind: "provider", Dialect: "openai", UpstreamModel: "deepseek-chat",
+		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true, Vendor: "deepseek",
+		Kind: "provider", Dialect: "openai", UpstreamModel: "deepseek-chat",
 	}}
 	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["deepseek/chat"]}`)
 
@@ -482,8 +482,8 @@ func TestAFallbackIsSentTheFieldsItsVendorTakes(t *testing.T) {
 	f := newFixture(t, failing(http.StatusBadGateway))
 	vendorRoute := func(vendor, url string) []domain.Route {
 		return []domain.Route{{
-			EngineURL: url, InternalKey: "vendor-key", Healthy: true, Deployment: vendor,
-			Server: vendor, Kind: "provider", Dialect: "openai", UpstreamModel: "upstream-" + vendor,
+			EngineURL: url, InternalKey: "vendor-key", Healthy: true, Vendor: vendor,
+			Kind: "provider", Dialect: "openai", UpstreamModel: "upstream-" + vendor,
 		}}
 	}
 	f.store.Groups["acme"].Models["deepseek/chat"] = true
@@ -514,8 +514,8 @@ func TestAFallbackThatCannotServeIsPassedOver(t *testing.T) {
 	f, backup := fallbackFixture(t, failing(http.StatusBadGateway))
 	f.store.Groups["acme"].Models["claude"] = true
 	f.store.Routes["claude"] = []domain.Route{{
-		EngineURL: backup.url, InternalKey: "k", Healthy: true, Deployment: "anthropic",
-		Server: "anthropic", Kind: "provider", Dialect: "anthropic",
+		EngineURL: backup.url, InternalKey: "k", Healthy: true, Vendor: "anthropic",
+		Kind: "provider", Dialect: "anthropic",
 	}}
 	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["claude","backup"]}`)
 	if resp.Code != http.StatusOK || resp.Header().Get("X-Grove-Fallback") != "backup" {

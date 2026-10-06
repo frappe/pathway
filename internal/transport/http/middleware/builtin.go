@@ -425,7 +425,7 @@ func newTransform(deps Deps) (Middleware, error) {
 				UpstreamModel: state.Decision.Route.UpstreamModel,
 				User:          state.Identity.Key.User,
 				Provider:      state.Decision.Route.IsProvider(),
-				Vendor:        vendor(state.Decision.Route),
+				Vendor:        state.Decision.Route.Vendor,
 				Changed:       &changes,
 			}, state.Body)
 			if err != nil {
@@ -494,7 +494,7 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 				}
 				switch {
 				case secret == "":
-				case anthropic && !transform.HasBearerAnthropicFront(vendor(route)):
+				case anthropic && !transform.HasBearerAnthropicFront(route.Vendor):
 					r.Header.Set("x-api-key", secret)
 				default:
 					r.Header.Set("Authorization", "Bearer "+secret)
@@ -708,12 +708,3 @@ func (s *statusRecorder) ttft(started time.Time) float64 {
 // Unwrap lets net/http find the underlying writer for Flush and Hijack. Without it, wrapping the
 // writer would turn every streaming response into a buffered one.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
-
-// vendor names the third party a provider route dials — the control plane pushes the provider's
-// name as the row's deployment. Blank on anything we run.
-func vendor(route domain.Route) string {
-	if !route.IsProvider() {
-		return ""
-	}
-	return route.Deployment
-}

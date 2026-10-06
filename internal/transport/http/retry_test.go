@@ -45,7 +45,7 @@ func keyedFixture(t *testing.T, answers map[string]int, keys ...string) (*fixtur
 	}
 	f.store.Routes["deepseek/chat"] = []domain.Route{{
 		EngineURL: f.engine.URL, Credentials: credentials, KeySelection: "round_robin", Healthy: true,
-		Deployment: "deepseek", Server: "deepseek", Kind: "provider", Dialect: "openai",
+		Vendor: "deepseek", Kind: "provider", Dialect: "openai",
 		UpstreamModel: "deepseek-chat",
 	}}
 	return f, vendor
