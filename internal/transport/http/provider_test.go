@@ -54,6 +54,48 @@ func TestAProviderRouteGetsTheVendorsOwnCredential(t *testing.T) {
 	}
 }
 
+// Baseten's Anthropic front reads the key as a Bearer and 401s on x-api-key.
+func TestAnAnthropicFrontThatReadsABearerGetsOne(t *testing.T) {
+	f := providerFixture(t)
+	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("baseten/flash")}
+	f.store.Routes["baseten/flash"] = []domain.Route{{
+		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
+		Deployment: "baseten", Server: "baseten", Kind: "provider", Dialect: "anthropic", APIVersion: "2023-06-01",
+	}}
+	f.post("/anthropic/v1/messages", `{"model":"baseten/flash","max_tokens":16}`)
+
+	if f.seen.authorization != "Bearer vendor-key" || f.seen.apiKey != "" {
+		t.Errorf("Authorization = %q, x-api-key = %q, want the key as a Bearer only", f.seen.authorization, f.seen.apiKey)
+	}
+	if f.seen.apiVersion != "2023-06-01" {
+		t.Errorf("anthropic-version = %q", f.seen.apiVersion)
+	}
+}
+
+// A change that alters what the model does is told to the caller, and only for the hop it was
+// made on.
+func TestTheCallerIsToldWhatTheGatewayChanged(t *testing.T) {
+	f := providerFixture(t)
+	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("openai/luna")}
+	f.store.Routes["openai/luna"] = []domain.Route{{
+		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
+		Deployment: "openai", Server: "openai", Kind: "provider", Dialect: "openai", UpstreamModel: "luna",
+	}}
+	resp := f.post("/v1/chat/completions", `{"model":"openai/luna","tools":[{"type":"function","function":{"name":"a"}}]}`)
+
+	if got := resp.Header().Get("X-Grove-Changed"); got != "reasoning_effort=none" {
+		t.Errorf("X-Grove-Changed = %q", got)
+	}
+	if !strings.Contains(string(f.seen.body), `"reasoning_effort":"none"`) {
+		t.Errorf("upstream body = %s", f.seen.body)
+	}
+
+	resp = f.post("/v1/chat/completions", `{"model":"openai/luna"}`)
+	if got := resp.Header().Get("X-Grove-Changed"); got != "" {
+		t.Errorf("X-Grove-Changed = %q on a request nothing was changed in", got)
+	}
+}
+
 // The customer's id is ours; the vendor answers to a dated snapshot it has never heard us call
 // anything else.
 func TestAProviderRouteSendsTheUpstreamsOwnModelID(t *testing.T) {

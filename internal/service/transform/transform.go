@@ -27,6 +27,16 @@ type Context struct {
 	Provider bool
 	// Vendor is the provider's name on a vendor hop ("openai"), blank on anything we run.
 	Vendor string
+	// Changed collects what a transform did that alters what the model does, as `field=value`, for
+	// the caller to be told. A rename is not one of these. Nil when nobody is listening.
+	Changed *[]string
+}
+
+// tell notes a change the caller is told of.
+func (c Context) tell(change string) {
+	if c.Changed != nil {
+		*c.Changed = append(*c.Changed, change)
+	}
 }
 
 // Request is one body rewrite. Apply reports whether it changed anything, so a body that no

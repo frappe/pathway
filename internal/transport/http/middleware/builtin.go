@@ -419,17 +419,24 @@ func newTransform(deps Deps) (Middleware, error) {
 				next.ServeHTTP(w, r)
 				return
 			}
+			var changes []string
 			changed, err := deps.Transform.Apply(transform.Context{
 				Path:          r.URL.Path,
 				UpstreamModel: state.Decision.Route.UpstreamModel,
 				User:          state.Identity.Key.User,
 				Provider:      state.Decision.Route.IsProvider(),
 				Vendor:        vendor(state.Decision.Route),
+				Changed:       &changes,
 			}, state.Body)
 			if err != nil {
 				deps.Log.Error("request transform failed", "path", r.URL.Path, "err", err)
 				deny(w, r, domain.Deny(http.StatusInternalServerError, "gateway error"))
 				return
+			}
+			// Per attempt: a fallback to another vendor is not what the first one was sent.
+			w.Header().Del("X-Grove-Changed")
+			if len(changes) > 0 {
+				w.Header().Set("X-Grove-Changed", strings.Join(changes, ", "))
 			}
 			if changed {
 				encoded, err := json.Marshal(state.Body)
@@ -474,23 +481,23 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 				// A vendor authenticates its own way, and would read our Bearer as a caller's
 				// credential leaking outward — so it is deleted, not overwritten. The scheme
 				// follows the front's dialect: an Anthropic front takes x-api-key and its version
-				// header, an OpenAI-compatible one takes the Bearer everyone else does. Our request
-				// id stays inside our network too: a vendor ignores it and mints its own. The
-				// secret is the decision's, not the row's: a row carries several and the retry
-				// stage moves between them.
+				// header, an OpenAI-compatible one takes the Bearer everyone else does — and so
+				// does an Anthropic front the `vendors` table says reads one. Our request id stays
+				// inside our network too: a vendor ignores it and mints its own. The secret is the
+				// decision's, not the row's: a row carries several and the retry stage moves
+				// between them.
 				r.Header.Del("Authorization")
 				r.Header.Del("X-Request-Id")
-				if route.Dialect != domain.DialectAnthropic {
-					if secret != "" {
-						r.Header.Set("Authorization", "Bearer "+secret)
-					}
-					break
-				}
-				if secret != "" {
-					r.Header.Set("x-api-key", secret)
-				}
-				if route.APIVersion != "" {
+				anthropic := route.Dialect == domain.DialectAnthropic
+				if anthropic && route.APIVersion != "" {
 					r.Header.Set("anthropic-version", route.APIVersion)
+				}
+				switch {
+				case secret == "":
+				case anthropic && !transform.HasBearerAnthropicFront(vendor(route)):
+					r.Header.Set("x-api-key", secret)
+				default:
+					r.Header.Set("Authorization", "Bearer "+secret)
 				}
 			case secret != "":
 				r.Header.Set("Authorization", "Bearer "+secret)
