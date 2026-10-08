@@ -10,16 +10,15 @@ import (
 	"testing"
 
 	"github.com/phot0n/pathway/internal/config"
+	"github.com/phot0n/pathway/internal/domain"
 )
 
-// payloadFixture is newFixture with a payload log wired in and the test user's opt-in set as
+// payloadFixture is newFixture with a payload log wired in and the test key's opt-in set as
 // asked. The buffer is the payload file.
 func payloadFixture(t *testing.T, engineHandler http.HandlerFunc, optIn bool) (*fixture, *bytes.Buffer) {
 	t.Helper()
 	f := newFixture(t, engineHandler)
-	user := f.store.Users["test-user"]
-	user.LogPayloads = optIn
-	f.store.Users["test-user"] = user
+	f.withKey(func(k *domain.KeyRecord) { k.LogPayloads = optIn })
 
 	buf := &bytes.Buffer{}
 	f.handler = buildHandler(t, f.store, config.Config{}, 0, func(s *Services) {
@@ -40,7 +39,7 @@ func jsonLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 
 // The row a support query needs: the prompt as the customer wrote it, the output as they received
 // it, and the join keys to the access line.
-func TestAnOptedInUsersPromptAndOutputAreLogged(t *testing.T) {
+func TestAnOptedInKeysPromptAndOutputAreLogged(t *testing.T) {
 	f, buf := payloadFixture(t, jsonEngine(`{"id":"chatcmpl-1",`+usageObject+`}`), true)
 	prompt := `{"model":"qwen3-4b","messages":[{"role":"user","content":"hi"}]}`
 
@@ -53,7 +52,7 @@ func TestAnOptedInUsersPromptAndOutputAreLogged(t *testing.T) {
 	if output, ok := line["output"].(string); !ok || !strings.Contains(output, "chatcmpl-1") {
 		t.Errorf("output = %q, want what the client received", line["output"])
 	}
-	if line["model"] != "qwen3-4b" || line["user"] != "test-user" || line["key"] != "abc123" {
+	if line["model"] != "qwen3-4b" || line["team"] != "test-team" || line["key"] != "abc123" {
 		t.Errorf("join fields off: %v", line)
 	}
 	if rid, ok := line["rid"].(string); !ok || rid == "" || rid == "-" {
@@ -64,9 +63,9 @@ func TestAnOptedInUsersPromptAndOutputAreLogged(t *testing.T) {
 	}
 }
 
-// Default off, and never silent: a user the control plane has not flagged leaves no trace even on
+// Default off, and never silent: a key the control plane has not flagged leaves no trace even on
 // a box with the payload log configured.
-func TestAUserNotOptedInLogsNothing(t *testing.T) {
+func TestAKeyNotOptedInLogsNothing(t *testing.T) {
 	f, buf := payloadFixture(t, jsonEngine(`{`+usageObject+`}`), false)
 
 	f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)

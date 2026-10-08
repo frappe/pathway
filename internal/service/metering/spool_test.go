@@ -13,7 +13,7 @@ import (
 func spoolFixture(t *testing.T, maxBytes int64) (*memory.Store, *Service, string) {
 	t.Helper()
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Prepaid: true, Budget: 1_000}
+	store.Keys["k1"] = domain.KeyRecord{Prepaid: true, Budget: 1_000}
 	path := filepath.Join(t.TempDir(), "spool.jsonl")
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 	svc.Spool = NewSpool(store.Repositories().Usage, quiet(), func() string { return path }, func() int64 { return maxBytes })
@@ -22,7 +22,7 @@ func spoolFixture(t *testing.T, maxBytes int64) (*memory.Store, *Service, string
 
 func record(t *testing.T, svc *Service, id string) {
 	svc.Record(context.Background(), Report{
-		RequestID: id, Prefix: "K-1", Model: "m", User: "GU-1", Prepaid: true, Budget: 1_000,
+		RequestID: id, Prefix: "K-1", Model: "m", MeterID: "k1", Prepaid: true, Budget: 1_000,
 		Pricing: priced(t, "mp1", map[string]int64{"request_count": 7}),
 	})
 }
@@ -49,8 +49,8 @@ func TestAFailedAccrualIsSpooledThenReplayedOnce(t *testing.T) {
 
 	delete(store.Fail, "usage")
 	svc.Spool.Replay(context.Background())
-	if lines(t, path) != 0 || store.Usage["K-1"]["p:mp1:cost"] != 7 || store.Users["GU-1"].Spent != 7 {
-		t.Fatalf("after replay: %d lines, usage %v, spent %d", lines(t, path), store.Usage["K-1"], store.Users["GU-1"].Spent)
+	if lines(t, path) != 0 || store.Usage["K-1"]["p:mp1:cost"] != 7 || store.Keys["k1"].Spent != 7 {
+		t.Fatalf("after replay: %d lines, usage %v, spent %d", lines(t, path), store.Usage["K-1"], store.Keys["k1"].Spent)
 	}
 	// A pass that died before rewriting the file: the line is back, the marker makes it a no-op.
 	if err := os.WriteFile(path, saved, 0o600); err != nil {

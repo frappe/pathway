@@ -16,41 +16,40 @@ import (
 // month is NOT tracked here: the control plane stamps it from its own clock when it pulls.
 type usage struct{ rdb *redis.Client }
 
-// accrueBody lands one request in one call: the counters, then the holder's lifetime spend and
-// the balance view the drain carries. One script rather than a pipeline because user_spent needs
-// the incremented total, and a drain landing between two calls would split one request across
-// two pulls. The spend moves only on a holder the control plane has pushed: a legacy key names a
-// user this box may never have been told about, and writing to that hash would fabricate a record
-// that grants nothing. Values travel as strings — a Lua number is a double, and would round a
-// nano-USD total past 14 digits on its way back into a command.
+// accrueBody lands one request in one call: the counters, then the key's lifetime spend and the
+// balance view the drain carries. One script rather than a pipeline because key_spent needs the
+// incremented total, and a drain landing between two calls would split one request across two
+// pulls. The spend moves only on a key the control plane has pushed: writing to an absent hash
+// would fabricate a record that grants nothing. Values travel as strings — a Lua number is a
+// double, and would round a nano-USD total past 14 digits on its way back into a command.
 //
 // ARGV[1] cost, ARGV[2] budget, ARGV[3..] field, value, ...
 const accrueBody = `
-local function accrue(usage, user)
+local function accrue(usage, key)
   for i = 3, #ARGV, 2 do
     redis.call('HINCRBY', usage, ARGV[i], ARGV[i + 1])
   end
-  if user == nil or redis.call('EXISTS', user) == 0 then
+  if key == nil or redis.call('EXISTS', key) == 0 then
     return 0
   end
-  redis.call('HINCRBY', user, 'spent', ARGV[1])
-  local spent = redis.call('HGET', user, 'spent')
-  redis.call('HSET', usage, 'user_spent', spent, 'user_balance', ARGV[2])
+  redis.call('HINCRBY', key, 'spent', ARGV[1])
+  local spent = redis.call('HGET', key, 'spent')
+  redis.call('HSET', usage, 'key_spent', spent, 'key_balance', ARGV[2])
   if spent ~= '0' then
-    redis.call('HINCRBY', usage, 'user_balance', '-' .. spent)
+    redis.call('HINCRBY', usage, 'key_balance', '-' .. spent)
   end
   return 1
 end
 `
 
-// KEYS[1] usage:<prefix>, KEYS[2] user:<name> (absent = no holder)
+// KEYS[1] usage:<prefix>, KEYS[2] key:<meter id> (absent = not charged)
 var accrueScript = redis.NewScript(accrueBody + `return accrue(KEYS[1], KEYS[2])`)
 
 // replayScript is accrue behind a once-per-request marker, kept a week: a spool pass that dies
 // after landing a line lands it again next pass, and the marker makes that a no-op. → -1 when
 // the marker was already there.
 //
-// KEYS[1] accrued:<request id>, KEYS[2] usage:<prefix>, KEYS[3] user:<name> (absent = no holder)
+// KEYS[1] accrued:<request id>, KEYS[2] usage:<prefix>, KEYS[3] key:<meter id> (absent = not charged)
 var replayScript = redis.NewScript(accrueBody + `
 if not redis.call('SET', KEYS[1], '1', 'NX', 'EX', 604800) then
   return -1
@@ -71,8 +70,8 @@ func (u usage) Accrue(ctx context.Context, a repository.Accrual) error {
 		return nil
 	}
 	keys := []string{"usage:" + a.Prefix}
-	if a.User != "" {
-		keys = append(keys, "user:"+a.User)
+	if a.Key != "" {
+		keys = append(keys, "key:"+a.Key)
 	}
 	return accrueScript.Run(ctx, u.rdb, keys, accrueArgs(a)...).Err()
 }
@@ -82,8 +81,8 @@ func (u usage) Replay(ctx context.Context, a repository.Accrual) (bool, error) {
 		return false, nil
 	}
 	keys := []string{"accrued:" + a.ID, "usage:" + a.Prefix}
-	if a.User != "" {
-		keys = append(keys, "user:"+a.User)
+	if a.Key != "" {
+		keys = append(keys, "key:"+a.Key)
 	}
 	landed, err := replayScript.Run(ctx, u.rdb, keys, accrueArgs(a)...).Int()
 	return landed == 1, err

@@ -79,9 +79,8 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-		Status: "active", User: "test-user", KeyPrefix: "abc123",
+		Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"),
 	}
-	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	store.Routes["qwen3-4b"] = []domain.Route{{
 		EngineURL: engine.URL + "/e/md1", InternalKey: "engine-key",
@@ -231,8 +230,8 @@ func TestANonStreamingBodyIsForwardedUnchanged(t *testing.T) {
 }
 
 // The wiring behind the cachesalt transform: the tenant it prefixes with is the authenticated
-// Grove user, not anything the caller can choose.
-func TestACacheSaltIsNamespacedByTheAuthenticatedUser(t *testing.T) {
+// key's team, not anything the caller can choose.
+func TestACacheSaltIsNamespacedByTheAuthenticatedTeam(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
 	f.post("/v1/chat/completions", `{"model":"qwen3-4b","cache_salt":"team-a","messages":[]}`)
 
@@ -240,7 +239,7 @@ func TestACacheSaltIsNamespacedByTheAuthenticatedUser(t *testing.T) {
 	if err := json.Unmarshal(f.seen.body, &body); err != nil {
 		t.Fatalf("engine body: %v", err)
 	}
-	if body["cache_salt"] != "test-user:team-a" {
+	if body["cache_salt"] != "test-team:team-a" {
 		t.Errorf("cache_salt = %v, want the tenant-prefixed form", body["cache_salt"])
 	}
 }
@@ -452,9 +451,7 @@ func TestAGeographyPinIsHonoured(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{}`))
-			user := f.store.Users["test-user"]
-			user.Geography = c.pin
-			f.store.Users["test-user"] = user
+			f.withKey(func(k *domain.KeyRecord) { k.Geography = c.pin })
 			f.handler = buildHandler(t, f.store, config.Config{Geography: c.gateway}, 0)
 
 			w := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
@@ -480,8 +477,7 @@ func TestAGeographyPinIsHonoured(t *testing.T) {
 // was sent.
 func TestAnOversizedBodyIsRefused(t *testing.T) {
 	store := memory.New()
-	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", User: "test-user", KeyPrefix: "abc123"}
-	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
+	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	handler := buildHandler(t, store, config.Config{}, 128)
 

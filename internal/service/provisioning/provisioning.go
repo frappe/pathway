@@ -30,14 +30,6 @@ func (s *Service) DeleteKeys(ctx context.Context, ids []string) (int, error) {
 	return s.store.Keys.Delete(ctx, ids)
 }
 
-func (s *Service) UpsertUsers(ctx context.Context, records []repository.UserUpsert) error {
-	return s.store.Users.Upsert(ctx, records)
-}
-
-func (s *Service) DeleteUsers(ctx context.Context, ids []string) (int, error) {
-	return s.store.Users.Delete(ctx, ids)
-}
-
 func (s *Service) UpsertGroups(ctx context.Context, records []repository.GroupUpsert) error {
 	return s.store.Groups.Upsert(ctx, records)
 }
@@ -103,9 +95,9 @@ func (s *Service) AckUsage(ctx context.Context, acks map[string][]string, retent
 	return s.store.Usage.Ack(ctx, acks, retention)
 }
 
-// AdjustSpent corrects a holder's lifetime spend on this store, once per id.
-func (s *Service) AdjustSpent(ctx context.Context, user, id string, delta int64) (int64, bool, bool, error) {
-	return s.store.Users.AdjustSpent(ctx, user, id, delta)
+// AdjustSpent corrects a key's lifetime spend on this store, once per id.
+func (s *Service) AdjustSpent(ctx context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
+	return s.store.Keys.AdjustSpent(ctx, meterID, id, delta)
 }
 
 // NewDrainID is sortable by when the drain started, and unique across boxes on one store.

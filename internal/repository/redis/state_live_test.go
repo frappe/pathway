@@ -68,7 +68,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 		},
 		Keys: map[string]repository.KeyBucket{
 			pushed: {Hash: "kh", Records: []repository.KeyUpsert{
-				{MeterID: kept, Prefix: "K-kept", User: "GU-1", Status: "active", CanReadBalance: true},
+				{MeterID: kept, Prefix: "K-kept", Team: "T-1", Status: "active", Geography: "eu"},
 			}},
 		},
 		Routes: &repository.RoutesPush{
@@ -84,8 +84,8 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	if counts.Groups != 1 || counts.Keys != 1 || counts.Routes != 1 {
 		t.Errorf("counts = %+v", counts)
 	}
-	if rec, _, err := client.Store().Keys.Resolve(ctx, kept); err != nil || !rec.Key.CanReadBalance {
-		t.Errorf("pushed key = %+v, %v; want it allowed to read the balance", rec, err)
+	if rec, _, err := client.Store().Keys.Resolve(ctx, kept); err != nil || rec.Key.Geography != "eu" || rec.Key.Team != "T-1" {
+		t.Errorf("pushed key = %+v, %v; want its team and pin", rec, err)
 	}
 
 	for key, want := range map[string]bool{
@@ -132,47 +132,60 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	}
 }
 
-func TestAUserRecordRoundTripsItsGeography(t *testing.T) {
+// A push lands the whole policy on the key and strips what older control planes wrote there.
+func TestAKeyRecordRoundTripsItsPolicy(t *testing.T) {
 	client, state := liveStore(t)
 	ctx := context.Background()
-	bucket := domain.BucketOf("GU-1")
-	if _, err := state.Apply(ctx, repository.StatePush{Users: map[string]repository.UserBucket{
-		bucket: {Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Geography: "eu"}}},
+	client.rdb.HSet(ctx, "key:aa", "user", "GU-1", "can_read_balance", "1", "spent", "40")
+	bucket := domain.BucketOf("aa")
+	if _, err := state.Apply(ctx, repository.StatePush{Keys: map[string]repository.KeyBucket{
+		bucket: {Hash: "kh", Records: []repository.KeyUpsert{{
+			MeterID: "aa", Prefix: "abc", Team: "T-1", Status: "active", Groups: "acme", Allow: "m9",
+			Deny: "m2", Limited: true, LogPayloads: true, Geography: "eu", Prepaid: true, Budget: 1_000,
+			Limits: "requests:1m:5",
+		}}},
 	}}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	usr, found, err := client.Store().Users.Get(ctx, "GU-1")
-	if err != nil || !found || usr.Geography != "eu" {
-		t.Errorf("Get = %+v, %v, %v; want geography eu", usr, found, err)
+	holder, found, err := client.Store().Keys.Resolve(ctx, "aa")
+	rec := holder.Key
+	if err != nil || !found || rec.Team != "T-1" || !rec.Groups["acme"] || !rec.Allow["m9"] || !rec.Deny["m2"] ||
+		!rec.Limited || !rec.LogPayloads || rec.Geography != "eu" || !rec.Prepaid || rec.Budget != 1_000 ||
+		rec.Spent != 40 || len(rec.Limits) != 1 {
+		t.Errorf("Resolve = %+v, %v, %v; want every pushed field and spent left alone", rec, found, err)
+	}
+	for _, stale := range []string{"user", "can_read_balance"} {
+		if client.rdb.HExists(ctx, "key:aa", stale).Val() {
+			t.Errorf("stale field %q survived the push", stale)
+		}
 	}
 }
 
 // The push is hash-gated: a pushed record that expired would stay missing until its section
 // changed. So nothing the control plane pushes may carry a TTL, including after the two gateway
-// writes that touch a pushed record — an accrual and a spend adjustment on the holder.
+// writes that touch a pushed record — an accrual and a spend adjustment on the key.
 func TestPushedStateNeverExpires(t *testing.T) {
 	client, state := liveStore(t)
 	ctx := context.Background()
 	push := repository.StatePush{
 		Groups: &repository.GroupsPush{Hash: "gh", Records: []repository.GroupUpsert{{Name: "acme", Models: "m"}}},
-		Users: map[string]repository.UserBucket{domain.BucketOf("GU-1"): {
-			Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Prepaid: true, Budget: 1_000, Limits: "requests:1m:5"}},
-		}},
 		Keys: map[string]repository.KeyBucket{domain.BucketOf("aa"): {
-			Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", User: "GU-1", Status: "active"}},
+			Hash: "kh", Records: []repository.KeyUpsert{{
+				MeterID: "aa", Prefix: "abc", Team: "T-1", Status: "active", Prepaid: true, Budget: 1_000, Limits: "requests:1m:5",
+			}},
 		}},
 		Routes: &repository.RoutesPush{Hash: "rh", Table: map[string][]domain.Route{"m": {{EngineURL: "http://e", Healthy: true}}}},
 	}
 	if _, err := state.Apply(ctx, push); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if err := client.Store().Usage.Accrue(ctx, liveAccrual("abc", "GU-1", 250)); err != nil {
+	if err := client.Store().Usage.Accrue(ctx, liveAccrual("abc", "aa", 250)); err != nil {
 		t.Fatalf("Accrue: %v", err)
 	}
-	if _, _, _, err := client.Store().Users.AdjustSpent(ctx, "GU-1", "adj-1", -50); err != nil {
+	if _, _, _, err := client.Store().Keys.AdjustSpent(ctx, "aa", "adj-1", -50); err != nil {
 		t.Fatalf("AdjustSpent: %v", err)
 	}
-	for _, key := range []string{"model_group:acme", "user:GU-1", "key:aa", "deploy:m", stateHashKey} {
+	for _, key := range []string{"model_group:acme", "key:aa", "deploy:m", stateHashKey} {
 		// -1 is "exists, no expiry"; -2 would be a record the push never wrote.
 		if ttl := client.rdb.TTL(ctx, key).Val(); ttl != -1 {
 			t.Errorf("%s: ttl = %d, want -1 (no expiry)", key, ttl)

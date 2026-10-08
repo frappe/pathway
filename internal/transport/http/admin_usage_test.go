@@ -61,12 +61,12 @@ func TestTheDrainAckCycle(t *testing.T) {
 	}
 }
 
-// A spend correction applies once per id, and names a holder this store must already have.
+// A spend correction applies once per id, and names a key this store must already have.
 func TestSpendAdjust(t *testing.T) {
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Spent: 3_000}
+	store.Keys["aa"] = domain.KeyRecord{Spent: 3_000}
 	handler := adminFixture(t, store)
-	body := `{"user": "GU-1", "delta": -1000, "id": "CD-1"}`
+	body := `{"key": "aa", "delta": -1000, "id": "CD-1"}`
 
 	for i, want := range []struct {
 		spent   int64
@@ -84,10 +84,10 @@ func TestSpendAdjust(t *testing.T) {
 			t.Errorf("call %d = %+v, want %+v", i, reply, want)
 		}
 	}
-	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/spend-adjust", `{"user": "GU-ghost", "delta": 5, "id": "CD-2"}`); w.Code != http.StatusNotFound {
-		t.Errorf("unknown holder = %d, want 404", w.Code)
+	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/spend-adjust", `{"key": "ghost", "delta": 5, "id": "CD-2"}`); w.Code != http.StatusNotFound {
+		t.Errorf("unknown key = %d, want 404", w.Code)
 	}
-	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/spend-adjust", `{"user": "GU-1", "delta": 5}`); w.Code != http.StatusBadRequest {
+	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/spend-adjust", `{"key": "aa", "delta": 5}`); w.Code != http.StatusBadRequest {
 		t.Errorf("no id = %d, want 400", w.Code)
 	}
 }

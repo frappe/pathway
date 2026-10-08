@@ -8,7 +8,7 @@ proxies the request, meters what it cost, and upgrades itself without dropping a
 | | Gateway Server | Ingress Server |
 |---|---|---|
 | env | `GROVE_GATEWAY_ID` | `GROVE_INGRESS_ID` |
-| holds | keys, users, groups, usage | nothing tenant-shaped |
+| holds | keys, groups, usage | nothing tenant-shaped |
 | picks | a route (network or engine) | a replica in its own VPC |
 | meters | yes | no — usage belongs to a tenant it cannot see |
 
@@ -42,7 +42,7 @@ about to change something, skip to *How to do things* and *Things worth knowing*
 ```
                     ┌──────────────────────────────────────────────┐
                     │  Grove (Frappe control plane)                │
-                    │  keys · users · groups · models · placements │
+                    │  keys · teams · groups · models · placements │
                     └───────┬──────────────────────────▲───────────┘
    POST /grove-admin/state  │                          │  GET /grove-admin/usage + ack
    every 2 min (hash-gated) │                          │  hourly (drain)
@@ -77,7 +77,7 @@ every route pushed before the split carried.
 
 **A gateway's state lives in one Redis:** loopback, or the Gateway Store its Network's
 gateways share (`GROVE_REDIS_ADDR` + `GROVE_REDIS_PASSWORD`). Its contents are either pushed (keys,
-users, groups, routes) or derived (sticky, in-flight, health, usage). On a shared store in-flight is
+groups, routes) or derived (sticky, in-flight, health, usage). On a shared store in-flight is
 one counter, so a directly dialled replica's cap holds across those gateways. A dead store fails its
 gateways closed: nothing authenticates and `/healthz` reports it. The store has to be a single Redis,
 not a Cluster: authentication is one script that follows a key to its user and groups, records it is
@@ -208,7 +208,7 @@ The rule everywhere: **one owner per piece of state that can drift.**
 | transport pool | `proxy.Proxy` | until a tunable changes | `Proxy.Reconfigure` |
 | certificate | `certLoader` | until the file's mtime moves | the loader |
 | sticky, in-flight, health, usage | the box's Redis | minutes to a pull cycle | this box (or its store's gateways) |
-| keys, users, groups, routes | the box's Redis | until the next push | **the control plane** |
+| keys, groups, routes | the box's Redis | until the next push | **the control plane** |
 
 The last row is the important one. Everything pushed is a *projection*: the gateway never edits it,
 never merges into it, and never treats a local change as authoritative. Anything it does own is
@@ -302,11 +302,11 @@ proxy ──► engine (or ingress ──► engine)
 | `recover` | panic → 500, so nothing below can drop a connection |
 | `accesslog` | mints the request id, times the request, writes the one durable line per request |
 | `drain` | while shutting down: 503 + `Retry-After` + "gateway is restarting" |
-| `auth` | bearer → key → user → groups, once, into the request state |
-| `quota` | the credit flag the control plane pushed, or a prepaid balance spent → 402; then the holder's rate limits → 429 + `Retry-After` |
+| `auth` | bearer → key → groups, once, into the request state |
+| `quota` | the geography pin → 403; the credit flag the control plane pushed, or the key's cap spent → 402; then the key's rate limits → 429 + `Retry-After` |
 | `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Not a JSON object, or no `model` in it (or in the form, or an upgrade's query) → 400; over `max_body_bytes` → 413; not all here within 60s → 408 |
 | `modelaccess` | `CanUse` → 403 |
-| `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the user's `log_payloads` is on. See [The payload log](#the-payload-log) |
+| `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the key's `log_payloads` is on. See [The payload log](#the-payload-log) |
 | `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot, except on a vendor row |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |
 | `fallback` | runs the stages below again on the next model in the body's `fallbacks` when the one serving cannot (5xx, or a key failure `retry` could not rotate away). See [Fallback models](#fallback-models) |
@@ -374,8 +374,8 @@ and `/v1/realtime` is not a path any output claims, so any model may serve it. T
 #### The payload log
 
 The one place the gateway keeps customer content rather than metadata, so it is off twice over: the
-box needs `GROVE_PAYLOAD_LOG`, and the user needs `log_payloads` (pushed on `user:<name>`, read per
-request, so turning it takes effect on the next one). One JSON line per request, written when the
+box needs `GROVE_PAYLOAD_LOG`, and the key needs `log_payloads` (pushed on `key:<hash>` from its
+team, read per request, so turning it takes effect on the next one). One JSON line per request, written when the
 request ends — a client that hung up mid-stream still gets one, with what it had received:
 
 `rid` (joins the access line), `key`, `user`, `model`, `fallback` (the model whose output this is,
@@ -436,7 +436,7 @@ What each layer contributes, for one `POST /v1/chat/completions`:
 | 1 | `transport/http` | TLS handshake, `ServeMux` matches host + path |
 | 2 | `middleware/auth` | reads the `Authorization` header |
 | 3 | `service/admission` | `Identify` → one store read |
-| 4 | `repository/redis` | one script: `HGETALL key:…`, then the `user:…` it names and each `model_group:…` that names |
+| 4 | `repository/redis` | one script: `HGETALL key:…`, then each `model_group:…` it names |
 | 5 | `domain` | `Evaluate` — pure, no I/O |
 | 6 | `middleware/body` | bounded read, JSON decode, model out |
 | 7 | `service/routing` | `Pick` — sticky read, in-flight counts, health |
@@ -713,27 +713,29 @@ health mark and gives its slot back, and leaves an `attempt` line on the access 
 
 ## Admission
 
-Three records, resolved in order — `key:` → `user:` → `model_group:`. A user names any number of
-groups; their grants are unioned into one before the gates run.
+Two records, resolved in order — `key:` → `model_group:`. A key names any number of groups; their
+grants are unioned into one before the gates run.
 
-The split is deliberate. A credential's only fact of its own is whether it has been revoked;
-**who holds it, what they may call and whether they are over budget are facts about the person.**
-So one leaked key dies without touching the rest, and a budget flip is one write however many keys
-that person holds.
+**The key is the policy.** Its team (a Central Team) is the ledger the control plane bills, but
+everything a gate reads — models, geography, rate limits, and the cap it spends against — sits on
+the key itself. That is what lets a team spread keys across geographies: a key lives on one
+geography's store, that store holds the key's whole cap and counts all its spend, so the gate is
+exact however many other keys the team holds elsewhere. A revoked key dies alone; the team's
+balance running out flips `limited` on every key it holds, one field each.
 
 `Evaluate` then runs three gates, in this order:
 
 | Gate | Status | Why in this position |
 |---|---|---|
-| key is `active` | 401 | Checked first: a revoked key is 401 even for a holder who is also over quota, because the key is the thing that is wrong |
-| holder has credit | 402 | `limited` is a pushed flag; `prepaid && spent >= budget` is this Redis's own counter against the amount the user loaded. Either → 402 |
+| key is `active` | 401 | Checked first: a revoked key is 401 even when it is also over quota, because the key is the thing that is wrong |
+| key has credit | 402 | `limited` is a pushed flag (the team's balance is gone); `prepaid && spent >= budget` is this Redis's own counter against the key's cap. Either → 402 |
 | `CanUse(model)` | 403 | |
 
 `CanUse` is the whole access rule and fails closed:
 
 ```
-deny wins over everything          usr.Deny[model]        → false
-otherwise, every group's grant ∪ user's own allow          → true
+deny wins over everything          key.Deny[model]        → false
+otherwise, every group's grant ∪ key's own allow           → true
 nothing granted it                                        → false
 ```
 
@@ -742,22 +744,23 @@ something the inference path would refuse.
 
 ### Credit gates
 
-Two, both read off the user record before the body is, both answering 402
-`credit balance exhausted`. The control plane's: its own balance priced from the pull, flipped as
-`limited` and pushed. This box's own: `prepaid && spent >= budget`, where `spent` is the one counter
-this process keeps (see *The records themselves*). A client cannot tell which one refused it.
+Two, both read off the key record before the body is, both answering 402
+`credit balance exhausted`. The control plane's: the team's balance priced from the pull, flipped as
+`limited` and pushed onto every key of the team. This box's own: `prepaid && spent >= budget`, the
+key's cap against the one counter this process keeps (see *The records themselves*). A client
+cannot tell which one refused it.
 
 ### Rate limiting
 
-Per holder, pushed on the user record as `limits`: a comma list of `<metric>:<window>:<value>`,
+Per key, pushed on its record as `limits`: a comma list of `<metric>:<window>:<value>`,
 e.g. `requests:1m:200,total_tokens:1h:50000`. No entry = uncapped. Checked in `quota`, after the
-credit gates, so a holder with no balance does not use up a request.
+credit gates, so a key with no balance does not use up a request.
 
 | | |
 |---|---|
 | Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |
-| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the holder's first request |
-| Counter | `lim:<user>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
+| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the key's first request |
+| Counter | `lim:<key prefix>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
 | Refusal | 429 `rate limit exceeded: 200 requests per 1m` (`rate_limit_error`), `Retry-After` = seconds to the window's end. Over several limits at once, the one that resets last is named |
 
 **Requests are exact, tokens are check-then-debit.** One Lua script reads every counter and, only
@@ -773,9 +776,9 @@ is debited what usage it reported. A debit the store refuses is logged and dropp
 replayed later, it would land in a window the tokens were not used in.
 
 Scope: the counters live in this gateway's store, so a limit is exact across every gateway sharing
-it and separate on a gateway with its own Redis. The limit store failing is a 503 for a holder with
+it and separate on a gateway with its own Redis. The limit store failing is a 503 for a key with
 limits; one without never reads it. A push carrying a limit this binary cannot read is refused 400,
-naming the user.
+naming the key.
 
 ---
 
@@ -882,15 +885,15 @@ root (a vendor fee reported in `usage`) is one parser line that fills its bucket
 pricing in force; a price change lands with the push that carries it, and a request is charged by
 the pricing its gateway held. One Lua script per request: HINCRBY every counter, each priced counter again as `p:<pricing id>:<counter>`,
 then `cost` and `p:<pricing id>:cost` — Σ counter × rate, nano-USD, truncated per counter, 0 on an
-unpriced route — then, for a prepaid holder only, `HINCRBY user:<u> spent cost` and `HSET user_spent
-user_balance` (`budget − spent`, negative once overspent; last writer wins) on the usage hash. A free
-holder's usage is counted and priced the same, but tagged `f:<pricing id>:` instead of `p:`; their
-`spent` never moves and the drain carries no balance for them, so turning them prepaid later starts
-them at what they load. The tag is set per request, so a drain that spans a flip carries both and the
+unpriced route — then, for a prepaid key only, `HINCRBY key:<hash> spent cost` and `HSET key_spent
+key_balance` (`budget − spent`, negative once overspent; last writer wins) on the usage hash. A free
+team's usage is counted and priced the same, but tagged `f:<pricing id>:` instead of `p:`; its keys'
+`spent` never moves and the drain carries no balance for them, so turning the team prepaid later
+starts it at what it loads. The tag is set per request, so a drain that spans a flip carries both and the
 pull bills only the `p:` part. The pull prices each
 `p:<pricing id>` or `f:<pricing id>` group with that same pricing's table, so the two sides can only disagree when they
 hold different rates for one pricing id. A drain therefore never sees a counter without its cost, or a cost without the spend it
-moved. The spend moves only on a holder the control plane has pushed.
+moved. The spend moves only on a key the control plane has pushed.
 
 ### Correlation
 
@@ -1143,12 +1146,11 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 
 | Key | Type | Written by |
 |---|---|---|
-| `key:<sha256(secret)>` | hash | state push, `keys` section |
-| `user:<Grove User>` | hash | state push, `users` section; `spent` by the gateway |
+| `key:<sha256(secret)>` | hash | state push, `keys` section; `spent` by the gateway |
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
-| `lim:<user>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see *Rate limiting* |
+| `lim:<key prefix>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see *Rate limiting* |
 | `usage:<key prefix>` | hash | the gateway; set aside by `GET /grove-admin/usage` |
 | `drained:<drain id>:<key prefix>` | hash, kept `usage_retention` once acked | `GET /grove-admin/usage` renames a live counter here |
 | `drain:unacked` | set of `<drain id>:<key prefix>` | every counter set aside and not yet acked |
@@ -1166,11 +1168,11 @@ would stay missing until its section changed; only gateway-owned keys expire
 ### How the push works
 
 `POST /grove-admin/state` is desired state, whole, and **absence prunes**. The body carries any
-subset of four sections — groups, users, keys, routes — each stamped with a
+subset of three sections — groups, keys, routes — each stamped with a
 hash Grove computed. The agent applies the whole body in ONE Redis MULTI: HSET every named
 record, DEL every record in a pushed section the payload does not name, then store the hashes in
 `grove:state_hash`. A Redis error is a 500 and none of it lands — the hashes never claim state
-that did not arrive. Only `model_group:/user:/key:/deploy:` are ever pruned; usage,
+that did not arrive. Only `model_group:/key:/deploy:` are ever pruned; usage,
 sticky, inflight and health keys are the gateway's own.
 
 Every admin body is decoded strictly: a field this binary does not know is a 400 naming it
@@ -1181,8 +1183,8 @@ which is what happened once. Consequence: a new route field ships in the binary 
 pushes it.
 
 `GET /grove-admin/state-hash` returns that stored map. Grove diffs its computed hashes against it
-every 2 minutes and pushes only what differs — an in-sync box costs one GET. `users` and `keys`
-are split into 256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
+every 2 minutes and pushes only what differs — an in-sync box costs one GET. `keys` is split into
+256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
 independently, so one minted key ships one bucket, not the population. A wiped Redis has no
 hashes, reads as total drift, and is fully rebuilt on the next tick — that is the only repair
 path and the only one needed. Both planes mount these endpoints; an ingress only ever receives
@@ -1228,41 +1230,43 @@ ack — `"dead": ["<request id>", ...]` beside `"acks"` — which removes it; `c
 failed, last_used, last_rate_limited}}` per vendor credential, lifetime and never drained; an id
 never dialled is zeros. The control plane sums it across stores for the operator.
 
-`POST /grove-admin/spend-adjust {"user", "delta", "id"}` corrects one holder's `spent` on this store
-by `delta` nano-USD, once per `id` — a retry answers `{"spent", "applied": false}` and moves
-nothing. A holder this store does not hold is a 404; nothing is invented.
+`POST /grove-admin/spend-adjust {"key", "delta", "id"}` corrects one key's `spent` on this store
+by `delta` nano-USD, once per `id` (`key` is the record id, sha256 hex) — a retry answers
+`{"spent", "applied": false}` and moves nothing. A key this store does not hold is a 404; nothing
+is invented.
 
 ### The records themselves
 
 ```
-key:<sha256(secret)>       status  user  prefix  can_read_balance
-user:<Grove User>          email  group (comma list)  allow  deny  limited  log_payloads  geography
-                           prepaid  budget  spent  limits
+key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
+                           geography  prepaid  budget  spent  limits
 model_group:<Model Group>  models
 usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
                            prompt_tokens_above_272k  cached_tokens_above_272k
                            cache_write_tokens_above_272k  completion_tokens_above_272k
                            audio_seconds
-                           cost  user_spent  user_balance
+                           cost  key_spent  key_balance
                            m:<metric>:<model>  m:<metric>:<deployment>
                            p:<pricing id>:<priced counter>  p:<pricing id>:cost
 ```
 
 `group` / `allow` / `deny` / `models` are comma lists; blank parses to a map that answers false
-to everything, which is the fail-closed default. `group` holds every group the user is in, so a
-name containing a comma would split — Grove refuses one.
+to everything, which is the fail-closed default. `group` holds every group the key is in, so a
+name containing a comma would split — Grove refuses one. `team` is the Central Team the key bills
+to: the cache-salt namespace and the payload log's join field, read by no gate.
 
-`prepaid` / `budget` / `spent` are the credit gate. `budget` is the amount the user loaded — Σ
-their credits, nano-USD — and the same number on every store. `spent` is this Redis's own lifetime
-counter: every metered request of a prepaid holder moves it, a push never does (the push is an HSET
-of the fields it names), and only `spend-adjust` corrects it. This box's balance is `budget − spent`; Grove keeps its
-own from the same credits and audits the two every pull. `prepaid && spent >= budget` → 402 `credit balance exhausted` (`billing_error` on the Anthropic surface), at
-`quota` before the body is read, and `/v1/models` refuses through the same `Evaluate`. `limited`
-is the control plane's verdict and refuses alike. The gate is exact within one store — every
-gateway on it moves the one counter — and eventual across stores, where each box sees only its own
-spend and `limited` from the pull is what stops the rest; the overspend that window allows lands as a
-negative balance on the control plane.
+`prepaid` / `budget` / `spent` are the credit gate. `budget` is the key's cap — the slice of its
+team's balance the control plane allotted it, nano-USD; Grove keeps Σ caps within the balance.
+`spent` is this Redis's own lifetime counter: every metered request of a prepaid key moves it, a
+push never does (the push is an HSET of the fields it names), and only `spend-adjust` corrects it.
+This box's balance for the key is `budget − spent`; Grove keeps the team's own from the same
+credits and audits the two every pull. `prepaid && spent >= budget` → 402 `credit balance
+exhausted` (`billing_error` on the Anthropic surface), at `quota` before the body is read, and
+`/v1/models` refuses through the same `Evaluate`. `limited` is the control plane's verdict on the
+team and refuses alike. A key pinned by `geography` lives on one store, so its gate is exact —
+every gateway on that store moves the one counter — and a team's keys elsewhere spend their own
+caps; `limited` from the pull is the backstop once the team as a whole is out.
 
 `deploy:<model>` is a JSON array, replaced whole:
 
@@ -1362,13 +1366,10 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 
 ### Backwards compatibility that is still load-bearing
 
-- A key record written before access moved off the credential carries `group`/`allow`/`deny`/
-  `models` itself. If `user:<name>` is missing, those are used. This is what makes the control
-  plane and the gateway deployable in **either order**.
-- A *current* key with no user record resolves to nothing rather than falling back to something.
-  Fail closed — the difference between the two is the whole quarantine.
-- `status: "rate_limited"` was once a third value on the credential. It is lifted off on read, so
-  `status` means only "is this live".
+- A push strips the fields older control planes wrote on a key (`user`, `can_read_balance`,
+  `models`, `priority`), so a record never shows the current policy beside a stale pointer. A
+  control plane still sending a `users` section is refused 400 by name: the policy moved onto the
+  key in one cut, and this binary must land on a box before that control plane pushes to it.
 - A route with no `kind` is `direct`, which is what every route pushed before the split was.
 - A route with no `upstream_model` sends the caller's `model` unchanged, which is what every route
   pushed before the vendor split did.
@@ -1381,7 +1382,7 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 | `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` only — anything else under it is a 404 in Anthropic's shape — keyed by `x-api-key` or a Bearer |
 | `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
-| `GET /v1/credits` | answered here: what the key's holder has left on this store, in US dollars — `{"balance", "spent", "is_free_user"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Only for a key pushed with `can_read_balance`; any other key gets 403 `this key cannot read the balance`. A free holder reads zeros and `"is_free_user": true` |
+| `GET /v1/credits` | answered here: what the key has left of its own cap on this store, in US dollars — `{"balance", "spent", "is_free_user"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it. A key of a free team reads zeros and `"is_free_user": true` |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
 | `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |
@@ -1396,7 +1397,7 @@ was unreadable turns one broken dependency into an outage.
 | What fails | What happens |
 |---|---|
 | Redis unreachable at **startup** | refuses to start — a gateway that cannot read its keys serves nothing, and finding out on the first customer request would report it as a routing fault |
-| `key:` / `user:` / `model_group:` read fails | **503**, never 401 — "we cannot read your key" must not send someone to rotate a credential that was fine |
+| `key:` / `model_group:` read fails | **503**, never 401 — "we cannot read your key" must not send someone to rotate a credential that was fine |
 | in-flight counts unreadable | every count reads 0, so the pick degrades to first-healthy. Balancing is an optimisation on a table that is already correct |
 | health counters unreadable | every route stays as the control plane pushed it. Ejection is an optimisation too |
 | sticky read/write fails | one cold prefix cache, not a wrong answer |
@@ -1433,7 +1434,7 @@ Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except
 | 408 | the body did not arrive within 60s of the headers | resend on a working connection |
 | 413 | body over `max_body_bytes` | send less |
 | 402 | out of prepaid credit | top up; nothing to retry |
-| 429 | every replica at capacity, or the holder is over a rate limit | back off and retry — `Retry-After` is set for a rate limit |
+| 429 | every replica at capacity, or the key is over a rate limit | back off and retry — `Retry-After` is set for a rate limit |
 | 499 | the client left before the upstream answered. Only ever in the access line: nobody is there to receive it | – |
 | 502 | the engine could not be reached or failed the hop | retry; another replica may take it |
 | 504 | the engine sent no headers within `upstream_read_timeout`, or could not be dialled in time | retry; another replica may take it |
@@ -1466,10 +1467,8 @@ Seed it the way the control plane does, then call it:
 ```sh
 curl -XPUT localhost:8080/grove-admin/groups -H 'X-Grove-Admin-Token: tok' \
   -d '{"groups":[{"name":"acme","models":"qwen3-4b"}]}'
-curl -XPUT localhost:8080/grove-admin/users -H 'X-Grove-Admin-Token: tok' \
-  -d '{"users":[{"name":"you","group":"acme,beta"}]}'
 curl -XPUT localhost:8080/grove-admin/keys -H 'X-Grove-Admin-Token: tok' \
-  -d "{\"keys\":[{\"key_hash\":\"$(printf gr_demo | sha256sum | cut -d' ' -f1)\",\"prefix\":\"dev\",\"user\":\"you\",\"status\":\"active\"}]}"
+  -d "{\"keys\":[{\"key_hash\":\"$(printf gr_demo | sha256sum | cut -d' ' -f1)\",\"prefix\":\"dev\",\"team\":\"you\",\"group\":\"acme\",\"status\":\"active\"}]}"
 curl -XPUT localhost:8080/grove-admin/routes -H 'X-Grove-Admin-Token: tok' \
   -d '{"routes":{"qwen3-4b":[{"engine_url":"http://127.0.0.1:8000","internal_key":"k","healthy":true,"deployment":"MD-1","kind":"direct"}]}}'
 

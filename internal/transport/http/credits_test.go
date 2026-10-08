@@ -13,25 +13,32 @@ import (
 	"github.com/phot0n/pathway/internal/repository/memory"
 )
 
+// withKey rewrites the fixture's key with the credit fields given, keeping its grant.
+func (f *fixture) withKey(edit func(*domain.KeyRecord)) {
+	id := domain.SHA256Hex(secret)
+	rec := f.store.Keys[id]
+	edit(&rec)
+	f.store.Keys[id] = rec
+}
+
 // The prepaid gate through the chain: refused at quota, before the body is read, in the shape
 // of the surface asked; the control plane's flag refuses alike.
 func TestThePrepaidGate(t *testing.T) {
 	cases := []struct {
 		name   string
-		user   domain.UserRecord
+		edit   func(*domain.KeyRecord)
 		status int
 		reason string
 	}{
-		{"funded admits", domain.UserRecord{Prepaid: true, Budget: 1000, Spent: 999}, 200, ""},
-		{"exhausted", domain.UserRecord{Prepaid: true, Budget: 1000, Spent: 1000}, 402, "credit balance exhausted"},
-		{"not prepaid ignores the budget", domain.UserRecord{Budget: 1000, Spent: 5000}, 200, ""},
-		{"limited refuses a funded holder", domain.UserRecord{Limited: true, Prepaid: true, Budget: 1000}, 402, "credit balance exhausted"},
+		{"funded admits", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1000, 999 }, 200, ""},
+		{"exhausted", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1000, 1000 }, 402, "credit balance exhausted"},
+		{"not prepaid ignores the cap", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 5000 }, 200, ""},
+		{"limited refuses a funded key", func(k *domain.KeyRecord) { k.Limited, k.Prepaid, k.Budget = true, true, 1000 }, 402, "credit balance exhausted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
-			tc.user.Groups = domain.ModelSet("acme")
-			f.store.Users["test-user"] = tc.user
+			f.withKey(tc.edit)
 
 			resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 			if resp.Code != tc.status {
@@ -60,7 +67,7 @@ func TestThePrepaidGate(t *testing.T) {
 // Under /anthropic the refusal takes the Anthropic envelope, like every other denial.
 func TestThePrepaidGateSpeaksAnthropic(t *testing.T) {
 	f := providerFixtureAnswering(t, jsonEngine(anthropicMessage))
-	f.store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme"), Prepaid: true}
+	f.withKey(func(k *domain.KeyRecord) { k.Prepaid = true })
 
 	resp := f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16,"messages":[]}`)
 	if resp.Code != http.StatusPaymentRequired {
@@ -91,11 +98,11 @@ func counters(t *testing.T) domain.CounterTable {
 	return table
 }
 
-// A served request is priced off its route's pricing and moves the holder's spend, and the next
+// A served request is priced off its route's pricing and moves the key's spend, and the next
 // request sees the new balance — the gate is exact within one store.
-func TestAServedRequestSpendsTheBalance(t *testing.T) {
+func TestAServedRequestSpendsTheCap(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
-	f.store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme"), Prepaid: true, Budget: 400_000}
+	f.withKey(func(k *domain.KeyRecord) { k.Prepaid, k.Budget = true, 400_000 })
 	f.store.Routes["qwen3-4b"][0].Pricing = &domain.Pricing{
 		ID: "mp1", Rates: map[string]int64{"prompt_tokens": 3e9, "cached_tokens": 3e8, "completion_tokens": 15e9},
 		Counters: counters(t),
@@ -107,70 +114,65 @@ func TestAServedRequestSpendsTheBalance(t *testing.T) {
 	cost := int64(20*3000 + 80*300 + 20*15000)
 	usage := f.store.Usage["abc123"]
 	for field, want := range map[string]int64{
-		"cost": cost, "p:mp1:cost": cost, "user_spent": cost, "user_balance": 400_000 - cost,
+		"cost": cost, "p:mp1:cost": cost, "key_spent": cost, "key_balance": 400_000 - cost,
 		"prompt_tokens": 100, "cached_tokens": 80, "completion_tokens": 20,
 	} {
 		if usage[field] != want {
 			t.Errorf("usage[%s] = %d, want %d", field, usage[field], want)
 		}
 	}
-	if f.store.Users["test-user"].Spent != cost {
-		t.Errorf("spent = %d, want %d", f.store.Users["test-user"].Spent, cost)
+	if spent := f.store.Keys[domain.SHA256Hex(secret)].Spent; spent != cost {
+		t.Errorf("spent = %d, want %d", spent, cost)
 	}
 	// 384,000 spent of 400,000: one more request of the same size crosses the ceiling.
 	if resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusOK {
 		t.Fatalf("second status = %d", resp.Code)
 	}
 	if resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusPaymentRequired {
-		t.Fatalf("third status = %d, want 402 once the balance is spent", resp.Code)
+		t.Fatalf("third status = %d, want 402 once the cap is spent", resp.Code)
 	}
 }
 
-// The users section of a state push, as the control plane sends it: prepaid and budget land,
+// The keys section of a state push, as the control plane sends it: prepaid and the cap land,
 // spent — this box's own counter, never on the wire — does not move.
-func TestAUsersPushCarriesTheCeilingAndLeavesSpentAlone(t *testing.T) {
+func TestAKeysPushCarriesTheCapAndLeavesSpentAlone(t *testing.T) {
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Spent: 700}
+	store.Keys["aa"] = domain.KeyRecord{Spent: 700}
 	handler := adminFixture(t, store)
-	body := fmt.Sprintf(`{"users": {"buckets": {"%s": {"hash": "uh", "records": [
-		{"name": "GU-1", "email": "a@b", "group": "acme", "prepaid": true, "budget": 5000000}]}}}}`,
-		domain.BucketOf("GU-1"))
+	body := fmt.Sprintf(`{"keys": {"buckets": {"%s": {"hash": "kh", "records": [
+		{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "group": "acme",
+		 "prepaid": true, "budget": 5000000}]}}}}`,
+		domain.BucketOf("aa"))
 	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body); w.Code != http.StatusOK {
 		t.Fatalf("POST state = %d: %s", w.Code, w.Body)
 	}
-	usr := store.Users["GU-1"]
-	if !usr.Prepaid || usr.Budget != 5_000_000 || usr.Spent != 700 || !usr.Groups["acme"] {
-		t.Errorf("user = %+v, want prepaid, budget 5000000, spent 700", usr)
+	rec := store.Keys["aa"]
+	if !rec.Prepaid || rec.Budget != 5_000_000 || rec.Spent != 700 || !rec.Groups["acme"] || rec.Team != "T-1" {
+		t.Errorf("key = %+v, want prepaid, budget 5000000, spent 700, in acme, team T-1", rec)
 	}
 }
 
-// GET /v1/credits is the holder's balance on this store, in dollars, for a key allowed to read
-// it — overspent or not, since that is when it is asked — and a refusal for any other key.
-func TestCreditsAreReadByAnAllowedKey(t *testing.T) {
-	funded := domain.UserRecord{Prepaid: true, Budget: 15_750_000_000, Spent: 3_250_000_000}
+// GET /v1/credits is the key's own balance on this store, in dollars — its cap less what it
+// spent, nothing of the team's — overspent or not, since that is when it is asked.
+func TestCreditsAreTheKeysOwn(t *testing.T) {
 	cases := []struct {
 		name      string
 		keyStatus string
-		allowed   bool
-		user      domain.UserRecord
+		edit      func(*domain.KeyRecord)
 		status    int
 		want      string
 	}{
-		{"prepaid", "active", true, funded, 200, `{"balance":12.5,"spent":3.25,"is_free_user":false}`},
-		{"overspent still reads", "active", true,
-			domain.UserRecord{Prepaid: true, Budget: 1_000_000_000, Spent: 1_500_000_000},
+		{"prepaid", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 15_750_000_000, 3_250_000_000 },
+			200, `{"balance":12.5,"spent":3.25,"is_free_user":false}`},
+		{"overspent still reads", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1_000_000_000, 1_500_000_000 },
 			200, `{"balance":-0.5,"spent":1.5,"is_free_user":false}`},
-		{"free", "active", true, domain.UserRecord{}, 200, `{"balance":0,"spent":0,"is_free_user":true}`},
-		{"key not allowed", "active", false, funded, 403, "this key cannot read the balance"},
-		{"revoked key", "revoked", true, funded, 401, "unknown or revoked api key"},
+		{"free", "active", func(*domain.KeyRecord) {}, 200, `{"balance":0,"spent":0,"is_free_user":true}`},
+		{"revoked key", "revoked", func(k *domain.KeyRecord) { k.Prepaid, k.Budget = true, 1_000_000_000 }, 401, "unknown or revoked api key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{}`))
-			f.store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-				Status: tc.keyStatus, User: "test-user", KeyPrefix: "abc123", CanReadBalance: tc.allowed,
-			}
-			f.store.Users["test-user"] = tc.user
+			f.withKey(func(k *domain.KeyRecord) { tc.edit(k); k.Status = tc.keyStatus })
 			r := httptest.NewRequest(http.MethodGet, "/v1/credits", nil)
 			r.Header.Set("Authorization", "Bearer "+secret)
 			w := httptest.NewRecorder()

@@ -163,7 +163,7 @@ func Credential(r *http.Request) string {
 	return ""
 }
 
-// auth resolves the caller: bearer → key → user → group, once, into the State.
+// auth resolves the caller: bearer → key → group, once, into the State.
 func newAuth(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,17 +179,17 @@ func newAuth(deps Deps) (Middleware, error) {
 }
 
 // quota honours the geography pin, the credit flag the control plane pushed, and the prepaid
-// balance this box keeps — all read off the user record, before the body is. The rate limits come
-// last: a holder refused above must not use up a request.
+// balance this box keeps — all read off the key record, before the body is. The rate limits come
+// last: a key refused above must not use up a request.
 func newQuota(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			identity := From(r).Identity
-			if err := domain.GeographyDenial(identity.User, deps.Geography); err != nil {
+			if err := domain.GeographyDenial(identity.Key, deps.Geography); err != nil {
 				deny(w, r, err)
 				return
 			}
-			if err := domain.ExhaustedDenial(identity.User); err != nil {
+			if err := domain.ExhaustedDenial(identity.Key); err != nil {
 				deny(w, r, err)
 				return
 			}
@@ -384,15 +384,15 @@ func newMeter(deps Deps) (Middleware, error) {
 				deps.Metering.Record(ctx, metering.Report{
 					RequestID:      state.RequestID,
 					Prefix:         state.Identity.Prefix(),
+					MeterID:        state.Identity.MeterID,
 					Model:          state.ServingModel(),
 					Deployment:     or(state.Outcome.Deployment, state.Decision.Route.Deployment),
 					Usage:          state.Outcome.Usage,
 					UsageStart:     state.Outcome.UsageStart,
 					Pricing:        state.Decision.Route.Pricing,
-					User:           state.Identity.Key.User,
-					Prepaid:        state.Identity.User.Prepaid,
-					Budget:         state.Identity.User.Budget,
-					Limits:         state.Identity.User.Limits,
+					Prepaid:        state.Identity.Key.Prepaid,
+					Budget:         state.Identity.Key.Budget,
+					Limits:         state.Identity.Key.Limits,
 					Target:         state.Decision.EngineURL(),
 					UpstreamStatus: statusText(state.Outcome.Status),
 					Reason:         state.Outcome.Reason,
@@ -423,7 +423,7 @@ func newTransform(deps Deps) (Middleware, error) {
 			changed, err := deps.Transform.Apply(transform.Context{
 				Path:          r.URL.Path,
 				UpstreamModel: state.Decision.Route.UpstreamModel,
-				User:          state.Identity.Key.User,
+				Team:          state.Identity.Key.Team,
 				Provider:      state.Decision.Route.IsProvider(),
 				Vendor:        state.Decision.Route.Vendor,
 				Changed:       &changes,

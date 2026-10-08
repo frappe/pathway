@@ -31,7 +31,6 @@ func (c *Client) Close() error { return c.rdb.Close() }
 func (c *Client) Store() repository.Store {
 	return repository.Store{
 		Keys:     keys{c.rdb},
-		Users:    users{c.rdb},
 		Groups:   groups{c.rdb},
 		Routes:   routes{c.rdb},
 		Sessions: sessions{c.rdb},

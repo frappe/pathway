@@ -22,7 +22,6 @@ type Store struct {
 	mu sync.Mutex
 
 	Keys     map[string]domain.KeyRecord
-	Users    map[string]domain.UserRecord
 	Groups   map[string]domain.GroupRecord
 	Routes   map[string][]domain.Route
 	Sticky   map[string]string
@@ -31,8 +30,8 @@ type Store struct {
 	// KeyStats is what each vendor credential answered, the memory twin of pk:<id>.
 	KeyStats map[string]domain.KeyStats
 	Usage    map[string]map[string]int64
-	// Limits is every limit counter, "<user>:<metric>:<window>:<bucket>" → count: the memory twin
-	// of lim:….
+	// Limits is every limit counter, "<key prefix>:<metric>:<window>:<bucket>" → count: the memory
+	// twin of lim:….
 	Limits map[string]int64
 	Hashes map[string]string // grove:state_hash — section/bucket → hash
 
@@ -47,7 +46,7 @@ type Store struct {
 	Adjusted map[string]bool
 
 	// Fail names the repositories that should error, by interface name ("routes", "inflight",
-	// "health", "sessions", "keys", "users", "groups", "usage", "limits", "state", "providerkeys").
+	// "health", "sessions", "keys", "groups", "usage", "limits", "state", "providerkeys").
 	Fail map[string]bool
 }
 
@@ -55,8 +54,8 @@ var errStore = errors.New("store unavailable")
 
 func New() *Store {
 	return &Store{
-		Keys: map[string]domain.KeyRecord{}, Users: map[string]domain.UserRecord{},
-		Groups: map[string]domain.GroupRecord{}, Routes: map[string][]domain.Route{},
+		Keys: map[string]domain.KeyRecord{}, Groups: map[string]domain.GroupRecord{},
+		Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
 		Limits: map[string]int64{}, Hashes: map[string]string{}, Fail: map[string]bool{},
@@ -68,7 +67,7 @@ func New() *Store {
 // Repositories hands this store out behind the interfaces.
 func (s *Store) Repositories() repository.Store {
 	return repository.Store{
-		Keys: keys{s}, Users: users{s}, Groups: groups{s}, Routes: routes{s},
+		Keys: keys{s}, Groups: groups{s}, Routes: routes{s},
 		Sessions: sessions{s}, InFlight: inFlight{s}, Health: health{s},
 		Usage: usage{s}, Limits: limits{s}, State: state{s}, ProviderKeys: providerKeys{s},
 	}
@@ -81,22 +80,22 @@ func (s *Store) failed(name string) error {
 	return nil
 }
 
-// putUser matches the real store's HSET-merge: a push writes its fields and leaves Spent alone.
-func (s *Store) putUser(rec repository.UserUpsert) {
+// putKey matches the real store's HSET-merge: a push writes its fields and leaves Spent alone.
+func (s *Store) putKey(rec repository.KeyUpsert) {
 	limits, _ := domain.ParseLimits(rec.Limits) // the push handler already refused one that does not read
-	s.Users[rec.Name] = domain.UserRecord{
-		Email: rec.Email, Groups: domain.ModelSet(rec.Groups),
+	s.Keys[rec.MeterID] = domain.KeyRecord{
+		Status: rec.Status, Team: rec.Team, KeyPrefix: rec.Prefix, Groups: domain.ModelSet(rec.Groups),
 		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
-		Prepaid: rec.Prepaid, Budget: rec.Budget, Spent: s.Users[rec.Name].Spent,
+		Prepaid: rec.Prepaid, Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent,
 		Limits: limits,
 	}
 }
 
 type keys struct{ s *Store }
 
-// Resolve matches the real script: a record is asked for only when it is read, so a failing users
-// or groups store is felt only by a key that reaches it.
+// Resolve matches the real script: a group is asked for only when the key lists one, so a failing
+// groups store is felt only by a key that reaches it.
 func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, bool, error) {
 	k.s.mu.Lock()
 	defer k.s.mu.Unlock()
@@ -108,21 +107,12 @@ func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, boo
 		return repository.Holder{}, false, nil
 	}
 	holder := repository.Holder{Key: rec, Groups: map[string]domain.GroupRecord{}}
-	names := domain.ModelSet(rec.Legacy.Group)
-	if rec.User != "" {
-		if err := k.s.failed("users"); err != nil {
-			return repository.Holder{}, false, err
-		}
-		if holder.User, holder.HasUser = k.s.Users[rec.User]; holder.HasUser {
-			names = holder.User.Groups
-		}
-	}
-	if len(names) > 0 {
+	if len(rec.Groups) > 0 {
 		if err := k.s.failed("groups"); err != nil {
 			return repository.Holder{}, false, err
 		}
 	}
-	for name := range names {
+	for name := range rec.Groups {
 		holder.Groups[name] = k.s.Groups[name]
 	}
 	return holder, true, nil
@@ -138,9 +128,7 @@ func (k keys) Upsert(_ context.Context, records []repository.KeyUpsert) error {
 		if rec.MeterID == "" {
 			continue
 		}
-		k.s.Keys[rec.MeterID] = domain.KeyRecord{
-			Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix, CanReadBalance: rec.CanReadBalance,
-		}
+		k.s.putKey(rec)
 	}
 	return nil
 }
@@ -151,54 +139,21 @@ func (k keys) Delete(_ context.Context, ids []string) (int, error) {
 	return deleteFrom(ids, func(id string) { delete(k.s.Keys, id) }), k.s.failed("keys")
 }
 
-type users struct{ s *Store }
-
-func (u users) Get(_ context.Context, name string) (domain.UserRecord, bool, error) {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	if err := u.s.failed("users"); err != nil {
-		return domain.UserRecord{}, false, err
-	}
-	rec, ok := u.s.Users[name]
-	return rec, ok, nil
-}
-
-func (u users) Upsert(_ context.Context, records []repository.UserUpsert) error {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	if err := u.s.failed("users"); err != nil {
-		return err
-	}
-	for _, rec := range records {
-		if rec.Name == "" {
-			continue
-		}
-		u.s.putUser(rec)
-	}
-	return nil
-}
-
-func (u users) Delete(_ context.Context, ids []string) (int, error) {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	return deleteFrom(ids, func(id string) { delete(u.s.Users, id) }), u.s.failed("users")
-}
-
-// AdjustSpent matches the real one: once per id, and only on a holder the store knows.
-func (u users) AdjustSpent(_ context.Context, name, id string, delta int64) (int64, bool, bool, error) {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	if err := u.s.failed("users"); err != nil {
+// AdjustSpent matches the real one: once per id, and only on a key the store knows.
+func (k keys) AdjustSpent(_ context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
+	k.s.mu.Lock()
+	defer k.s.mu.Unlock()
+	if err := k.s.failed("keys"); err != nil {
 		return 0, false, false, err
 	}
-	holder, found := u.s.Users[name]
-	if !found || u.s.Adjusted[id] {
-		return holder.Spent, false, found, nil
+	rec, found := k.s.Keys[meterID]
+	if !found || k.s.Adjusted[id] {
+		return rec.Spent, false, found, nil
 	}
-	holder.Spent += delta
-	u.s.Users[name] = holder
-	u.s.Adjusted[id] = true
-	return holder.Spent, true, true, nil
+	rec.Spent += delta
+	k.s.Keys[meterID] = rec
+	k.s.Adjusted[id] = true
+	return rec.Spent, true, true, nil
 }
 
 type groups struct{ s *Store }
@@ -413,13 +368,13 @@ func (p providerKeys) Stats(_ context.Context, ids []string) (map[string]domain.
 
 type limits struct{ s *Store }
 
-func limitKey(user string, limit domain.Limit, now time.Time) string {
+func limitKey(key string, limit domain.Limit, now time.Time) string {
 	label, _, _ := limit.Bucket(now)
-	return user + ":" + limit.Metric + ":" + limit.Window + ":" + label
+	return key + ":" + limit.Metric + ":" + limit.Window + ":" + label
 }
 
 // Admit matches the real script: every limit is checked before any is counted, under one lock.
-func (l limits) Admit(_ context.Context, user string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
+func (l limits) Admit(_ context.Context, key string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
 	l.s.mu.Lock()
 	defer l.s.mu.Unlock()
 	if err := l.s.failed("limits"); err != nil {
@@ -427,7 +382,7 @@ func (l limits) Admit(_ context.Context, user string, lims []domain.Limit, now t
 	}
 	var exceeded []domain.Limit
 	for _, limit := range lims {
-		if l.s.Limits[limitKey(user, limit, now)] >= limit.Value {
+		if l.s.Limits[limitKey(key, limit, now)] >= limit.Value {
 			exceeded = append(exceeded, limit)
 		}
 	}
@@ -436,28 +391,28 @@ func (l limits) Admit(_ context.Context, user string, lims []domain.Limit, now t
 	}
 	for _, limit := range lims {
 		if limit.Metric == domain.LimitRequests {
-			l.s.Limits[limitKey(user, limit, now)]++
+			l.s.Limits[limitKey(key, limit, now)]++
 		}
 	}
 	return nil, nil
 }
 
-func (l limits) Debit(_ context.Context, user string, lims []domain.Limit, tokens int64, now time.Time) error {
+func (l limits) Debit(_ context.Context, key string, lims []domain.Limit, tokens int64, now time.Time) error {
 	l.s.mu.Lock()
 	defer l.s.mu.Unlock()
 	if err := l.s.failed("limits"); err != nil {
 		return err
 	}
 	for _, limit := range lims {
-		l.s.Limits[limitKey(user, limit, now)] += tokens
+		l.s.Limits[limitKey(key, limit, now)] += tokens
 	}
 	return nil
 }
 
 type usage struct{ s *Store }
 
-// Accrue matches the real one: counters, cost and the holder's spend land under one lock, and the
-// spend moves only on a holder the store knows.
+// Accrue matches the real one: counters, cost and the key's spend land under one lock, and the
+// spend moves only on a key the store knows.
 func (u usage) Accrue(_ context.Context, a repository.Accrual) error {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
@@ -496,14 +451,14 @@ func (u usage) accrue(a repository.Accrual) {
 	for field, n := range a.Fields {
 		u.s.Usage[a.Prefix][field] += n
 	}
-	holder, known := u.s.Users[a.User]
-	if a.User == "" || !known {
+	rec, known := u.s.Keys[a.Key]
+	if a.Key == "" || !known {
 		return
 	}
-	holder.Spent += a.Cost
-	u.s.Users[a.User] = holder
-	u.s.Usage[a.Prefix]["user_spent"] = holder.Spent
-	u.s.Usage[a.Prefix]["user_balance"] = a.Budget - holder.Spent
+	rec.Spent += a.Cost
+	u.s.Keys[a.Key] = rec
+	u.s.Usage[a.Prefix]["key_spent"] = rec.Spent
+	u.s.Usage[a.Prefix]["key_balance"] = a.Budget - rec.Spent
 }
 
 // Drain matches the real one: live counters (all, or only keys) are set aside under newID, and
@@ -608,25 +563,6 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 		st.s.Hashes["groups"] = push.Groups.Hash
 		counts.Groups = len(named)
 	}
-	if push.Users != nil {
-		named := map[string]bool{}
-		for label, bucket := range push.Users {
-			for _, rec := range bucket.Records {
-				if rec.Name == "" {
-					continue
-				}
-				named[rec.Name] = true
-				counts.Users++
-				st.s.putUser(rec)
-			}
-			st.setBucketHash("users:"+label, bucket.Hash, len(bucket.Records))
-		}
-		for name := range st.s.Users {
-			if _, pushed := push.Users[domain.BucketOf(name)]; pushed && !named[name] {
-				delete(st.s.Users, name)
-			}
-		}
-	}
 	if push.Keys != nil {
 		named := map[string]bool{}
 		for label, bucket := range push.Keys {
@@ -636,9 +572,7 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 				}
 				named[rec.MeterID] = true
 				counts.Keys++
-				st.s.Keys[rec.MeterID] = domain.KeyRecord{
-					Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix, CanReadBalance: rec.CanReadBalance,
-				}
+				st.s.putKey(rec)
 			}
 			st.setBucketHash("keys:"+label, bucket.Hash, len(bucket.Records))
 		}

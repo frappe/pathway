@@ -69,13 +69,13 @@ func (s *Server) identifyCaller(w http.ResponseWriter, r *http.Request) (admissi
 	// Attribute the access line: auth happens here rather than in the chain, so the accesslog
 	// stage wrapped around this handler would otherwise log every keyed call as anonymous.
 	middleware.From(r).Identity = identity
-	// Revoked/inactive is refused. Over budget is not: what a key is entitled to and what its
-	// holder has left live on the user, so only inference is blocked.
+	// Revoked/inactive is refused. Over budget is not: what a key may see and what it has left
+	// are separate questions, so only inference is blocked.
 	if identity.Key.Status != "active" {
 		respond.ErrorFor(w, r, http.StatusUnauthorized, "unknown or revoked api key")
 		return admission.Identity{}, false
 	}
-	if err := domain.GeographyDenial(identity.User, s.deps.Geography); err != nil {
+	if err := domain.GeographyDenial(identity.Key, s.deps.Geography); err != nil {
 		respond.DenialFor(w, r, err)
 		return admission.Identity{}, false
 	}
