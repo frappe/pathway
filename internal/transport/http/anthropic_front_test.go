@@ -26,7 +26,7 @@ func domainGroup(models string) domain.GroupRecord {
 func openaiProviderRoute(url string) []domain.Route {
 	return []domain.Route{{
 		EngineURL: url, InternalKey: "ds-key", Healthy: true,
-		Deployment: "deepseek", Server: "deepseek", Kind: "provider", Dialect: "openai",
+		Vendor: "deepseek", Kind: "provider", Dialect: "openai",
 	}}
 }
 

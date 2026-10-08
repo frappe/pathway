@@ -28,7 +28,7 @@ func providerFixtureAnswering(t *testing.T, engineHandler http.HandlerFunc) *fix
 	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b,anthropic/claude-4-5")}
 	f.store.Routes["anthropic/claude-4-5"] = []domain.Route{{
 		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
-		Deployment: "anthropic", Server: "anthropic", Kind: "provider", Dialect: "anthropic",
+		Vendor: "anthropic", Kind: "provider", Dialect: "anthropic",
 		UpstreamModel: "claude-sonnet-4-5-20250929", APIVersion: "2023-06-01",
 	}}
 	return f
@@ -51,6 +51,48 @@ func TestAProviderRouteGetsTheVendorsOwnCredential(t *testing.T) {
 	}
 	if f.seen.groveModel != "" || f.seen.groveSession != "" {
 		t.Errorf("our own headers leaked to a vendor: model=%q session=%q", f.seen.groveModel, f.seen.groveSession)
+	}
+}
+
+// Baseten's Anthropic front reads the key as a Bearer and 401s on x-api-key.
+func TestAnAnthropicFrontThatReadsABearerGetsOne(t *testing.T) {
+	f := providerFixture(t)
+	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("baseten/flash")}
+	f.store.Routes["baseten/flash"] = []domain.Route{{
+		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
+		Vendor: "baseten", Kind: "provider", Dialect: "anthropic", APIVersion: "2023-06-01",
+	}}
+	f.post("/anthropic/v1/messages", `{"model":"baseten/flash","max_tokens":16}`)
+
+	if f.seen.authorization != "Bearer vendor-key" || f.seen.apiKey != "" {
+		t.Errorf("Authorization = %q, x-api-key = %q, want the key as a Bearer only", f.seen.authorization, f.seen.apiKey)
+	}
+	if f.seen.apiVersion != "2023-06-01" {
+		t.Errorf("anthropic-version = %q", f.seen.apiVersion)
+	}
+}
+
+// A change that alters what the model does is told to the caller, and only for the hop it was
+// made on.
+func TestTheCallerIsToldWhatTheGatewayChanged(t *testing.T) {
+	f := providerFixture(t)
+	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("openai/luna")}
+	f.store.Routes["openai/luna"] = []domain.Route{{
+		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
+		Vendor: "openai", Kind: "provider", Dialect: "openai", UpstreamModel: "luna",
+	}}
+	resp := f.post("/v1/chat/completions", `{"model":"openai/luna","tools":[{"type":"function","function":{"name":"a"}}]}`)
+
+	if got := resp.Header().Get("X-Grove-Changed"); got != "reasoning_effort=none" {
+		t.Errorf("X-Grove-Changed = %q", got)
+	}
+	if !strings.Contains(string(f.seen.body), `"reasoning_effort":"none"`) {
+		t.Errorf("upstream body = %s", f.seen.body)
+	}
+
+	resp = f.post("/v1/chat/completions", `{"model":"openai/luna"}`)
+	if got := resp.Header().Get("X-Grove-Changed"); got != "" {
+		t.Errorf("X-Grove-Changed = %q on a request nothing was changed in", got)
 	}
 }
 
@@ -151,9 +193,9 @@ func TestADualFrontVendorRoutesEachSurfaceToItsOwnFront(t *testing.T) {
 	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b,kimi/k2")}
 	f.store.Routes["kimi/k2"] = []domain.Route{
 		{EngineURL: f.engine.URL + "/root", InternalKey: "kimi-key", Healthy: true,
-			Deployment: "kimi", Server: "kimi", Kind: "provider", Dialect: "openai", UpstreamModel: "k2"},
+			Vendor: "kimi", Kind: "provider", Dialect: "openai", UpstreamModel: "k2"},
 		{EngineURL: f.engine.URL + "/anthropic", InternalKey: "kimi-key", Healthy: true,
-			Deployment: "kimi", Server: "kimi", Kind: "provider", Dialect: "anthropic", UpstreamModel: "k2"},
+			Vendor: "kimi", Kind: "provider", Dialect: "anthropic", UpstreamModel: "k2"},
 	}
 
 	if resp := f.post("/anthropic/v1/messages", `{"model":"kimi/k2"}`); resp.Code != http.StatusOK {

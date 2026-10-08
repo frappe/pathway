@@ -22,9 +22,12 @@ type Route struct {
 	Capacity int `json:"capacity"`
 	// Model Deployment / pod id — which placement this is; the access line's `deployment`. One box
 	// can serve the same model from two deployments, so Server alone names neither. Empty on a
-	// route pushed before this field existed.
+	// provider row: a vendor is no placement of ours.
 	Deployment string `json:"deployment"`
-	Server     string `json:"server"` // inference-server / pod id — which box it is on
+	Server     string `json:"server"` // inference-server / pod id — which box it is on; empty on a provider row
+	// Vendor is the third party a provider row dials ("openai"), as the control plane names it.
+	// Blank on anything we run.
+	Vendor string `json:"vendor"`
 	// "ingress" when this row is an Ingress Server that will pick a replica of its own, "direct"
 	// (or empty, on a route pushed before this field existed) when it is an engine to dial.
 	Kind string `json:"kind"`
