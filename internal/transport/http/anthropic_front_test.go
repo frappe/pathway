@@ -100,9 +100,28 @@ func TestTheAliasRefusesNonAnthropicSurfaces(t *testing.T) {
 		if resp.Code != http.StatusNotFound {
 			t.Errorf("%s: status = %d, want 404", path, resp.Code)
 		}
+		if !strings.Contains(resp.Body.String(), "/anthropic/v1/messages") {
+			t.Errorf("%s: the refusal must name the path to use: %s", path, resp.Body)
+		}
 		if f.seen.path != "" {
 			t.Errorf("%s was dialled upstream", path)
 		}
+	}
+}
+
+// The bare base answers as /v1/ does: a caller with no key is told so, in the Anthropic shape,
+// before it is told the path does not exist.
+func TestTheBareAliasAsksForAKeyFirst(t *testing.T) {
+	f := providerFixtureAnswering(t, jsonEngine(anthropicMessage))
+	r := httptest.NewRequest(http.MethodGet, "/anthropic/", nil)
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %s", w.Code, w.Body)
+	}
+	if want := `{"error":{"message":"missing api key","type":"authentication_error"},"type":"error"}`; strings.TrimSpace(w.Body.String()) != want {
+		t.Errorf("body = %s, want %s", w.Body, want)
 	}
 }
 
