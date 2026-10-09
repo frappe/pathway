@@ -7,8 +7,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,6 +76,8 @@ func newAccessLog(deps Deps) (Middleware, error) {
 			w.Header().Set("X-Request-Id", state.RequestID)
 			w.Header().Set("Request-Id", state.RequestID)
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			meta, metaErr := domain.ParseMetadata(r.Header.Get("X-Grove-Metadata"))
+			state.Meta = meta
 
 			// Deferred: a client hanging up mid-stream unwinds this stage through
 			// http.ErrAbortHandler, which recover deliberately re-panics. A request served
@@ -109,12 +113,28 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.String("reason", or(state.DeniedReason, state.Outcome.Reason)),
 					slog.String("cut", or(state.Outcome.Cut, "-")),
 				)
+				if len(state.Meta) > 0 {
+					attrs = append(attrs, metaGroup(state.Meta))
+				}
 				access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
 			}()
 
+			if metaErr != nil {
+				deny(recorder, r, domain.Deny(http.StatusBadRequest, "X-Grove-Metadata: "+metaErr.Error()))
+				return
+			}
 			next.ServeHTTP(recorder, r)
 		})
 	}, nil
+}
+
+// metaGroup is the caller's tags as one `meta` object, keys sorted so equal tags log alike.
+func metaGroup(meta map[string]string) slog.Attr {
+	attrs := make([]any, 0, len(meta))
+	for _, key := range slices.Sorted(maps.Keys(meta)) {
+		attrs = append(attrs, slog.String(key, meta[key]))
+	}
+	return slog.Group("meta", attrs...)
 }
 
 // drain answers while the process is shutting down or in maintenance. In-flight requests are past
@@ -476,8 +496,11 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
 			route, secret := state.Decision.Route, state.Decision.Key.Secret
-			// The caller may have authenticated with either header; neither may travel onward.
+			// The caller may have authenticated with either header; neither may travel onward. Nor
+			// may the gateway's own client headers: they are read here, not relayed.
 			r.Header.Del("x-api-key")
+			r.Header.Del("X-Grove-Metadata")
+			r.Header.Del("X-Grove-Session")
 			switch {
 			case route.IsProvider():
 				// A vendor authenticates its own way, and would read our Bearer as a caller's

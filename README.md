@@ -591,7 +591,8 @@ Every `X-Grove-*` header, and who it is between:
 
 | Header | From → to | For |
 |---|---|---|
-| `X-Grove-Session` | client → gateway | names the caller's session (see [Session affinity](#session-affinity)) |
+| `X-Grove-Session` | client → gateway | names the caller's session (see [Session affinity](#session-affinity)). Taken off before the hop |
+| `X-Grove-Metadata` | client → gateway | the caller's own tags for the access line (see [Correlation](#correlation)). Taken off before the hop |
 | `X-Grove-Fallback` | gateway → client | the fallback that served |
 | `X-Grove-Changed` | gateway → client | what the gateway changed in the request that alters what the model does, as `field=value` |
 | `X-Grove-Model`, `X-Grove-Session-Key` | gateway → ingress | the model to pick a replica of, and the session to keep on it. Taken off a request to anything that is not an ingress |
@@ -921,6 +922,13 @@ the client; ours never reaches the vendor. `attempts` is how many times an upstr
 for the request — 0 when it was refused before any, more than 1 when `retry` moved it to another
 vendor key or `fallback` to another model. `model` is the one the client asked for; `fallback` is
 the model that served instead, `-` when the one asked for did.
+
+A caller tags its own requests with `X-Grove-Metadata: app=hrms, trace=7f3a-91`, and the tags land
+on the access line as `meta: {"app": "hrms", "trace": "7f3a-91"}`: which app spent a key several
+apps share, or the caller's own correlation id. Up to 16 pairs in 2 KB; keys are 1-32 of `a-z 0-9 _ . -`,
+values 1-128 printable ASCII without a comma, and a repeated key keeps its last value. Anything
+else is a 400 before the request goes further. The tags are logged, never counted, and never sent
+upstream. They do not pin routing; `X-Grove-Session` does that.
 
 The access line describes the last attempt only. Every attempt before it — one the client never
 saw, because `retry` or `fallback` held its answer and moved the request on — leaves a line of its
