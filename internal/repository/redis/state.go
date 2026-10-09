@@ -11,8 +11,7 @@ import (
 	"github.com/phot0n/pathway/internal/repository"
 )
 
-// grove:state_hash — one hash of section/bucket fields ("groups", "routes", "users:3f",
-// "keys:a0"), written in the same transaction as the records they describe. Losing the store
+// grove:state_hash — one hash of section/bucket fields ("groups", "routes", "keys:a0"), written in the same transaction as the records they describe. Losing the store
 // loses these too, which is what makes the next control-plane tick re-push everything.
 const stateHashKey = "grove:state_hash"
 
@@ -31,7 +30,6 @@ func (s state) Apply(ctx context.Context, push repository.StatePush) (repository
 	held := map[string][]string{}
 	for prefix, present := range map[string]bool{
 		"model_group:": push.Groups != nil,
-		"user:":        push.Users != nil,
 		"key:":         push.Keys != nil,
 		"deploy:":      push.Routes != nil,
 	} {
@@ -48,9 +46,6 @@ func (s state) Apply(ctx context.Context, push repository.StatePush) (repository
 	_, err := s.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
 		if push.Groups != nil {
 			counts.Groups = applyGroups(ctx, p, *push.Groups, held["model_group:"])
-		}
-		if push.Users != nil {
-			counts.Users = applyUsers(ctx, p, push.Users, held["user:"])
 		}
 		if push.Keys != nil {
 			counts.Keys = applyKeys(ctx, p, push.Keys, held["key:"])
@@ -79,26 +74,6 @@ func applyGroups(ctx context.Context, p redis.Pipeliner, push repository.GroupsP
 	return len(named)
 }
 
-func applyUsers(ctx context.Context, p redis.Pipeliner, buckets map[string]repository.UserBucket, held []string) int {
-	named, count := map[string]bool{}, 0
-	for label, bucket := range buckets {
-		for _, rec := range bucket.Records {
-			if rec.Name == "" {
-				continue
-			}
-			named[rec.Name] = true
-			count++
-			p.HSet(ctx, "user:"+rec.Name, userFields(rec))
-		}
-		setBucketHash(ctx, p, "users:"+label, bucket.Hash, len(bucket.Records))
-	}
-	deleteUnnamed(ctx, p, "user:", held, func(id string) bool {
-		_, pushed := buckets[domain.BucketOf(id)]
-		return !pushed || named[id]
-	})
-	return count
-}
-
 func applyKeys(ctx context.Context, p redis.Pipeliner, buckets map[string]repository.KeyBucket, held []string) int {
 	named, count := map[string]bool{}, 0
 	for label, bucket := range buckets {
@@ -108,12 +83,7 @@ func applyKeys(ctx context.Context, p redis.Pipeliner, buckets map[string]reposi
 			}
 			named[rec.MeterID] = true
 			count++
-			p.HSet(ctx, "key:"+rec.MeterID, map[string]any{
-				"status": rec.Status, "user": rec.User, "prefix": rec.Prefix,
-				"can_read_balance": flag(rec.CanReadBalance),
-			})
-			// A pre-group control plane flattened access onto the key; stale the moment this lands.
-			p.HDel(ctx, "key:"+rec.MeterID, "models", "priority")
+			writeKey(ctx, p, rec)
 		}
 		setBucketHash(ctx, p, "keys:"+label, bucket.Hash, len(bucket.Records))
 	}

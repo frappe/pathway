@@ -4,69 +4,37 @@ import "errors"
 
 import "strings"
 
-// KeyRecord is key:<sha256(secret)>, deliberately thin: a credential's only fact of its own is
-// whether it is revoked. Who holds it and what they may call belong to the PERSON, in user:<name>
-// — so one leaked key dies alone, and a budget flip is one write however many keys they hold.
-type KeyRecord struct {
-	Status    string // "active" | "revoked"
-	User      string // Grove User doc name — the pointer to the UserRecord below
-	KeyPrefix string // display id, for logs and usage attribution
-	// CanReadBalance lets this key read its holder's credit at GET /v1/credits. A record from
-	// before the field existed reads false.
-	CanReadBalance bool
-
-	// Read only when user:<User> is absent, i.e. a record written before access moved off the
-	// credential. SynthUser turns it into a UserRecord so the decision path stays single.
-	Legacy LegacyKey
-}
-
-// LegacyKey is quarantined so the whole pre-split projection can be deleted in one go, once every
-// site has resynced against a control plane that pushes user records.
-type LegacyKey struct {
-	HasGroup bool            // a pre-GROUP record wrote no `group` field at all, blank included
-	Group    string          //
-	Allow    map[string]bool //
-	Deny     map[string]bool //
-	Limited  bool            // the control plane's credit-exhausted flag, which used to ride on Status
-	Models   map[string]bool // pre-group: access already resolved to one flat set
-}
-
-// HasProjection reports whether this key was written by a control plane that put access on the
-// credential. A current one writes none of these fields, so a current key with no user record
-// resolves to nothing rather than falling back to something — fail closed.
-func (l LegacyKey) HasProjection() bool {
-	return l.HasGroup || l.Models != nil
-}
-
-// UserRecord is the holder's policy, stored under user:<Grove User name>. One record however many
-// keys they hold. A user the control plane has not pushed reads back as the zero value, which
+// KeyRecord is key:<sha256(secret)>: the credential and the whole policy behind it. The team is
+// the ledger the control plane bills; the KEY is what every gate reads — its models, its
+// geography, its rate limits and the cap it was handed out of the team's balance. One key lives
+// in one geography, so the store it lands on gates that cap exactly however many keys the team
+// holds elsewhere. A key the control plane has not pushed reads back as the zero value, which
 // grants nothing.
-type UserRecord struct {
-	Email   string          // denormalized, for humans reading Redis; no decision reads it
-	Groups  map[string]bool // Model Group names; empty = ungrouped (grants nothing by itself)
-	Allow   map[string]bool // models this user may call on top of their groups'
-	Deny    map[string]bool // models this user may not call, whatever granted them
-	Limited bool            // the control plane's verdict that their credit is spent → 402
-	// LogPayloads opts this user's prompts and outputs into the payload log — the one piece of
+type KeyRecord struct {
+	Status    string          // "active" | "revoked"
+	Team      string          // Central Team doc name — the tenant boundary the cache salt and payload log key on
+	KeyPrefix string          // display id, for logs and usage attribution
+	Groups    map[string]bool // Model Group names; empty = ungrouped (grants nothing by itself)
+	Allow     map[string]bool // models this key may call on top of its groups'
+	Deny      map[string]bool // models this key may not call, whatever granted them
+	// Limited is the control plane's verdict that the TEAM's balance is spent → 402 on every
+	// key it holds, whatever this store's own counter says.
+	Limited bool
+	// LogPayloads opts this key's prompts and outputs into the payload log — the one piece of
 	// customer CONTENT the platform may retain, so it is off unless the control plane says
 	// otherwise, and a record from before the field existed reads as off.
 	LogPayloads bool
-	// Geography pins this user's keys to one geography's gateways; blank serves anywhere.
+	// Geography pins this key to one geography's gateways; blank serves anywhere.
 	Geography string
-	// Prepaid bills this user against a balance. Budget is the amount the user loaded (Σ their
-	// credits, nano-USD), the same number on every store; Spent is this store's own lifetime
-	// counter, moved by every metered request and never by a push. This box's balance is
-	// Budget − Spent. The control plane keeps its own from the same credits and audits the two.
+	// Prepaid bills this key against a balance. Budget is the key's cap (nano-USD), the slice of
+	// the team's balance the control plane allotted it; Spent is this store's own lifetime
+	// counter, moved by every metered request and never by a push. This box's balance for the
+	// key is Budget − Spent. The control plane keeps the team's own from the same credits.
 	Prepaid bool
 	Budget  int64
 	Spent   int64
-	// Limits caps the holder's requests and tokens per reset window; none = uncapped.
+	// Limits caps the key's requests and tokens per reset window; none = uncapped.
 	Limits []Limit
-
-	// Set only by SynthUser off a pre-group key, where the control plane had already resolved
-	// access down to one model set. Nothing read from Redis sets it.
-	Flattened bool
-	Models    map[string]bool
 }
 
 // GroupRecord is what a Model Group grants everyone in it, stored under model_group:<name>. A group
@@ -75,75 +43,58 @@ type GroupRecord struct {
 	Models map[string]bool // models the group grants
 }
 
-// SynthUser builds the UserRecord a pre-split key record implies. Called only when user:<name> is
-// missing, which is what makes the control plane and the agent deployable in either order.
-func SynthUser(rec KeyRecord) UserRecord {
-	return UserRecord{
-		Groups:    ModelSet(rec.Legacy.Group),
-		Allow:     rec.Legacy.Allow,
-		Deny:      rec.Legacy.Deny,
-		Limited:   rec.Legacy.Limited,
-		Flattened: !rec.Legacy.HasGroup,
-		Models:    rec.Legacy.Models,
-	}
-}
+// Exhausted reports whether the key has run out: the control plane's verdict on its team, or this
+// box's own view of the key's cap.
+func (k KeyRecord) Exhausted() bool { return k.Limited || (k.Prepaid && k.Spent >= k.Budget) }
 
-// Exhausted reports whether the holder has run out: the control plane's verdict, or this box's own
-// view of a prepaid balance.
-func (u UserRecord) Exhausted() bool { return u.Limited || (u.Prepaid && u.Spent >= u.Budget) }
-
-// ExhaustedDenial is the 402 for an exhausted holder, nil otherwise. The control plane's verdict and
+// ExhaustedDenial is the 402 for an exhausted key, nil otherwise. The control plane's verdict and
 // this box's own balance answer alike: a client cannot tell, and should not need to, which side
 // noticed first.
-func ExhaustedDenial(usr UserRecord) error {
-	if usr.Exhausted() {
+func ExhaustedDenial(key KeyRecord) error {
+	if key.Exhausted() {
 		return Deny(402, "credit balance exhausted")
 	}
 	return nil
 }
 
-// CanUse is the access decision: the grant of every group the user is in, plus their own Allow,
-// minus their Deny. The union is already merged into grp by the time it gets here. Deny wins over
+// CanUse is the access decision: the grant of every group the key is in, plus its own Allow,
+// minus its Deny. The union is already merged into grp by the time it gets here. Deny wins over
 // every grant. Fails closed — no group and no Allow reaches nothing.
-func CanUse(usr UserRecord, grp GroupRecord, model string) bool {
-	if usr.Flattened {
-		return usr.Models[model] // legacy record: the control plane already resolved it
-	}
-	if usr.Deny[model] {
+func CanUse(key KeyRecord, grp GroupRecord, model string) bool {
+	if key.Deny[model] {
 		return false
 	}
-	return grp.Models[model] || usr.Allow[model]
+	return grp.Models[model] || key.Allow[model]
 }
 
-// Evaluate is the pure admission decision: an HTTP status (200 admits) and a reason. The limits are
-// on the USER — the control plane's credit flag and the prepaid balance this box keeps. The
-// credential is checked first, so a revoked key is 401 even for someone also over quota.
-func Evaluate(rec KeyRecord, usr UserRecord, grp GroupRecord, model string) (int, string) {
-	if rec.Status != "active" {
+// Evaluate is the pure admission decision: an HTTP status (200 admits) and a reason. The
+// credential is checked first, so a revoked key is 401 even when it is also over quota.
+func Evaluate(key KeyRecord, grp GroupRecord, model string) (int, string) {
+	if key.Status != "active" {
 		return 401, "key revoked or inactive"
 	}
-	if err := ExhaustedDenial(usr); err != nil {
+	if err := ExhaustedDenial(key); err != nil {
 		var denial Denial
 		errors.As(err, &denial)
 		return denial.Status, denial.Reason
 	}
-	if !CanUse(usr, grp, model) {
+	if !CanUse(key, grp, model) {
 		return 403, "access not allowed for model " + model
 	}
 	return 200, ""
 }
 
-// GeographyDenial refuses a user pinned to a geography other than this gateway's. A gateway with
-// no geography refuses every pinned user: fail closed.
-func GeographyDenial(usr UserRecord, geography string) error {
-	if usr.Geography == "" || usr.Geography == geography {
+// GeographyDenial refuses a key pinned to a geography other than this gateway's. A gateway with
+// no geography refuses every pinned key: fail closed.
+func GeographyDenial(key KeyRecord, geography string) error {
+	if key.Geography == "" || key.Geography == geography {
 		return nil
 	}
-	return Deny(403, "this key is restricted to geography "+usr.Geography)
+	return Deny(403, "this key is restricted to geography "+key.Geography)
 }
 
 // ModelSet parses one of the comma-joined lists the control plane writes — models, or the group
-// names on a user record. Blank → nil, which is a map that answers false to everything, the
+// names on a key record. Blank → nil, which is a map that answers false to everything, the
 // fail-closed default.
 func ModelSet(csv string) map[string]bool {
 	csv = strings.TrimSpace(csv)

@@ -16,7 +16,8 @@ import (
 // Report is one finished request, as the proxy saw it.
 type Report struct {
 	RequestID string // the id the gateway stamped: what makes a spooled replay land once
-	Prefix    string // API Key doc name — which bucket this accrues to
+	Prefix    string // API Key doc name — which bucket this accrues to, and whose limits are debited
+	MeterID   string // the key's record id — whose spend moves
 	Model     string // from the request body; buckets per-model usage
 	// Deployment is which placement actually served it. On a direct route the gateway already
 	// knows; on an ingress route only the ingress does, and it says so in a response header.
@@ -26,15 +27,13 @@ type Report struct {
 	Usage string
 	// UsageStart is the first usage line of a response that carried more than one. May be empty.
 	UsageStart string
-	// What it cost and whom it cost: the pricing that charges it (nil = unpriced), and the holder
-	// whose lifetime spend moves, with the amount they loaded that their balance is reported against.
-	// Only a prepaid holder is charged: a free one's spend never moves, so turning them prepaid
-	// later starts them at what they load, not in debt for what was free.
+	// What it cost: the pricing that charges it (nil = unpriced), and the cap the key's balance
+	// is reported against. Only a prepaid key is charged: a free one's spend never moves, so a
+	// team turned prepaid later starts at what it loads, not in debt for what was free.
 	Pricing *domain.Pricing
-	User    string
 	Prepaid bool
 	Budget  int64
-	// Limits is the holder's rate limits: the answer's tokens are debited from the token ones.
+	// Limits is the key's rate limits: the answer's tokens are debited from the token ones.
 	Limits []domain.Limit
 	// How the hop went, for passive ejection: the upstream's status, and the X-Grove-Reason an
 	// ingress sets when it is healthy but has no replica for this model.
@@ -61,15 +60,15 @@ func New(usage repository.Usage, limits repository.Limits, health repository.Hea
 	return &Service{usage: usage, limits: limits, health: health, log: log, Now: time.Now}
 }
 
-// debit charges the answer's tokens to the holder's token limits, in the window the answer ended
+// debit charges the answer's tokens to the key's token limits, in the window the answer ended
 // in. Never spooled: replayed later, it would land in a window the tokens were not used in.
 func (s *Service) debit(ctx context.Context, rep Report, tokens int64) {
 	limits := domain.LimitsOn(rep.Limits, domain.LimitTokens)
 	if tokens == 0 || len(limits) == 0 {
 		return
 	}
-	if err := s.limits.Debit(ctx, rep.User, limits, tokens, s.Now()); err != nil {
-		s.log.Error("token limits not debited", "user", rep.User, "tokens", tokens, "err", err)
+	if err := s.limits.Debit(ctx, rep.Prefix, limits, tokens, s.Now()); err != nil {
+		s.log.Error("token limits not debited", "key", rep.Prefix, "tokens", tokens, "err", err)
 	}
 }
 
@@ -98,7 +97,7 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 	cost := PricedFields(fields, rep.Pricing, rep.Prepaid)
 	accrual := repository.Accrual{ID: rep.RequestID, Prefix: rep.Prefix, Fields: fields, Cost: cost}
 	if rep.Prepaid {
-		accrual.User, accrual.Budget = rep.User, rep.Budget
+		accrual.Key, accrual.Budget = rep.MeterID, rep.Budget
 	}
 	if err := s.usage.Accrue(ctx, accrual); err != nil {
 		s.log.Error("usage not recorded; spooled", "prefix", rep.Prefix, "model", rep.Model, "err", err)

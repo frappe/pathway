@@ -10,34 +10,24 @@ import (
 	"github.com/phot0n/pathway/internal/domain"
 )
 
-// Keys holds credentials. A key's only fact of its own is whether it has been revoked.
+// Keys holds credentials and the policy behind each: what it may call, where, how fast, and the
+// cap it spends against.
 type Keys interface {
-	// Resolve reads a credential and what stands behind it in one step: the key, the user it names
-	// and each group that user is in. found=false for a key that was never pushed.
+	// Resolve reads a credential and what stands behind it in one step: the key and each group it
+	// is in. found=false for a key that was never pushed.
 	Resolve(ctx context.Context, meterID string) (holder Holder, found bool, err error)
 	Upsert(ctx context.Context, records []KeyUpsert) error
 	Delete(ctx context.Context, ids []string) (int, error)
+	// AdjustSpent moves a key's lifetime spend by delta nano-USD, once per id: a repeated id
+	// answers the current spend with applied=false. found=false when the key is not here.
+	AdjustSpent(ctx context.Context, meterID, id string, delta int64) (spent int64, applied, found bool, err error)
 }
 
 // Holder is a credential and what stands behind it, as the store read them.
 type Holder struct {
-	Key  domain.KeyRecord
-	User domain.UserRecord
-	// HasUser is false when the key names no user, or one that was never pushed.
-	HasUser bool
-	// Groups is each group read, by name: those the user record lists or, without one, the key's
-	// own. One never pushed is here as the zero value.
+	Key domain.KeyRecord
+	// Groups is each group the key lists, by name. One never pushed is here as the zero value.
 	Groups map[string]domain.GroupRecord
-}
-
-// Users holds the access and budget state behind a person — one record however many keys.
-type Users interface {
-	Get(ctx context.Context, name string) (domain.UserRecord, bool, error)
-	Upsert(ctx context.Context, records []UserUpsert) error
-	Delete(ctx context.Context, ids []string) (int, error)
-	// AdjustSpent moves a holder's lifetime spend by delta nano-USD, once per id: a repeated id
-	// answers the current spend with applied=false. found=false when the holder is not here.
-	AdjustSpent(ctx context.Context, name, id string, delta int64) (spent int64, applied, found bool, err error)
 }
 
 // Groups holds what a Model Group grants everyone in it.
@@ -91,21 +81,21 @@ type ProviderKeys interface {
 	Stats(ctx context.Context, ids []string) (map[string]domain.KeyStats, error)
 }
 
-// Limits counts what a holder has used inside each limit's current window. now picks the window:
+// Limits counts what a key has used inside each limit's current window. now picks the window:
 // the caller's clock decides it, so a test can move it.
 type Limits interface {
 	// Admit checks every limit and, only when all have room, counts the request on the request
 	// limits — one atomic step, so two requests cannot both take the last slot. → the limits
 	// already spent; none when admitted.
-	Admit(ctx context.Context, user string, limits []domain.Limit, now time.Time) ([]domain.Limit, error)
+	Admit(ctx context.Context, key string, limits []domain.Limit, now time.Time) ([]domain.Limit, error)
 	// Debit adds tokens to the current window of each of these limits.
-	Debit(ctx context.Context, user string, limits []domain.Limit, tokens int64, now time.Time) error
+	Debit(ctx context.Context, key string, limits []domain.Limit, tokens int64, now time.Time) error
 }
 
 // Usage accrues token counters per API key prefix. The field names are the service's business —
 // this only adds numbers to them.
 type Usage interface {
-	// Accrue lands one request in one atomic step — its counters, its cost, and the holder's
+	// Accrue lands one request in one atomic step — its counters, its cost, and the key's
 	// spend — so a drain never sees half a request, and never a counter without its cost.
 	Accrue(ctx context.Context, accrual Accrual) error
 	// Drain sets live counters aside under newID — every one, or only these prefixes when keys is
@@ -136,7 +126,6 @@ type State interface {
 // Store is every repository at once, for wiring. Services take only the interfaces they use.
 type Store struct {
 	Keys     Keys
-	Users    Users
 	Groups   Groups
 	Routes   Routes
 	Sessions Sessions
@@ -154,17 +143,10 @@ type Store struct {
 // readable.
 
 type KeyUpsert struct {
-	MeterID string // sha256(secret) hex — the record id
-	Prefix  string
-	User    string
-	Status  string
-	// CanReadBalance is whether the key may read its holder's credit.
-	CanReadBalance bool
-}
-
-type UserUpsert struct {
-	Name        string
-	Email       string
+	MeterID     string // sha256(secret) hex — the record id
+	Prefix      string
+	Team        string
+	Status      string
 	Groups      string // comma list of Model Group names
 	Allow       string // comma list
 	Deny        string // comma list
@@ -172,7 +154,7 @@ type UserUpsert struct {
 	LogPayloads bool
 	Geography   string
 	Prepaid     bool
-	Budget      int64  // nano-USD
+	Budget      int64  // the key's cap, nano-USD
 	Limits      string // comma list of metric:window:value
 }
 
@@ -182,38 +164,32 @@ type GroupUpsert struct {
 }
 
 // Accrual is one metered request. Fields already carry the cost beside the counters; Cost is
-// repeated so the store can move the holder's lifetime spend without reading the map back.
+// repeated so the store can move the key's lifetime spend without reading the map back.
 type Accrual struct {
 	// ID is the request id: what makes a spooled accrual's replay land once.
 	ID     string           `json:"id"`
 	Prefix string           `json:"prefix"`
 	Fields map[string]int64 `json:"fields"`
 	Cost   int64            `json:"cost"`
-	// User names whose spend moves; blank moves nobody's. Budget is what the holder's balance is
-	// reported against, so the drain carries this store's own view of it.
-	User   string `json:"user"`
+	// Key is the record (sha256 hex) whose spend moves; blank moves nobody's. Budget is the cap
+	// the key's balance is reported against, so the drain carries this store's own view of it.
+	Key    string `json:"key"`
 	Budget int64  `json:"budget"`
 }
 
 // The state-push shapes (plan_agent_state_sync.md). A nil section is untouched; a present one is
-// authoritative for its namespace, so anything it does not name is deleted. users and keys arrive
-// in buckets (domain.BucketOf) and each bucket prunes only its own members.
+// authoritative for its namespace, so anything it does not name is deleted. keys arrive in
+// buckets (domain.BucketOf) and each bucket prunes only its own members.
 
 type StatePush struct {
 	Groups *GroupsPush
-	Users  map[string]UserBucket // bucket label → contents; empty Records = prune the bucket
-	Keys   map[string]KeyBucket
+	Keys   map[string]KeyBucket // bucket label → contents; empty Records = prune the bucket
 	Routes *RoutesPush
 }
 
 type GroupsPush struct {
 	Hash    string
 	Records []GroupUpsert
-}
-
-type UserBucket struct {
-	Hash    string
-	Records []UserUpsert
 }
 
 type KeyBucket struct {
@@ -229,7 +205,6 @@ type RoutesPush struct {
 // StateCounts is records written per section, informational for the control plane's run log.
 type StateCounts struct {
 	Groups int `json:"groups"`
-	Users  int `json:"users"`
 	Keys   int `json:"keys"`
 	Routes int `json:"routes"`
 }

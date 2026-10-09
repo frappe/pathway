@@ -10,40 +10,40 @@ func set(models ...string) map[string]bool {
 	return m
 }
 
-// holder builds a current-shape user record — one that names a group, so canUse resolves rather
-// than reading a flattened set.
-func holder(group string) UserRecord {
-	return UserRecord{Groups: ModelSet(group)}
+// key builds a live key record in a group.
+func key(group string) KeyRecord {
+	return KeyRecord{Status: "active", Groups: ModelSet(group)}
 }
-
-func live(status string) KeyRecord { return KeyRecord{Status: status} }
 
 func TestEvaluate(t *testing.T) {
 	tier := GroupRecord{Models: set("a")}
-	overBudget := UserRecord{Groups: ModelSet("tier"), Limited: true}
+	overBudget := KeyRecord{Status: "active", Groups: ModelSet("tier"), Limited: true}
+	revoked := key("tier")
+	revoked.Status = "revoked"
+	revokedAndOver := overBudget
+	revokedAndOver.Status = "revoked"
 	cases := []struct {
 		name   string
 		rec    KeyRecord
-		usr    UserRecord
 		model  string
 		status int
 	}{
-		{"group grant admits", live("active"), holder("tier"), "a", 200},
-		{"model the group does not grant", live("active"), holder("tier"), "b", 403},
-		{"revoked key", live("revoked"), holder("tier"), "a", 401},
-		{"holder out of credit", live("active"), overBudget, "a", 402},
+		{"group grant admits", key("tier"), "a", 200},
+		{"model the group does not grant", key("tier"), "b", 403},
+		{"revoked key", revoked, "a", 401},
+		{"key out of credit", overBudget, "a", 402},
 		// The credential is the thing that is wrong, so it is named first.
-		{"revoked beats over-budget", live("revoked"), overBudget, "a", 401},
+		{"revoked beats over-budget", revokedAndOver, "a", 401},
 		// Fails closed: no group and no allow must not fall through to "everything".
-		{"ungrouped with no allow reaches nothing", live("active"), holder(""), "a", 403},
+		{"ungrouped with no allow reaches nothing", key(""), "a", 403},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			grp := GroupRecord{}
-			if len(tc.usr.Groups) > 0 {
+			if len(tc.rec.Groups) > 0 {
 				grp = tier
 			}
-			got, reason := Evaluate(tc.rec, tc.usr, grp, tc.model)
+			got, reason := Evaluate(tc.rec, grp, tc.model)
 			if got != tc.status {
 				t.Fatalf("status = %d (%q), want %d", got, reason, tc.status)
 			}
@@ -51,155 +51,94 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
-// The user's own lists are deltas on top of the group — the precedence that used to be resolved in
+// The key's own lists are deltas on top of the group — the precedence that used to be resolved in
 // grove/access.py before the group moved into its own Redis record.
-func TestCanUseResolvesTheUsersDeltas(t *testing.T) {
+func TestCanUseResolvesTheKeysDeltas(t *testing.T) {
 	tier := GroupRecord{Models: set("a", "b")}
 	cases := []struct {
 		name  string
-		usr   UserRecord
+		rec   KeyRecord
 		model string
 		want  bool
 	}{
-		{"allow adds a model the group lacks", UserRecord{Groups: ModelSet("t"), Allow: set("z")}, "z", true},
-		{"allow works without any group", UserRecord{Allow: set("z")}, "z", true},
-		{"deny beats the group's grant", UserRecord{Groups: ModelSet("t"), Deny: set("b")}, "b", false},
-		{"deny beats the user's own allow", UserRecord{Allow: set("z"), Deny: set("z")}, "z", false},
-		{"denying an ungranted model is harmless", UserRecord{Groups: ModelSet("t"), Deny: set("zzz")}, "a", true},
+		{"allow adds a model the group lacks", KeyRecord{Groups: ModelSet("t"), Allow: set("z")}, "z", true},
+		{"allow works without any group", KeyRecord{Allow: set("z")}, "z", true},
+		{"deny beats the group's grant", KeyRecord{Groups: ModelSet("t"), Deny: set("b")}, "b", false},
+		{"deny beats the key's own allow", KeyRecord{Allow: set("z"), Deny: set("z")}, "z", false},
+		{"denying an ungranted model is harmless", KeyRecord{Groups: ModelSet("t"), Deny: set("zzz")}, "a", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			grp := GroupRecord{}
-			if len(tc.usr.Groups) > 0 {
+			if len(tc.rec.Groups) > 0 {
 				grp = tier
 			}
-			if got := CanUse(tc.usr, grp, tc.model); got != tc.want {
+			if got := CanUse(tc.rec, grp, tc.model); got != tc.want {
 				t.Fatalf("canUse = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-// Out of credit must win over the model gate: the holder is rejected before we check whether the
+// Out of credit must win over the model gate: the key is rejected before we check whether the
 // model was allowed, so the 402 is not masked by a 403.
 func TestEvaluateCreditPrecedence(t *testing.T) {
-	usr := UserRecord{Groups: ModelSet("tier"), Limited: true}
-	if got, _ := Evaluate(live("active"), usr, GroupRecord{Models: set("a")}, "b"); got != 402 {
+	rec := KeyRecord{Status: "active", Groups: ModelSet("tier"), Limited: true}
+	if got, _ := Evaluate(rec, GroupRecord{Models: set("a")}, "b"); got != 402 {
 		t.Fatalf("expected 402 to win over 403, got %d", got)
 	}
 }
 
-// One person's budget is not the other keys' problem, and one leaked key is not the person's.
-func TestTheKeyAndItsHolderAreJudgedSeparately(t *testing.T) {
-	usr := holder("tier")
+// The prepaid gate is this box's own view of the key's spend against its cap. The control plane's
+// flag — the team's balance is gone — refuses alike, whatever this box's counter says.
+func TestEvaluateThePrepaidCap(t *testing.T) {
 	tier := GroupRecord{Models: set("a")}
-	if got, _ := Evaluate(live("revoked"), usr, tier, "a"); got != 401 {
-		t.Fatalf("revoked key = %d, want 401", got)
-	}
-	if got, _ := Evaluate(live("active"), usr, tier, "a"); got != 200 {
-		t.Fatalf("their other key = %d, want 200 — revoking one must not touch it", got)
-	}
-}
-
-// A key written before access moved onto the user still carries a group pointer and the holder's
-// own lists. synthUser lifts them so the one decision path serves both shapes — which is what lets
-// the control plane and the agent deploy in either order. Delete with the shim.
-func TestAPreSplitKeyResolvesThroughSynthUser(t *testing.T) {
-	rec := KeyRecord{
-		Status: "active",
-		Legacy: LegacyKey{HasGroup: true, Group: "tier", Allow: set("z"), Deny: set("b")},
-	}
-	tier := GroupRecord{Models: set("a", "b")}
-	usr := SynthUser(rec)
-	if got, reason := Evaluate(rec, usr, tier, "a"); got != 200 {
-		t.Fatalf("group grant = %d (%q), want 200", got, reason)
-	}
-	if got, _ := Evaluate(rec, usr, tier, "z"); got != 200 {
-		t.Fatalf("their own allow = %d, want 200", got)
-	}
-	if got, _ := Evaluate(rec, usr, tier, "b"); got != 403 {
-		t.Fatalf("their own deny = %d, want 403", got)
-	}
-}
-
-// The flag used to ride on the key's status. loadKey lifts it, and synthUser carries it, so an
-// exhausted holder on a pre-split record still gets 402 rather than being read as revoked.
-func TestAPreSplitCreditFlagStillRefuses(t *testing.T) {
-	rec := KeyRecord{Status: "active", Legacy: LegacyKey{HasGroup: true, Group: "tier", Limited: true}}
-	if got, _ := Evaluate(rec, SynthUser(rec), GroupRecord{Models: set("a")}, "a"); got != 402 {
-		t.Fatalf("status = %d, want 402", got)
-	}
-}
-
-// A key written by a control plane that pushes user records carries no access of its own, so a
-// missing user record must reach nothing rather than falling back to something.
-func TestACurrentKeyWithNoUserRecordFailsClosed(t *testing.T) {
-	rec := KeyRecord{Status: "active", User: "GU-1"}
-	if rec.Legacy.HasProjection() {
-		t.Fatal("a current key must not look like a legacy one")
-	}
-	// The zero user names no group, so the group it resolves is the zero one too.
-	if got, _ := Evaluate(rec, UserRecord{}, GroupRecord{}, "a"); got != 403 {
-		t.Fatalf("status = %d, want 403", got)
-	}
-}
-
-// The other direction: a key still carrying the older projection is recognised as one, which is
-// what keeps a box serving while the control plane it talks to is upgraded.
-func TestAPreSplitKeyIsRecognisedAsOne(t *testing.T) {
-	preGroup := KeyRecord{Legacy: LegacyKey{Models: set("a")}}
-	preUser := KeyRecord{Legacy: LegacyKey{HasGroup: true, Group: "tier"}}
-	ungrouped := KeyRecord{Legacy: LegacyKey{HasGroup: true}} // present-but-blank `group`
-	for name, rec := range map[string]KeyRecord{
-		"pre-group": preGroup, "pre-user": preUser, "pre-user ungrouped": ungrouped,
-	} {
-		if !rec.Legacy.HasProjection() {
-			t.Fatalf("%s record was not recognised as legacy", name)
-		}
-	}
-}
-
-// A record written before the group split has no `group` field at all, so it still carries a
-// flattened set and its own priority.
-func TestPreGroupRecordStillResolves(t *testing.T) {
-	rec := KeyRecord{Status: "active", Legacy: LegacyKey{Models: set("a")}}
-	usr := SynthUser(rec)
-	if got, reason := Evaluate(rec, usr, GroupRecord{}, "a"); got != 200 {
-		t.Fatalf("status = %d (%q), want 200", got, reason)
-	}
-	if got, _ := Evaluate(rec, usr, GroupRecord{}, "b"); got != 403 {
-		t.Fatalf("status = %d, want 403 — a legacy set still fails closed", got)
-	}
-}
-
-// The prepaid gate is this box's own view of the holder's balance against the amount they loaded.
-// The control plane's flag refuses alike, whatever this box's balance says.
-func TestEvaluateThePrepaidBalance(t *testing.T) {
-	tier := GroupRecord{Models: set("a")}
-	prepaid := func(spent, budget int64) UserRecord {
-		return UserRecord{Groups: ModelSet("tier"), Prepaid: true, Spent: spent, Budget: budget}
+	prepaid := func(spent, budget int64) KeyRecord {
+		return KeyRecord{Status: "active", Groups: ModelSet("tier"), Prepaid: true, Spent: spent, Budget: budget}
 	}
 	cases := []struct {
 		name   string
-		usr    UserRecord
+		rec    KeyRecord
 		status int
 		reason string
 	}{
 		{"funded admits", prepaid(999, 1000), 200, ""},
 		{"spent to the ceiling", prepaid(1000, 1000), 402, "credit balance exhausted"},
 		{"overspent", prepaid(1500, 1000), 402, "credit balance exhausted"},
-		{"no budget pushed", prepaid(0, 0), 402, "credit balance exhausted"},
-		{"not prepaid ignores the budget", UserRecord{Groups: ModelSet("tier"), Spent: 1500, Budget: 1000}, 200, ""},
-		{"limited refuses a funded holder", UserRecord{Groups: ModelSet("tier"), Limited: true, Prepaid: true, Spent: 0, Budget: 1000}, 402, "credit balance exhausted"},
+		{"no cap pushed", prepaid(0, 0), 402, "credit balance exhausted"},
+		{"not prepaid ignores the cap", KeyRecord{Status: "active", Groups: ModelSet("tier"), Spent: 1500, Budget: 1000}, 200, ""},
+		{"limited refuses a funded key", KeyRecord{Status: "active", Groups: ModelSet("tier"), Limited: true, Prepaid: true, Budget: 1000}, 402, "credit balance exhausted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, reason := Evaluate(live("active"), tc.usr, tier, "a")
+			got, reason := Evaluate(tc.rec, tier, "a")
 			if got != tc.status || reason != tc.reason {
 				t.Fatalf("status = %d (%q), want %d (%q)", got, reason, tc.status, tc.reason)
 			}
-			if tc.usr.Exhausted() != (tc.status != 200) {
-				t.Fatalf("Exhausted = %v, want %v", tc.usr.Exhausted(), tc.status != 200)
+			if tc.rec.Exhausted() != (tc.status != 200) {
+				t.Fatalf("Exhausted = %v, want %v", tc.rec.Exhausted(), tc.status != 200)
+			}
+		})
+	}
+}
+
+// A pin is honoured against this gateway's geography; an unpinned key serves anywhere, and a
+// gateway with no geography of its own refuses every pinned key.
+func TestGeographyDenial(t *testing.T) {
+	cases := []struct {
+		name, pin, gateway string
+		want               bool
+	}{
+		{"unpinned", "", "in", false},
+		{"pinned here", "eu", "eu", false},
+		{"pinned elsewhere", "eu", "in", true},
+		{"gateway without a geography", "eu", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := GeographyDenial(KeyRecord{Geography: tc.pin}, tc.gateway)
+			if (err != nil) != tc.want {
+				t.Fatalf("denial = %v, want refused %v", err, tc.want)
 			}
 		})
 	}

@@ -36,8 +36,22 @@ var (
 		nameOutputCap, developerAsSystem, unthinkForcedFunction, blankReasoningContent, unreasonWithTools,
 		defaultSampling,
 	}
-	messagesRewrites = []rewrite{untypeCustomTools, unthinkForcedTool, blankThinkingBlock}
+	messagesRewrites = []rewrite{dropSpeed, untypeCustomTools, unthinkForcedTool, blankThinkingBlock}
 )
+
+// dropSpeed takes fast mode off a request to a vendor. `speed` is Anthropic's faster tier at twice
+// the rate, and nothing here prices it: the request goes at the standard speed and the caller is
+// told. Ours, not a vendor's quirk, so every vendor's Anthropic front gets it and the table has no
+// flag. An engine we run gets the body as sent. OpenAI's tier is `service_tier`, which the
+// `servicetier` transform drops on every hop.
+func dropSpeed(ctx Context, body Body) (bool, error) {
+	if !ctx.Provider || !said(body, "speed") {
+		return false, nil
+	}
+	delete(body, "speed")
+	ctx.tell("speed=default")
+	return true, nil
+}
 
 func (vendorFields) Apply(ctx Context, body Body) (bool, error) {
 	rewrites := chatRewrites
@@ -78,8 +92,8 @@ func nameOutputCap(ctx Context, body Body) (bool, error) {
 	return true, nil
 }
 
-// untypeCustomTools drops `"type":"custom"` from each tool. Any other type is a tool the vendor
-// runs, and stays.
+// untypeCustomTools drops `"type":"custom"` from each tool. Any other type stays: one the vendor
+// would run on its own side was refused at `route`, from the route's denied_tools, before this ran.
 func untypeCustomTools(ctx Context, body Body) (bool, error) {
 	if !upstreamOf(ctx).untypedTools {
 		return false, nil

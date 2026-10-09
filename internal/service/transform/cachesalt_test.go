@@ -18,11 +18,11 @@ func saltBody(t *testing.T, raw string) Body {
 // another's salt string and land inside their cache namespace.
 func TestAProvidedSaltIsNamespacedUnderTheTenant(t *testing.T) {
 	body := saltBody(t, `{"model":"m","cache_salt":"team-a"}`)
-	changed, err := cacheSalt{}.Apply(Context{User: "test-user"}, body)
+	changed, err := cacheSalt{}.Apply(Context{Team: "test-team"}, body)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
-	if string(body["cache_salt"]) != `"test-user:team-a"` {
+	if string(body["cache_salt"]) != `"test-team:team-a"` {
 		t.Errorf("cache_salt = %s", body["cache_salt"])
 	}
 }
@@ -30,7 +30,7 @@ func TestAProvidedSaltIsNamespacedUnderTheTenant(t *testing.T) {
 // Opt-in by user call: no salt means no salt — the shared namespace is the recorded trade.
 func TestNoSaltIsNeverInvented(t *testing.T) {
 	body := saltBody(t, `{"model":"m"}`)
-	changed, _ := cacheSalt{}.Apply(Context{User: "test-user"}, body)
+	changed, _ := cacheSalt{}.Apply(Context{Team: "test-team"}, body)
 	if changed {
 		t.Error("a salt was added to a request that sent none")
 	}
@@ -42,7 +42,7 @@ func TestNoSaltIsNeverInvented(t *testing.T) {
 // A vendor has no such field, and a strict one 400s on unknowns.
 func TestASaltIsStrippedFromAVendorHop(t *testing.T) {
 	body := saltBody(t, `{"model":"m","cache_salt":"team-a"}`)
-	changed, _ := cacheSalt{}.Apply(Context{User: "test-user", Provider: true}, body)
+	changed, _ := cacheSalt{}.Apply(Context{Team: "test-team", Provider: true}, body)
 	if !changed {
 		t.Error("nothing changed")
 	}
@@ -54,7 +54,7 @@ func TestASaltIsStrippedFromAVendorHop(t *testing.T) {
 // A non-string salt is the engine's schema error to give, not ours to guess around.
 func TestANonStringSaltPassesUntouched(t *testing.T) {
 	body := saltBody(t, `{"cache_salt":42}`)
-	changed, _ := cacheSalt{}.Apply(Context{User: "test-user"}, body)
+	changed, _ := cacheSalt{}.Apply(Context{Team: "test-team"}, body)
 	if changed || string(body["cache_salt"]) != "42" {
 		t.Errorf("cache_salt = %s, changed = %v", body["cache_salt"], changed)
 	}

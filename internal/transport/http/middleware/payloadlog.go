@@ -15,7 +15,7 @@ func init() {
 
 // payloadlog records the prompt and the output — the one place the gateway retains customer
 // CONTENT rather than metadata, which is why it runs nowhere unless BOTH the box has a payload log
-// configured AND the control plane flagged this user in. Never silently: default off, per user.
+// configured AND the control plane flagged this key in. Never silently: default off, per key.
 //
 // What it logs is the customer's own view: the request as the client sent it (state.Raw, above the
 // transforms) and the response as the client received it (below the proxy's model swap). One line
@@ -28,7 +28,7 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
-			if !state.Identity.User.LogPayloads || (state.Raw == nil && state.Form == nil) {
+			if !state.Identity.Key.LogPayloads || (state.Raw == nil && state.Form == nil) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -47,7 +47,7 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 				attrs := []slog.Attr{
 					slog.String("rid", state.RequestID),
 					slog.String("key", or(state.Identity.Prefix(), "-")),
-					slog.String("user", state.Identity.Key.User),
+					slog.String("team", state.Identity.Key.Team),
 					slog.String("model", or(state.Model, "-")),
 					slog.String("fallback", or(state.Fallback, "-")),
 					slog.String("path", r.URL.Path),

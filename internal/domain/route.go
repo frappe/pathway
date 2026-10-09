@@ -39,6 +39,11 @@ type Route struct {
 	// unrestricted.
 	InputModalities  []string `json:"input_modalities,omitempty"`
 	OutputModalities []string `json:"output_modalities,omitempty"`
+	// DeniedTools is what this vendor would run on its own side and bill outside the token
+	// counts: a `tools[].type` ("web_search_20250305") or a top-level request field
+	// ("web_search_options"), as the control plane lists them. A request that names one is
+	// refused before the dial (SentTools, Refuses). Empty on every row we run ourselves.
+	DeniedTools []string `json:"denied_tools,omitempty"`
 	// What this upstream answers to, when that is not the id the caller sent. The control plane
 	// owns the mapping. Blank on every route we run ourselves — an engine is started under the
 	// Grove id — and on any route pushed before this field existed, which reads as "send unchanged".

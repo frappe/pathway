@@ -60,7 +60,7 @@ func TestBothLogLinesSurviveAClientHangup(t *testing.T) {
 	optIn := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
-			state.Identity.User.LogPayloads = true
+			state.Identity.Key.LogPayloads = true
 			state.Raw = []byte(`{"model":"qwen3-4b","stream":true}`)
 			next.ServeHTTP(w, r)
 		})
@@ -108,7 +108,7 @@ func payloadLine(t *testing.T, fill func(*State), r *http.Request, handler http.
 	optIn := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r, state := newState(r)
-			state.Identity.User.LogPayloads = true
+			state.Identity.Key.LogPayloads = true
 			fill(state)
 			next.ServeHTTP(w, r)
 		})

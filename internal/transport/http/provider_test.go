@@ -186,6 +186,50 @@ func TestAPathTheVendorDoesNotServeNeverLeavesTheGateway(t *testing.T) {
 	}
 }
 
+// A tool the vendor would run on its own side is billed outside the tokens, and nothing here
+// meters it: a request that names one the route denies is refused in the surface's own envelope
+// before the dial. The caller's own tools go through.
+func TestAToolTheVendorRunsIsRefusedBeforeTheDial(t *testing.T) {
+	for _, c := range []struct {
+		name, path, body, envelope string
+		want                       int
+	}{
+		{"a server tool on the Anthropic shape", "/anthropic/v1/messages",
+			`{"model":"anthropic/claude-4-5","max_tokens":16,"tools":[{"type":"web_search_20250305","name":"web_search"}]}`,
+			`"type":"error"`, http.StatusBadRequest},
+		{"a field that asks for one on the OpenAI shape", "/v1/chat/completions",
+			`{"model":"openai/luna","web_search_options":{}}`, `"error":{`, http.StatusBadRequest},
+		{"the caller's own tool", "/anthropic/v1/messages",
+			`{"model":"anthropic/claude-4-5","max_tokens":16,"tools":[{"type":"custom","name":"a","input_schema":{}},{"type":"bash_20250124","name":"bash"}]}`,
+			"", http.StatusOK},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := providerFixture(t)
+			f.store.Routes["anthropic/claude-4-5"][0].DeniedTools = []string{"web_search_20250305", "mcp_servers"}
+			f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("anthropic/claude-4-5,openai/luna")}
+			f.store.Routes["openai/luna"] = []domain.Route{{
+				EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
+				Vendor: "openai", Kind: "provider", Dialect: "openai", DeniedTools: []string{"web_search_options"},
+			}}
+			resp := f.post(c.path, c.body)
+
+			if resp.Code != c.want {
+				t.Fatalf("status = %d, want %d: %s", resp.Code, c.want, resp.Body)
+			}
+			if c.want != http.StatusOK {
+				if !strings.Contains(resp.Body.String(), c.envelope) || !strings.Contains(resp.Body.String(), "does not run") {
+					t.Errorf("refusal = %s, want the surface's envelope naming the tool", resp.Body)
+				}
+				if f.seen.path != "" {
+					t.Errorf("the vendor was dialled anyway: %s", f.seen.path)
+				}
+			} else if f.seen.path == "" {
+				t.Error("the caller's own tool never reached the vendor")
+			}
+		})
+	}
+}
+
 // One provider record, two fronts: each surface's requests dial the front that speaks it, and a
 // path neither front serves still never leaves the gateway.
 func TestADualFrontVendorRoutesEachSurfaceToItsOwnFront(t *testing.T) {

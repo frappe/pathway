@@ -8,7 +8,7 @@ proxies the request, meters what it cost, and upgrades itself without dropping a
 | | Gateway Server | Ingress Server |
 |---|---|---|
 | env | `GROVE_GATEWAY_ID` | `GROVE_INGRESS_ID` |
-| holds | keys, users, groups, usage | nothing tenant-shaped |
+| holds | keys, groups, usage | nothing tenant-shaped |
 | picks | a route (network or engine) | a replica in its own VPC |
 | meters | yes | no — usage belongs to a tenant it cannot see |
 
@@ -42,7 +42,7 @@ about to change something, skip to *How to do things* and *Things worth knowing*
 ```
                     ┌──────────────────────────────────────────────┐
                     │  Grove (Frappe control plane)                │
-                    │  keys · users · groups · models · placements │
+                    │  keys · teams · groups · models · placements │
                     └───────┬──────────────────────────▲───────────┘
    POST /grove-admin/state  │                          │  GET /grove-admin/usage + ack
    every 2 min (hash-gated) │                          │  hourly (drain)
@@ -77,7 +77,7 @@ every route pushed before the split carried.
 
 **A gateway's state lives in one Redis:** loopback, or the Gateway Store its Network's
 gateways share (`GROVE_REDIS_ADDR` + `GROVE_REDIS_PASSWORD`). Its contents are either pushed (keys,
-users, groups, routes) or derived (sticky, in-flight, health, usage). On a shared store in-flight is
+groups, routes) or derived (sticky, in-flight, health, usage). On a shared store in-flight is
 one counter, so a directly dialled replica's cap holds across those gateways. A dead store fails its
 gateways closed: nothing authenticates and `/healthz` reports it. The store has to be a single Redis,
 not a Cluster: authentication is one script that follows a key to its user and groups, records it is
@@ -208,7 +208,7 @@ The rule everywhere: **one owner per piece of state that can drift.**
 | transport pool | `proxy.Proxy` | until a tunable changes | `Proxy.Reconfigure` |
 | certificate | `certLoader` | until the file's mtime moves | the loader |
 | sticky, in-flight, health, usage | the box's Redis | minutes to a pull cycle | this box (or its store's gateways) |
-| keys, users, groups, routes | the box's Redis | until the next push | **the control plane** |
+| keys, groups, routes | the box's Redis | until the next push | **the control plane** |
 
 The last row is the important one. Everything pushed is a *projection*: the gateway never edits it,
 never merges into it, and never treats a local change as authoritative. Anything it does own is
@@ -302,11 +302,11 @@ proxy ──► engine (or ingress ──► engine)
 | `recover` | panic → 500, so nothing below can drop a connection |
 | `accesslog` | mints the request id, times the request, writes the one durable line per request |
 | `drain` | while shutting down: 503 + `Retry-After` + "gateway is restarting" |
-| `auth` | bearer → key → user → groups, once, into the request state |
-| `quota` | the credit flag the control plane pushed, or a prepaid balance spent → 402; then the holder's rate limits → 429 + `Retry-After` |
+| `auth` | bearer → key → groups, once, into the request state |
+| `quota` | the geography pin → 403; the credit flag the control plane pushed, or the key's cap spent → 402; then the key's rate limits → 429 + `Retry-After` |
 | `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Not a JSON object, or no `model` in it (or in the form, or an upgrade's query) → 400; over `max_body_bytes` → 413; not all here within 60s → 408 |
 | `modelaccess` | `CanUse` → 403 |
-| `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the user's `log_payloads` is on. See [The payload log](#the-payload-log) |
+| `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the key's `log_payloads` is on. See [The payload log](#the-payload-log) |
 | `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot, except on a vendor row |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |
 | `fallback` | runs the stages below again on the next model in the body's `fallbacks` when the one serving cannot (5xx, or a key failure `retry` could not rotate away). See [Fallback models](#fallback-models) |
@@ -374,8 +374,8 @@ and `/v1/realtime` is not a path any output claims, so any model may serve it. T
 #### The payload log
 
 The one place the gateway keeps customer content rather than metadata, so it is off twice over: the
-box needs `GROVE_PAYLOAD_LOG`, and the user needs `log_payloads` (pushed on `user:<name>`, read per
-request, so turning it takes effect on the next one). One JSON line per request, written when the
+box needs `GROVE_PAYLOAD_LOG`, and the key needs `log_payloads` (pushed on `key:<hash>` from its
+team, read per request, so turning it takes effect on the next one). One JSON line per request, written when the
 request ends — a client that hung up mid-stream still gets one, with what it had received:
 
 `rid` (joins the access line), `key`, `user`, `model`, `fallback` (the model whose output this is,
@@ -436,7 +436,7 @@ What each layer contributes, for one `POST /v1/chat/completions`:
 | 1 | `transport/http` | TLS handshake, `ServeMux` matches host + path |
 | 2 | `middleware/auth` | reads the `Authorization` header |
 | 3 | `service/admission` | `Identify` → one store read |
-| 4 | `repository/redis` | one script: `HGETALL key:…`, then the `user:…` it names and each `model_group:…` that names |
+| 4 | `repository/redis` | one script: `HGETALL key:…`, then each `model_group:…` it names |
 | 5 | `domain` | `Evaluate` — pure, no I/O |
 | 6 | `middleware/body` | bounded read, JSON decode, model out |
 | 7 | `service/routing` | `Pick` — sticky read, in-flight counts, health |
@@ -497,6 +497,7 @@ What a vendor is sent in place of what the client sent:
 | `max_completion_tokens` / `max_tokens` (OpenAI shape) | `max_completion_tokens` at OpenAI, `max_tokens` at every other vendor; sent under both names, the newer one's value (`vendorfields`) |
 | `stream_options` (OpenAI shape) | `include_usage: true` added on a stream (`streamusage`). `continuous_usage_stats` is added for Baseten and for an engine of ours, not for OpenAI (400s on it), DeepSeek (ignores it) or a vendor the gateway does not know |
 | a tool's `type` (Anthropic shape) | `"type": "custom"` removed at DeepSeek, which refuses it; a tool with no type means the same. Any other type stays (`vendorfields`) |
+| `speed` (Anthropic shape) | removed for every vendor: fast mode is twice the rate and nothing here prices it. The caller is told: `X-Grove-Changed: speed=default` (`vendorfields`) |
 | a `developer` message (OpenAI shape) | sent as a `system` message at DeepSeek, which knows no such role (`vendorfields`) |
 | a past tool-call turn that came back without its reasoning | at DeepSeek an empty one is added: `reasoning_content: ""` on the OpenAI shape, an empty thinking block on the Anthropic one. Not when the caller disabled `thinking` (`vendorfields`) |
 | `thinking`, when a tool is forced | at DeepSeek `{"type": "disabled"}` is added when `tool_choice` is `"required"` or names a function (`tool` on the Anthropic shape) and the caller sent no `thinking` or `reasoning_effort`. The caller is told: `X-Grove-Changed: thinking=disabled` (`vendorfields`) |
@@ -548,14 +549,15 @@ one list of it: add a row or a column when a new difference shows up, with the d
 | `model` in the answer | the id it was started under | the id it was asked by | may differ: `deepseek-v4-flash` answers as `deepseek-flash` (2026-10-04) | not checked | the response swap writes the client's id whatever came back |
 | Anthropic shape | yes | no | yes, its own front | yes; it reads the key as a Bearer, and answers 401 `please check the api-key you provided` to `x-api-key` (2026-10-05) | the route's `dialect`; `upstreamauth` sends Baseten a Bearer, from `vendors` |
 | A tool typed `"custom"` (Anthropic shape; Anthropic's API reference takes it, and litellm always sends it) | not checked | no such shape | 422 ``unknown variant `custom`, expected `web_search_20250305` or `web_search_20260209` ``; the same tool with no type is a 200 with a `tool_use` (2026-10-05) | taken (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets the tool without the type |
-| A server tool other than web search (Anthropic shape) | not checked | no such shape | 422 `unknown variant` for bash, text editor, web fetch and code execution (2026-10-05) | taken and not run: the answer is prose (2026-10-05) | not handled: the vendor refuses |
+| A server tool other than web search (Anthropic shape) | not checked | no such shape | 422 `unknown variant` for bash, text editor, web fetch and code execution (2026-10-05) | taken and not run: the answer is prose (2026-10-05) | the route's `denied_tools`, at `route`: a tool the control plane lists for the vendor is a 400 before the dial; the rest the vendor refuses |
 | A forced tool: `tool_choice` `"required"` or a named function, `tool` on the Anthropic shape | not checked | not checked | 400 `Thinking mode does not support this tool_choice` while thinking is on, its default; taken with `thinking` disabled, and `any` on the Anthropic shape is taken (2026-10-05) | taken on both shapes (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets `thinking` disabled, unless the caller spoke of thinking |
 | A past tool-call turn sent back without its reasoning | not checked | not checked | 400 ``The `reasoning_content` in the thinking mode must be passed back to the API``, and ``The `content[].thinking` …`` on the Anthropic shape; taken with it, with it empty, or with `thinking` disabled (2026-10-05) | taken on both shapes; a thinking block with no `signature` is a 400 (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets an empty one |
 | A function tool while the model reasons (chat) | not checked | 400 `Function tools with reasoning_effort are not supported … use /v1/responses or set reasoning_effort to 'none'` on luna and sol; taken with `reasoning_effort: "none"` (2026-10-05) | taken (2026-10-05) | taken (2026-10-05) | `vendorfields`, from `vendors`: OpenAI gets `reasoning_effort: "none"` when the caller set none |
 | A `temperature` or `top_p` other than 1, or `logprobs` (chat) | not checked | while the model reasons, its default: 400 `'temperature' does not support 0.7 with this model. Only the default (1) value is supported.`, 400 `'top_p' is not supported with this model` and the same for `logprobs`, on luna and sol; 1 is taken for the first two, and all of them with `reasoning_effort: "none"` (2026-10-06) | not checked | not checked | `vendorfields`, from `vendors`: OpenAI gets none of them unless reasoning is off |
+| `speed: "fast"` (Anthropic shape) | not checked | no such shape | not checked | not checked | `vendorfields`: dropped for every vendor, the caller told `speed=default`; ours to refuse to pay, not a quirk |
 | A `developer` message | not checked | followed (2026-10-05) | 422 ``unknown variant `developer`, expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder` `` (2026-10-05) | followed (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets it as `system` |
 | A past tool call with no `type` | not checked | 400 `Missing required parameter` (2026-10-05) | 422 ``missing field `type` `` (2026-10-05) | taken (2026-10-05) | not handled: the vendor refuses |
-| Fields only OpenAI reads: `prediction`, `prompt_cache_key`, `prompt_cache_retention`, `verbosity`, `store`, `web_search_options` | not checked | its own | all six ignored (2026-10-05) | 400 `Extra inputs are not permitted` on `prediction` and `web_search_options`; the other four ignored (2026-10-05) | not handled |
+| Fields only OpenAI reads: `prediction`, `prompt_cache_key`, `prompt_cache_retention`, `verbosity`, `store`, `web_search_options` | not checked | its own | all six ignored (2026-10-05) | 400 `Extra inputs are not permitted` on `prediction` and `web_search_options`; the other four ignored (2026-10-05) | `web_search_options` is a 400 before the dial where the route's `denied_tools` lists it (OpenAI's does); the rest not handled |
 | A remote image URL | not checked | not checked | downloads it itself. A Pexels photo was a 400 `unsupported image` 9 times in 12: Pexels serves AVIF to an `Accept` that offers it and JPEG otherwise, and DeepSeek takes JPEG, PNG, GIF and WebP only, judged by the file's bytes ([its guide](https://api-docs.deepseek.com/guides/vision)). With `fm=jpg` in the URL, 8 of 8 were taken. A Wikimedia PNG is a 400 `Failed to download image`. The image as base64 is taken. Only flash reads images: pro answers 200 and says it cannot see one (2026-10-05) | the Pexels photo is taken, the Wikimedia PNG a 500; base64 is taken (2026-10-05) | not handled: the gateway downloads nothing |
 
 What Baseten bills for a stream that was cut has not been compared with its own usage report.
@@ -589,7 +591,8 @@ Every `X-Grove-*` header, and who it is between:
 
 | Header | From → to | For |
 |---|---|---|
-| `X-Grove-Session` | client → gateway | names the caller's session (see [Session affinity](#session-affinity)) |
+| `X-Grove-Session` | client → gateway | names the caller's session (see [Session affinity](#session-affinity)). Taken off before the hop |
+| `X-Grove-Metadata` | client → gateway | the caller's own tags for the access line (see [Correlation](#correlation)). Taken off before the hop |
 | `X-Grove-Fallback` | gateway → client | the fallback that served |
 | `X-Grove-Changed` | gateway → client | what the gateway changed in the request that alters what the model does, as `field=value` |
 | `X-Grove-Model`, `X-Grove-Session-Key` | gateway → ingress | the model to pick a replica of, and the session to keep on it. Taken off a request to anything that is not an ingress |
@@ -654,6 +657,10 @@ One that ends a stream early but cleanly cannot be told from one that finished, 
 This is cheaper than active probing and strictly better informed: a probe tests a path no customer
 is on.
 
+Engine and ingress rows only. A vendor row is never counted or ejected: it has no sibling to steer
+to, and its counter would be its base URL, shared by every model on that front. Its 5xx reaches the
+caller, and the caller's fallbacks, as it is.
+
 ### Fallback models
 
 A caller may name other models to take the request when the one asked for cannot, in a JSON body:
@@ -671,7 +678,9 @@ OpenAI and Anthropic shapes, and a model answers only the paths its outputs allo
 without a dial, as is one the caller is not granted or one with no routes right now. So is one
 that declares its inputs and lacks what the request carries: a model that takes `["text"]` is not
 sent a request with an image in it. The image and file parts of `messages` are what is
-looked for, on either shape; the model asked for is never held to this, only its stand-ins. One
+looked for, on either shape; the model asked for is never held to this, only its stand-ins. So is
+one whose vendor row denies a tool the request names (`denied_tools`, see [The records themselves](#the-records-themselves)); there the model asked for is held to it
+too, as a 400, since a vendor-run tool is a bill and not a round trip. One
 that is dialled and refuses the request (a model that declares no inputs sent an image, or any
 model sent a field it does not take) costs that dial, and the next is tried.
 
@@ -713,27 +722,29 @@ health mark and gives its slot back, and leaves an `attempt` line on the access 
 
 ## Admission
 
-Three records, resolved in order — `key:` → `user:` → `model_group:`. A user names any number of
-groups; their grants are unioned into one before the gates run.
+Two records, resolved in order — `key:` → `model_group:`. A key names any number of groups; their
+grants are unioned into one before the gates run.
 
-The split is deliberate. A credential's only fact of its own is whether it has been revoked;
-**who holds it, what they may call and whether they are over budget are facts about the person.**
-So one leaked key dies without touching the rest, and a budget flip is one write however many keys
-that person holds.
+**The key is the policy.** Its team (a Central Team) is the ledger the control plane bills, but
+everything a gate reads — models, geography, rate limits, and the cap it spends against — sits on
+the key itself. That is what lets a team spread keys across geographies: a key lives on one
+geography's store, that store holds the key's whole cap and counts all its spend, so the gate is
+exact however many other keys the team holds elsewhere. A revoked key dies alone; the team's
+balance running out flips `limited` on every key it holds, one field each.
 
 `Evaluate` then runs three gates, in this order:
 
 | Gate | Status | Why in this position |
 |---|---|---|
-| key is `active` | 401 | Checked first: a revoked key is 401 even for a holder who is also over quota, because the key is the thing that is wrong |
-| holder has credit | 402 | `limited` is a pushed flag; `prepaid && spent >= budget` is this Redis's own counter against the amount the user loaded. Either → 402 |
+| key is `active` | 401 | Checked first: a revoked key is 401 even when it is also over quota, because the key is the thing that is wrong |
+| key has credit | 402 | `limited` is a pushed flag (the team's balance is gone); `prepaid && spent >= budget` is this Redis's own counter against the key's cap. Either → 402 |
 | `CanUse(model)` | 403 | |
 
 `CanUse` is the whole access rule and fails closed:
 
 ```
-deny wins over everything          usr.Deny[model]        → false
-otherwise, every group's grant ∪ user's own allow          → true
+deny wins over everything          key.Deny[model]        → false
+otherwise, every group's grant ∪ key's own allow           → true
 nothing granted it                                        → false
 ```
 
@@ -742,22 +753,23 @@ something the inference path would refuse.
 
 ### Credit gates
 
-Two, both read off the user record before the body is, both answering 402
-`credit balance exhausted`. The control plane's: its own balance priced from the pull, flipped as
-`limited` and pushed. This box's own: `prepaid && spent >= budget`, where `spent` is the one counter
-this process keeps (see *The records themselves*). A client cannot tell which one refused it.
+Two, both read off the key record before the body is, both answering 402
+`credit balance exhausted`. The control plane's: the team's balance priced from the pull, flipped as
+`limited` and pushed onto every key of the team. This box's own: `prepaid && spent >= budget`, the
+key's cap against the one counter this process keeps (see *The records themselves*). A client
+cannot tell which one refused it.
 
 ### Rate limiting
 
-Per holder, pushed on the user record as `limits`: a comma list of `<metric>:<window>:<value>`,
+Per key, pushed on its record as `limits`: a comma list of `<metric>:<window>:<value>`,
 e.g. `requests:1m:200,total_tokens:1h:50000`. No entry = uncapped. Checked in `quota`, after the
-credit gates, so a holder with no balance does not use up a request.
+credit gates, so a key with no balance does not use up a request.
 
 | | |
 |---|---|
 | Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |
-| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the holder's first request |
-| Counter | `lim:<user>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
+| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the key's first request |
+| Counter | `lim:<key prefix>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
 | Refusal | 429 `rate limit exceeded: 200 requests per 1m` (`rate_limit_error`), `Retry-After` = seconds to the window's end. Over several limits at once, the one that resets last is named |
 
 **Requests are exact, tokens are check-then-debit.** One Lua script reads every counter and, only
@@ -773,9 +785,9 @@ is debited what usage it reported. A debit the store refuses is logged and dropp
 replayed later, it would land in a window the tokens were not used in.
 
 Scope: the counters live in this gateway's store, so a limit is exact across every gateway sharing
-it and separate on a gateway with its own Redis. The limit store failing is a 503 for a holder with
+it and separate on a gateway with its own Redis. The limit store failing is a 503 for a key with
 limits; one without never reads it. A push carrying a limit this binary cannot read is refused 400,
-naming the user.
+naming the key.
 
 ---
 
@@ -882,15 +894,15 @@ root (a vendor fee reported in `usage`) is one parser line that fills its bucket
 pricing in force; a price change lands with the push that carries it, and a request is charged by
 the pricing its gateway held. One Lua script per request: HINCRBY every counter, each priced counter again as `p:<pricing id>:<counter>`,
 then `cost` and `p:<pricing id>:cost` — Σ counter × rate, nano-USD, truncated per counter, 0 on an
-unpriced route — then, for a prepaid holder only, `HINCRBY user:<u> spent cost` and `HSET user_spent
-user_balance` (`budget − spent`, negative once overspent; last writer wins) on the usage hash. A free
-holder's usage is counted and priced the same, but tagged `f:<pricing id>:` instead of `p:`; their
-`spent` never moves and the drain carries no balance for them, so turning them prepaid later starts
-them at what they load. The tag is set per request, so a drain that spans a flip carries both and the
+unpriced route — then, for a prepaid key only, `HINCRBY key:<hash> spent cost` and `HSET key_spent
+key_balance` (`budget − spent`, negative once overspent; last writer wins) on the usage hash. A free
+team's usage is counted and priced the same, but tagged `f:<pricing id>:` instead of `p:`; its keys'
+`spent` never moves and the drain carries no balance for them, so turning the team prepaid later
+starts it at what it loads. The tag is set per request, so a drain that spans a flip carries both and the
 pull bills only the `p:` part. The pull prices each
 `p:<pricing id>` or `f:<pricing id>` group with that same pricing's table, so the two sides can only disagree when they
 hold different rates for one pricing id. A drain therefore never sees a counter without its cost, or a cost without the spend it
-moved. The spend moves only on a holder the control plane has pushed.
+moved. The spend moves only on a key the control plane has pushed.
 
 ### Correlation
 
@@ -910,6 +922,13 @@ the client; ours never reaches the vendor. `attempts` is how many times an upstr
 for the request — 0 when it was refused before any, more than 1 when `retry` moved it to another
 vendor key or `fallback` to another model. `model` is the one the client asked for; `fallback` is
 the model that served instead, `-` when the one asked for did.
+
+A caller tags its own requests with `X-Grove-Metadata: app=hrms, trace=7f3a-91`, and the tags land
+on the access line as `meta: {"app": "hrms", "trace": "7f3a-91"}`: which app spent a key several
+apps share, or the caller's own correlation id. Up to 16 pairs in 2 KB; keys are 1-32 of `a-z 0-9 _ . -`,
+values 1-128 printable ASCII without a comma, and a repeated key keeps its last value. Anything
+else is a 400 before the request goes further. The tags are logged, never counted, and never sent
+upstream. They do not pin routing; `X-Grove-Session` does that.
 
 The access line describes the last attempt only. Every attempt before it — one the client never
 saw, because `retry` or `fallback` held its answer and moved the request on — leaves a line of its
@@ -1143,12 +1162,11 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 
 | Key | Type | Written by |
 |---|---|---|
-| `key:<sha256(secret)>` | hash | state push, `keys` section |
-| `user:<Grove User>` | hash | state push, `users` section; `spent` by the gateway |
+| `key:<sha256(secret)>` | hash | state push, `keys` section; `spent` by the gateway |
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
-| `lim:<user>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see *Rate limiting* |
+| `lim:<key prefix>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see *Rate limiting* |
 | `usage:<key prefix>` | hash | the gateway; set aside by `GET /grove-admin/usage` |
 | `drained:<drain id>:<key prefix>` | hash, kept `usage_retention` once acked | `GET /grove-admin/usage` renames a live counter here |
 | `drain:unacked` | set of `<drain id>:<key prefix>` | every counter set aside and not yet acked |
@@ -1166,11 +1184,11 @@ would stay missing until its section changed; only gateway-owned keys expire
 ### How the push works
 
 `POST /grove-admin/state` is desired state, whole, and **absence prunes**. The body carries any
-subset of four sections — groups, users, keys, routes — each stamped with a
+subset of three sections — groups, keys, routes — each stamped with a
 hash Grove computed. The agent applies the whole body in ONE Redis MULTI: HSET every named
 record, DEL every record in a pushed section the payload does not name, then store the hashes in
 `grove:state_hash`. A Redis error is a 500 and none of it lands — the hashes never claim state
-that did not arrive. Only `model_group:/user:/key:/deploy:` are ever pruned; usage,
+that did not arrive. Only `model_group:/key:/deploy:` are ever pruned; usage,
 sticky, inflight and health keys are the gateway's own.
 
 Every admin body is decoded strictly: a field this binary does not know is a 400 naming it
@@ -1181,8 +1199,8 @@ which is what happened once. Consequence: a new route field ships in the binary 
 pushes it.
 
 `GET /grove-admin/state-hash` returns that stored map. Grove diffs its computed hashes against it
-every 2 minutes and pushes only what differs — an in-sync box costs one GET. `users` and `keys`
-are split into 256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
+every 2 minutes and pushes only what differs — an in-sync box costs one GET. `keys` is split into
+256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
 independently, so one minted key ships one bucket, not the population. A wiped Redis has no
 hashes, reads as total drift, and is fully rebuilt on the next tick — that is the only repair
 path and the only one needed. Both planes mount these endpoints; an ingress only ever receives
@@ -1228,41 +1246,43 @@ ack — `"dead": ["<request id>", ...]` beside `"acks"` — which removes it; `c
 failed, last_used, last_rate_limited}}` per vendor credential, lifetime and never drained; an id
 never dialled is zeros. The control plane sums it across stores for the operator.
 
-`POST /grove-admin/spend-adjust {"user", "delta", "id"}` corrects one holder's `spent` on this store
-by `delta` nano-USD, once per `id` — a retry answers `{"spent", "applied": false}` and moves
-nothing. A holder this store does not hold is a 404; nothing is invented.
+`POST /grove-admin/spend-adjust {"key", "delta", "id"}` corrects one key's `spent` on this store
+by `delta` nano-USD, once per `id` (`key` is the record id, sha256 hex) — a retry answers
+`{"spent", "applied": false}` and moves nothing. A key this store does not hold is a 404; nothing
+is invented.
 
 ### The records themselves
 
 ```
-key:<sha256(secret)>       status  user  prefix  can_read_balance
-user:<Grove User>          email  group (comma list)  allow  deny  limited  log_payloads  geography
-                           prepaid  budget  spent  limits
+key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
+                           geography  prepaid  budget  spent  limits
 model_group:<Model Group>  models
 usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
                            prompt_tokens_above_272k  cached_tokens_above_272k
                            cache_write_tokens_above_272k  completion_tokens_above_272k
                            audio_seconds
-                           cost  user_spent  user_balance
+                           cost  key_spent  key_balance
                            m:<metric>:<model>  m:<metric>:<deployment>
                            p:<pricing id>:<priced counter>  p:<pricing id>:cost
 ```
 
 `group` / `allow` / `deny` / `models` are comma lists; blank parses to a map that answers false
-to everything, which is the fail-closed default. `group` holds every group the user is in, so a
-name containing a comma would split — Grove refuses one.
+to everything, which is the fail-closed default. `group` holds every group the key is in, so a
+name containing a comma would split — Grove refuses one. `team` is the Central Team the key bills
+to: the cache-salt namespace and the payload log's join field, read by no gate.
 
-`prepaid` / `budget` / `spent` are the credit gate. `budget` is the amount the user loaded — Σ
-their credits, nano-USD — and the same number on every store. `spent` is this Redis's own lifetime
-counter: every metered request of a prepaid holder moves it, a push never does (the push is an HSET
-of the fields it names), and only `spend-adjust` corrects it. This box's balance is `budget − spent`; Grove keeps its
-own from the same credits and audits the two every pull. `prepaid && spent >= budget` → 402 `credit balance exhausted` (`billing_error` on the Anthropic surface), at
-`quota` before the body is read, and `/v1/models` refuses through the same `Evaluate`. `limited`
-is the control plane's verdict and refuses alike. The gate is exact within one store — every
-gateway on it moves the one counter — and eventual across stores, where each box sees only its own
-spend and `limited` from the pull is what stops the rest; the overspend that window allows lands as a
-negative balance on the control plane.
+`prepaid` / `budget` / `spent` are the credit gate. `budget` is the key's cap — the slice of its
+team's balance the control plane allotted it, nano-USD; Grove keeps Σ caps within the balance.
+`spent` is this Redis's own lifetime counter: every metered request of a prepaid key moves it, a
+push never does (the push is an HSET of the fields it names), and only `spend-adjust` corrects it.
+This box's balance for the key is `budget − spent`; Grove keeps the team's own from the same
+credits and audits the two every pull. `prepaid && spent >= budget` → 402 `credit balance
+exhausted` (`billing_error` on the Anthropic surface), at `quota` before the body is read, and
+`/v1/models` refuses through the same `Evaluate`. `limited` is the control plane's verdict on the
+team and refuses alike. A key pinned by `geography` lives on one store, so its gate is exact —
+every gateway on that store moves the one counter — and a team's keys elsewhere spend their own
+caps; `limited` from the pull is the backstop once the team as a whole is out.
 
 `deploy:<model>` is a JSON array, replaced whole:
 
@@ -1309,9 +1329,21 @@ own fields:
   "kind":           "provider",
   "upstream_model": "claude-sonnet-4-5-20250929",
   "api_version":    "2023-06-01",
-  "dialect":        "anthropic"
+  "dialect":        "anthropic",
+  "denied_tools":   ["web_search_20250305", "web_search_20260209", "code_execution_20260521"]
 }]
 ```
+
+`denied_tools` is what the vendor would run on its own side and bill outside the token counts,
+which nothing here meters: a `tools[].type` or a top-level request field, as the control plane's
+Denied Tool rows list them for that vendor. `route` reads every `tools[].type` and every top-level
+field off the client's own bytes and drops a row that denies one of them; when no row of the model
+is left, the request is a 400 `<model> does not run <name>` in the surface's own envelope, before
+any dial and above `meter`, so it bills nothing. A row that denies nothing runs everything, which
+is every row we run ourselves, so a model with an engine of ours beside the vendor row goes to the
+engine. A fallback whose rows deny the tool is passed over like one that lacks an input. Deleting
+a Denied Tool row is how a tool is let through once it is priced. The list is a deny list, so a
+tool a vendor adds tomorrow runs until its row exists.
 
 `upstream_model` is what the `modelmap` transform puts in `body.model`; blank means send the
 caller's unchanged, which is every route we run ourselves — an engine is started under the Grove
@@ -1362,13 +1394,10 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 
 ### Backwards compatibility that is still load-bearing
 
-- A key record written before access moved off the credential carries `group`/`allow`/`deny`/
-  `models` itself. If `user:<name>` is missing, those are used. This is what makes the control
-  plane and the gateway deployable in **either order**.
-- A *current* key with no user record resolves to nothing rather than falling back to something.
-  Fail closed — the difference between the two is the whole quarantine.
-- `status: "rate_limited"` was once a third value on the credential. It is lifted off on read, so
-  `status` means only "is this live".
+- A push strips the fields older control planes wrote on a key (`user`, `can_read_balance`,
+  `models`, `priority`), so a record never shows the current policy beside a stale pointer. A
+  control plane still sending a `users` section is refused 400 by name: the policy moved onto the
+  key in one cut, and this binary must land on a box before that control plane pushes to it.
 - A route with no `kind` is `direct`, which is what every route pushed before the split was.
 - A route with no `upstream_model` sends the caller's `model` unchanged, which is what every route
   pushed before the vendor split did.
@@ -1381,7 +1410,7 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 | `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` only — anything else under it is a 404 in Anthropic's shape — keyed by `x-api-key` or a Bearer |
 | `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
-| `GET /v1/credits` | answered here: what the key's holder has left on this store, in US dollars — `{"balance", "spent", "is_free_user"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Only for a key pushed with `can_read_balance`; any other key gets 403 `this key cannot read the balance`. A free holder reads zeros and `"is_free_user": true` |
+| `GET /v1/credits` | answered here: what the key has left of its own cap on this store, in US dollars — `{"balance", "spent", "is_free_user"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it. A key of a free team reads zeros and `"is_free_user": true` |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
 | `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |
@@ -1396,7 +1425,7 @@ was unreadable turns one broken dependency into an outage.
 | What fails | What happens |
 |---|---|
 | Redis unreachable at **startup** | refuses to start — a gateway that cannot read its keys serves nothing, and finding out on the first customer request would report it as a routing fault |
-| `key:` / `user:` / `model_group:` read fails | **503**, never 401 — "we cannot read your key" must not send someone to rotate a credential that was fine |
+| `key:` / `model_group:` read fails | **503**, never 401 — "we cannot read your key" must not send someone to rotate a credential that was fine |
 | in-flight counts unreadable | every count reads 0, so the pick degrades to first-healthy. Balancing is an optimisation on a table that is already correct |
 | health counters unreadable | every route stays as the control plane pushed it. Ejection is an optimisation too |
 | sticky read/write fails | one cold prefix cache, not a wrong answer |
@@ -1433,7 +1462,7 @@ Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except
 | 408 | the body did not arrive within 60s of the headers | resend on a working connection |
 | 413 | body over `max_body_bytes` | send less |
 | 402 | out of prepaid credit | top up; nothing to retry |
-| 429 | every replica at capacity, or the holder is over a rate limit | back off and retry — `Retry-After` is set for a rate limit |
+| 429 | every replica at capacity, or the key is over a rate limit | back off and retry — `Retry-After` is set for a rate limit |
 | 499 | the client left before the upstream answered. Only ever in the access line: nobody is there to receive it | – |
 | 502 | the engine could not be reached or failed the hop | retry; another replica may take it |
 | 504 | the engine sent no headers within `upstream_read_timeout`, or could not be dialled in time | retry; another replica may take it |
@@ -1466,10 +1495,8 @@ Seed it the way the control plane does, then call it:
 ```sh
 curl -XPUT localhost:8080/grove-admin/groups -H 'X-Grove-Admin-Token: tok' \
   -d '{"groups":[{"name":"acme","models":"qwen3-4b"}]}'
-curl -XPUT localhost:8080/grove-admin/users -H 'X-Grove-Admin-Token: tok' \
-  -d '{"users":[{"name":"you","group":"acme,beta"}]}'
 curl -XPUT localhost:8080/grove-admin/keys -H 'X-Grove-Admin-Token: tok' \
-  -d "{\"keys\":[{\"key_hash\":\"$(printf gr_demo | sha256sum | cut -d' ' -f1)\",\"prefix\":\"dev\",\"user\":\"you\",\"status\":\"active\"}]}"
+  -d "{\"keys\":[{\"key_hash\":\"$(printf gr_demo | sha256sum | cut -d' ' -f1)\",\"prefix\":\"dev\",\"team\":\"you\",\"group\":\"acme\",\"status\":\"active\"}]}"
 curl -XPUT localhost:8080/grove-admin/routes -H 'X-Grove-Admin-Token: tok' \
   -d '{"routes":{"qwen3-4b":[{"engine_url":"http://127.0.0.1:8000","internal_key":"k","healthy":true,"deployment":"MD-1","kind":"direct"}]}}'
 

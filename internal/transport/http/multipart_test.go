@@ -167,8 +167,7 @@ func TestAMultipartUploadWithNoModelIsRefused(t *testing.T) {
 // body streamed to an engine and cut off halfway.
 func TestAnOversizedMultipartUploadIsRefused(t *testing.T) {
 	store := memory.New()
-	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", User: "test-user", KeyPrefix: "abc123"}
-	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
+	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	handler := buildHandler(t, store, config.Config{}, 128)
 
@@ -189,8 +188,7 @@ func TestAnOversizedMultipartUploadIsRefused(t *testing.T) {
 // thing worth asserting: the size is discovered after the route was already picked.
 func TestAnUnmeasurableMultipartUploadStillHitsTheCap(t *testing.T) {
 	store := memory.New()
-	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", User: "test-user", KeyPrefix: "abc123"}
-	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
+	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

@@ -39,16 +39,16 @@ func logged(t *testing.T, c *Chain, ctx Context, raw string) string {
 	return out.String()
 }
 
-// Whatever a transform removes is said once per user and field, by name and by the transform that
+// Whatever a transform removes is said once per team and field, by name and by the transform that
 // did it, and never by value: nothing upstream errors on a field that is not there.
-func TestEveryDroppedFieldIsWarnedOncePerUser(t *testing.T) {
+func TestEveryDroppedFieldIsWarnedOncePerTeam(t *testing.T) {
 	c := chain(t, "modelmap", "cachesalt", "servicetier")
-	vendor := Context{Path: "/v1/chat/completions", User: "u1", Provider: true, UpstreamModel: "upstream-m"}
+	vendor := Context{Path: "/v1/chat/completions", Team: "u1", Provider: true, UpstreamModel: "upstream-m"}
 	const sent = `{"model":"m","cache_salt":"team-secret","service_tier":"priority"}`
 
 	first := logged(t, c, vendor, sent)
 	for _, want := range []string{
-		"level=WARN", "user=u1",
+		"level=WARN", "team=u1",
 		"field=cache_salt transform=cachesalt",
 		"field=service_tier transform=servicetier",
 	} {
@@ -64,18 +64,18 @@ func TestEveryDroppedFieldIsWarnedOncePerUser(t *testing.T) {
 		t.Errorf("a rewritten field was logged as dropped: %q", first)
 	}
 	if again := logged(t, c, vendor, sent); again != "" {
-		t.Errorf("the same user and fields logged twice: %q", again)
+		t.Errorf("the same team and fields logged twice: %q", again)
 	}
-	vendor.User = "u2"
-	if other := logged(t, c, vendor, sent); strings.Count(other, "user=u2") != 2 {
-		t.Errorf("another user logged %q, want both fields", other)
+	vendor.Team = "u2"
+	if other := logged(t, c, vendor, sent); strings.Count(other, "team=u2") != 2 {
+		t.Errorf("another team logged %q, want both fields", other)
 	}
 }
 
 // A body nothing was taken from logs nothing, whatever else was rewritten on the way.
 func TestNothingDroppedLogsNothing(t *testing.T) {
 	c := chain(t, "modelmap", "streamusage", "cachesalt", "servicetier")
-	ctx := Context{Path: "/v1/chat/completions", User: "u1", UpstreamModel: "upstream-m"}
+	ctx := Context{Path: "/v1/chat/completions", Team: "u1", UpstreamModel: "upstream-m"}
 	if out := logged(t, c, ctx, `{"model":"m","stream":true,"cache_salt":"team-a"}`); out != "" {
 		t.Errorf("logged %q", out)
 	}

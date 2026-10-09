@@ -13,9 +13,9 @@ import (
 	"github.com/phot0n/pathway/internal/repository"
 )
 
-func liveAccrual(prefix, user string, cost int64) repository.Accrual {
+func liveAccrual(prefix, key string, cost int64) repository.Accrual {
 	return repository.Accrual{
-		Prefix: prefix, User: user, Cost: cost, Budget: 1_000,
+		Prefix: prefix, Key: key, Cost: cost, Budget: 1_000,
 		Fields: map[string]int64{"request_count": 1, "completion_tokens": 10, "cost": cost},
 	}
 }
@@ -24,45 +24,45 @@ func liveAccrual(prefix, user string, cost int64) repository.Accrual {
 func TestAccrueAgainstRealRedis(t *testing.T) {
 	client, state := liveStore(t)
 	ctx := context.Background()
-	bucket := domain.BucketOf("GU-1")
-	push := repository.StatePush{Users: map[string]repository.UserBucket{bucket: {
-		Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Prepaid: true, Budget: 1_000}},
+	bucket := domain.BucketOf("aa")
+	push := repository.StatePush{Keys: map[string]repository.KeyBucket{bucket: {
+		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Prepaid: true, Budget: 1_000}},
 	}}}
 	if _, err := state.Apply(ctx, push); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	usage := client.Store().Usage
 	for i := 0; i < 2; i++ {
-		if err := usage.Accrue(ctx, liveAccrual("abc", "GU-1", 250)); err != nil {
+		if err := usage.Accrue(ctx, liveAccrual("abc", "aa", 250)); err != nil {
 			t.Fatalf("Accrue: %v", err)
 		}
 	}
-	// No holder pushed: counters land, no record is invented.
-	if err := usage.Accrue(ctx, liveAccrual("xyz", "GU-ghost", 5)); err != nil {
+	// No key pushed: counters land, no record is invented.
+	if err := usage.Accrue(ctx, liveAccrual("xyz", "ghost", 5)); err != nil {
 		t.Fatalf("Accrue: %v", err)
 	}
-	if n, _ := client.rdb.Exists(ctx, "user:GU-ghost").Result(); n != 0 {
-		t.Error("a user record was fabricated")
+	if n, _ := client.rdb.Exists(ctx, "key:ghost").Result(); n != 0 {
+		t.Error("a key record was fabricated")
 	}
 
 	h, _ := client.rdb.HGetAll(ctx, "usage:abc").Result()
 	for field, want := range map[string]string{
-		"request_count": "2", "completion_tokens": "20", "cost": "500", "user_spent": "500", "user_balance": "500",
+		"request_count": "2", "completion_tokens": "20", "cost": "500", "key_spent": "500", "key_balance": "500",
 	} {
 		if h[field] != want {
 			t.Errorf("usage:abc %s = %q, want %q", field, h[field], want)
 		}
 	}
-	usr, _, err := client.Store().Users.Get(ctx, "GU-1")
-	if err != nil || !usr.Prepaid || usr.Budget != 1_000 || usr.Spent != 500 {
-		t.Errorf("Get = %+v, %v; want prepaid, budget 1000, spent 500", usr, err)
+	holder, _, err := client.Store().Keys.Resolve(ctx, "aa")
+	if rec := holder.Key; err != nil || !rec.Prepaid || rec.Budget != 1_000 || rec.Spent != 500 {
+		t.Errorf("Resolve = %+v, %v; want prepaid, budget 1000, spent 500", rec, err)
 	}
 
 	if _, err := state.Apply(ctx, push); err != nil {
 		t.Fatalf("Apply again: %v", err)
 	}
-	if usr, _, _ = client.Store().Users.Get(ctx, "GU-1"); usr.Spent != 500 {
-		t.Errorf("a push moved spent to %d", usr.Spent)
+	if holder, _, _ = client.Store().Keys.Resolve(ctx, "aa"); holder.Key.Spent != 500 {
+		t.Errorf("a push moved spent to %d", holder.Key.Spent)
 	}
 }
 
@@ -70,15 +70,15 @@ func TestAccrueAgainstRealRedis(t *testing.T) {
 func TestAccrueKeepsBigTotalsExact(t *testing.T) {
 	client, _ := liveStore(t)
 	ctx := context.Background()
-	client.rdb.HSet(ctx, "user:GU-1", "spent", "123456789012345678")
-	a := liveAccrual("abc", "GU-1", 1)
+	client.rdb.HSet(ctx, "key:aa", "spent", "123456789012345678")
+	a := liveAccrual("abc", "aa", 1)
 	a.Budget = 223456789012345678
 	if err := client.Store().Usage.Accrue(ctx, a); err != nil {
 		t.Fatalf("Accrue: %v", err)
 	}
 	h, _ := client.rdb.HGetAll(ctx, "usage:abc").Result()
-	if h["user_spent"] != "123456789012345679" || h["user_balance"] != "99999999999999999" {
-		t.Errorf("user_spent = %q user_balance = %q", h["user_spent"], h["user_balance"])
+	if h["key_spent"] != "123456789012345679" || h["key_balance"] != "99999999999999999" {
+		t.Errorf("key_spent = %q key_balance = %q", h["key_spent"], h["key_balance"])
 	}
 }
 
@@ -86,7 +86,7 @@ func TestAccrueKeepsBigTotalsExact(t *testing.T) {
 func TestADrainNeverSplitsARequestFromItsCostOnRealRedis(t *testing.T) {
 	client, _ := liveStore(t)
 	ctx := context.Background()
-	client.rdb.HSet(ctx, "user:GU-1", "email", "x")
+	client.rdb.HSet(ctx, "key:aa", "status", "active")
 	usage := client.Store().Usage
 
 	var wg sync.WaitGroup
@@ -178,24 +178,24 @@ func TestAnUnackedKeyIsResentOnRealRedis(t *testing.T) {
 	}
 }
 
-// A spend adjustment applies once per id and never invents a holder.
+// A spend adjustment applies once per id and never invents a key.
 func TestAdjustSpentOnRealRedis(t *testing.T) {
 	client, _ := liveStore(t)
 	ctx := context.Background()
-	client.rdb.HSet(ctx, "user:GU-1", "spent", "3000")
-	users := client.Store().Users
+	client.rdb.HSet(ctx, "key:aa", "spent", "3000")
+	keys := client.Store().Keys
 
-	if spent, applied, found, err := users.AdjustSpent(ctx, "GU-1", "CD-1", -1000); spent != 2000 || !applied || !found || err != nil {
+	if spent, applied, found, err := keys.AdjustSpent(ctx, "aa", "CD-1", -1000); spent != 2000 || !applied || !found || err != nil {
 		t.Fatalf("first = %d %v %v %v", spent, applied, found, err)
 	}
-	if spent, applied, _, _ := users.AdjustSpent(ctx, "GU-1", "CD-1", -1000); spent != 2000 || applied {
+	if spent, applied, _, _ := keys.AdjustSpent(ctx, "aa", "CD-1", -1000); spent != 2000 || applied {
 		t.Errorf("retry = %d %v", spent, applied)
 	}
-	if _, _, found, _ := users.AdjustSpent(ctx, "GU-ghost", "CD-2", 5); found {
-		t.Error("a holder was invented")
+	if _, _, found, _ := keys.AdjustSpent(ctx, "ghost", "CD-2", 5); found {
+		t.Error("a key was invented")
 	}
-	if client.rdb.Exists(ctx, "user:GU-ghost").Val() != 0 {
-		t.Error("user:GU-ghost was created")
+	if client.rdb.Exists(ctx, "key:ghost").Val() != 0 {
+		t.Error("key:ghost was created")
 	}
 }
 
@@ -203,9 +203,9 @@ func TestAdjustSpentOnRealRedis(t *testing.T) {
 func TestReplayLandsOncePerRequestAgainstRealRedis(t *testing.T) {
 	client, state := liveStore(t)
 	ctx := context.Background()
-	bucket := domain.BucketOf("GU-1")
-	push := repository.StatePush{Users: map[string]repository.UserBucket{bucket: {
-		Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Prepaid: true, Budget: 1_000}},
+	bucket := domain.BucketOf("aa")
+	push := repository.StatePush{Keys: map[string]repository.KeyBucket{bucket: {
+		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Prepaid: true, Budget: 1_000}},
 	}}}
 	if _, err := state.Apply(ctx, push); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -214,7 +214,7 @@ func TestReplayLandsOncePerRequestAgainstRealRedis(t *testing.T) {
 	if err := usage.Ping(ctx); err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
-	accrual := liveAccrual("replayed", "GU-1", 250)
+	accrual := liveAccrual("replayed", "aa", 250)
 	accrual.ID = "rid-live-1"
 	for i, want := range []bool{true, false} {
 		landed, err := usage.Replay(ctx, accrual)
@@ -223,7 +223,7 @@ func TestReplayLandsOncePerRequestAgainstRealRedis(t *testing.T) {
 		}
 	}
 	h, _ := client.rdb.HGetAll(ctx, "usage:replayed").Result()
-	if h["request_count"] != "1" || h["user_spent"] != "250" {
+	if h["request_count"] != "1" || h["key_spent"] != "250" {
 		t.Errorf("usage:replayed = %v, want one request and 250 spent", h)
 	}
 	if ttl, _ := client.rdb.TTL(ctx, "accrued:rid-live-1").Result(); ttl <= 0 {

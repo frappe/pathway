@@ -74,11 +74,14 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	body := fmt.Sprintf(`{
 		"groups": {"hash": "gh", "records": [{"name": "acme", "models": "m1"}]},
 		"keys": {"buckets": {"%s": {"hash": "kh", "records": [
-			{"key_hash": "aa", "prefix": "K-1", "user": "GU-1", "status": "active",
-			 "can_read_balance": true}]}}},
+			{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "group": "acme"}]}}},
 		"routes": {"hash": "rh", "table": {"m1": [
 			{"engine_url": "https://box/e/md1", "internal_key": "ek", "healthy": true,
-			 "capacity": 8, "deployment": "MD-1", "server": "INF-1", "kind": "direct"}]}}
+			 "capacity": 8, "deployment": "MD-1", "server": "INF-1", "kind": "direct"}],
+			"m2": [
+			{"engine_url": "https://api.openai.com", "internal_key": "", "healthy": true, "capacity": 0,
+			 "deployment": "", "server": "", "vendor": "openai", "kind": "provider", "dialect": "openai",
+			 "denied_tools": ["web_search_options"]}]}}
 	}`, bucket)
 
 	w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body)
@@ -91,18 +94,21 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
 		t.Fatalf("reply: %v", err)
 	}
-	if reply.Counts["groups"] != 1 || reply.Counts["keys"] != 1 || reply.Counts["routes"] != 1 {
+	if reply.Counts["groups"] != 1 || reply.Counts["keys"] != 1 || reply.Counts["routes"] != 2 {
 		t.Errorf("counts = %v", reply.Counts)
 	}
 
 	if _, ok := store.Groups["stale"]; ok {
 		t.Error("unnamed group survived")
 	}
-	if store.Keys["aa"].KeyPrefix != "K-1" || !store.Keys["aa"].CanReadBalance {
+	if rec := store.Keys["aa"]; rec.KeyPrefix != "K-1" || rec.Team != "T-1" || !rec.Groups["acme"] {
 		t.Errorf("key record = %+v", store.Keys["aa"])
 	}
 	if len(store.Routes["m1"]) != 1 || store.Routes["m1"][0].EngineURL != "https://box/e/md1" {
 		t.Errorf("routes = %+v", store.Routes["m1"])
+	}
+	if denied := store.Routes["m2"][0].DeniedTools; len(denied) != 1 || denied[0] != "web_search_options" {
+		t.Errorf("denied tools = %v, want the pushed list", denied)
 	}
 
 	w = adminCall(t, handler, http.MethodGet, "/grove-admin/state-hash", "")
@@ -173,22 +179,33 @@ func TestAnIngressServesTheStateSurfaceToo(t *testing.T) {
 	}
 }
 
-// The pin rides the users section; an older push without it decodes unpinned.
-func TestAStatePushCarriesTheUsersGeography(t *testing.T) {
+// The pin rides the key record; a push without it decodes unpinned.
+func TestAStatePushCarriesTheKeysGeography(t *testing.T) {
 	store := memory.New()
 	handler := adminFixture(t, store)
-	body := fmt.Sprintf(`{"users": {"buckets": {"%s": {"hash": "uh", "records": [
-		{"name": "GU-1", "group": "acme", "geography": "eu"}]},
-		"%s": {"hash": "uh2", "records": [{"name": "GU-2", "group": "acme"}]}}}}`,
-		domain.BucketOf("GU-1"), domain.BucketOf("GU-2"))
+	body := fmt.Sprintf(`{"keys": {"buckets": {"%s": {"hash": "kh", "records": [
+		{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "group": "acme", "geography": "eu"}]},
+		"%s": {"hash": "kh2", "records": [{"key_hash": "bb", "prefix": "K-2", "team": "T-1", "status": "active", "group": "acme"}]}}}}`,
+		domain.BucketOf("aa"), domain.BucketOf("bb"))
 
 	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body); w.Code != http.StatusOK {
 		t.Fatalf("POST state = %d: %s", w.Code, w.Body)
 	}
-	if got := store.Users["GU-1"].Geography; got != "eu" {
-		t.Errorf("GU-1 geography = %q, want eu", got)
+	if got := store.Keys["aa"].Geography; got != "eu" {
+		t.Errorf("aa geography = %q, want eu", got)
 	}
-	if got := store.Users["GU-2"].Geography; got != "" {
-		t.Errorf("GU-2 geography = %q, want unpinned", got)
+	if got := store.Keys["bb"].Geography; got != "" {
+		t.Errorf("bb geography = %q, want unpinned", got)
+	}
+}
+
+// A users section is no longer a thing this binary knows: a control plane still sending one is
+// refused by name, so the mismatch is seen rather than half-applied.
+func TestAUsersSectionIsRefused(t *testing.T) {
+	store := memory.New()
+	w := adminCall(t, adminFixture(t, store), http.MethodPost, "/grove-admin/state",
+		`{"users": {"buckets": {}}}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `unknown field "users"`) {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
 	}
 }

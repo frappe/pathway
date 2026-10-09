@@ -56,7 +56,7 @@ func newFallback(deps Deps) (Middleware, error) {
 					deps.Routing.Release(ctx, loser.Route, loser.RequestID)
 				}
 				deps.Metering.Record(ctx, metering.Report{
-					Target:         loser.EngineURL(),
+					Target:         loser.HealthTarget(),
 					UpstreamStatus: statusText(state.Outcome.Status),
 					Reason:         state.Outcome.Reason,
 					Cut:            state.Outcome.Cut,

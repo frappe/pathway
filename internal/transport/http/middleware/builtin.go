@@ -7,8 +7,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,6 +76,8 @@ func newAccessLog(deps Deps) (Middleware, error) {
 			w.Header().Set("X-Request-Id", state.RequestID)
 			w.Header().Set("Request-Id", state.RequestID)
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			meta, metaErr := domain.ParseMetadata(r.Header.Get("X-Grove-Metadata"))
+			state.Meta = meta
 
 			// Deferred: a client hanging up mid-stream unwinds this stage through
 			// http.ErrAbortHandler, which recover deliberately re-panics. A request served
@@ -109,12 +113,28 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.String("reason", or(state.DeniedReason, state.Outcome.Reason)),
 					slog.String("cut", or(state.Outcome.Cut, "-")),
 				)
+				if len(state.Meta) > 0 {
+					attrs = append(attrs, metaGroup(state.Meta))
+				}
 				access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
 			}()
 
+			if metaErr != nil {
+				deny(recorder, r, domain.Deny(http.StatusBadRequest, "X-Grove-Metadata: "+metaErr.Error()))
+				return
+			}
 			next.ServeHTTP(recorder, r)
 		})
 	}, nil
+}
+
+// metaGroup is the caller's tags as one `meta` object, keys sorted so equal tags log alike.
+func metaGroup(meta map[string]string) slog.Attr {
+	attrs := make([]any, 0, len(meta))
+	for _, key := range slices.Sorted(maps.Keys(meta)) {
+		attrs = append(attrs, slog.String(key, meta[key]))
+	}
+	return slog.Group("meta", attrs...)
 }
 
 // drain answers while the process is shutting down or in maintenance. In-flight requests are past
@@ -163,7 +183,7 @@ func Credential(r *http.Request) string {
 	return ""
 }
 
-// auth resolves the caller: bearer → key → user → group, once, into the State.
+// auth resolves the caller: bearer → key → group, once, into the State.
 func newAuth(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,17 +199,17 @@ func newAuth(deps Deps) (Middleware, error) {
 }
 
 // quota honours the geography pin, the credit flag the control plane pushed, and the prepaid
-// balance this box keeps — all read off the user record, before the body is. The rate limits come
-// last: a holder refused above must not use up a request.
+// balance this box keeps — all read off the key record, before the body is. The rate limits come
+// last: a key refused above must not use up a request.
 func newQuota(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			identity := From(r).Identity
-			if err := domain.GeographyDenial(identity.User, deps.Geography); err != nil {
+			if err := domain.GeographyDenial(identity.Key, deps.Geography); err != nil {
 				deny(w, r, err)
 				return
 			}
-			if err := domain.ExhaustedDenial(identity.User); err != nil {
+			if err := domain.ExhaustedDenial(identity.Key); err != nil {
 				deny(w, r, err)
 				return
 			}
@@ -365,6 +385,8 @@ func pickRequest(r *http.Request, state *State, model, session string) routing.R
 		KeyPrefix: state.Identity.Prefix(),
 		Path:      r.URL.Path,
 		Dialect:   respond.Dialect(r.Context()),
+		// Off the client's own bytes: the decoded body is the transforms' to change.
+		Tools:     domain.SentTools(state.Raw),
 		RequestID: state.RequestID,
 	}
 }
@@ -384,16 +406,16 @@ func newMeter(deps Deps) (Middleware, error) {
 				deps.Metering.Record(ctx, metering.Report{
 					RequestID:      state.RequestID,
 					Prefix:         state.Identity.Prefix(),
+					MeterID:        state.Identity.MeterID,
 					Model:          state.ServingModel(),
 					Deployment:     or(state.Outcome.Deployment, state.Decision.Route.Deployment),
 					Usage:          state.Outcome.Usage,
 					UsageStart:     state.Outcome.UsageStart,
 					Pricing:        state.Decision.Route.Pricing,
-					User:           state.Identity.Key.User,
-					Prepaid:        state.Identity.User.Prepaid,
-					Budget:         state.Identity.User.Budget,
-					Limits:         state.Identity.User.Limits,
-					Target:         state.Decision.EngineURL(),
+					Prepaid:        state.Identity.Key.Prepaid,
+					Budget:         state.Identity.Key.Budget,
+					Limits:         state.Identity.Key.Limits,
+					Target:         state.Decision.HealthTarget(),
 					UpstreamStatus: statusText(state.Outcome.Status),
 					Reason:         state.Outcome.Reason,
 					Cut:            state.Outcome.Cut,
@@ -423,7 +445,7 @@ func newTransform(deps Deps) (Middleware, error) {
 			changed, err := deps.Transform.Apply(transform.Context{
 				Path:          r.URL.Path,
 				UpstreamModel: state.Decision.Route.UpstreamModel,
-				User:          state.Identity.Key.User,
+				Team:          state.Identity.Key.Team,
 				Provider:      state.Decision.Route.IsProvider(),
 				Vendor:        state.Decision.Route.Vendor,
 				Changed:       &changes,
@@ -474,8 +496,11 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
 			route, secret := state.Decision.Route, state.Decision.Key.Secret
-			// The caller may have authenticated with either header; neither may travel onward.
+			// The caller may have authenticated with either header; neither may travel onward. Nor
+			// may the gateway's own client headers: they are read here, not relayed.
 			r.Header.Del("x-api-key")
+			r.Header.Del("X-Grove-Metadata")
+			r.Header.Del("X-Grove-Session")
 			switch {
 			case route.IsProvider():
 				// A vendor authenticates its own way, and would read our Bearer as a caller's

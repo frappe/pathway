@@ -141,7 +141,7 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 	// ANTHROPIC_BASE_URL=<base>/anthropic, their SDK appending /v1/*. Root is the OpenAI surface.
 	mux.Handle("GET /anthropic/v1/models", drain(http.HandlerFunc(s.handleAnthropicModels)))
 	mux.Handle("/anthropic/v1/models", drain(http.HandlerFunc(modelListIsGetOnly)))
-	mux.Handle("/anthropic/v1/", anthropicAlias(&s.chain))
+	mux.Handle("/anthropic/", s.anthropicAlias(&s.chain))
 	mux.Handle("GET /{$}", drain(http.HandlerFunc(root)))
 	// The whole surface behind recover+accesslog, so the routes the mux answers itself — the model
 	// lists, the root banner, alias refusals, plain 404s — leave a line like everything else.
@@ -161,15 +161,20 @@ func openaiRoot(next http.Handler) http.Handler {
 }
 
 // anthropicAlias strips the prefix and refuses everything that is not an Anthropic surface —
-// serving an OpenAI path under an Anthropic-declared base would answer in the wrong shape.
-func anthropicAlias(next http.Handler) http.Handler {
+// serving an OpenAI path under an Anthropic-declared base would answer in the wrong shape. The
+// caller is identified before that refusal, as /v1/ does in the chain: a keyless hit on the bare
+// base is told its key is missing, not that the base does not exist.
+func (s *Server) anthropicAlias(next http.Handler) http.Handler {
 	stripped := http.StripPrefix("/anthropic", next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(respond.WithDialect(r.Context(), domain.DialectAnthropic))
 		if domain.PathDialect(strings.TrimPrefix(r.URL.Path, "/anthropic")) != domain.DialectAnthropic {
-			respond.ErrorFor(w, r, http.StatusNotFound, "no such path under /anthropic")
+			if _, ok := s.identifyCaller(w, r); ok {
+				respond.ErrorFor(w, r, http.StatusNotFound, "no such path under /anthropic; Anthropic clients use /anthropic/v1/messages")
+			}
 			return
 		}
-		stripped.ServeHTTP(w, r.WithContext(respond.WithDialect(r.Context(), domain.DialectAnthropic)))
+		stripped.ServeHTTP(w, r)
 	})
 }
 
@@ -224,7 +229,6 @@ func (s *Server) AdminHandler() http.Handler {
 		return mux
 	}
 	mux.HandleFunc("/grove-admin/keys", adminAuth(s.adminToken, s.handleAdminKeys))
-	mux.HandleFunc("/grove-admin/users", adminAuth(s.adminToken, s.handleAdminUsers))
 	mux.HandleFunc("/grove-admin/groups", adminAuth(s.adminToken, s.handleAdminGroups))
 	mux.HandleFunc("/grove-admin/usage", adminAuth(s.adminToken, s.handleAdminUsage))
 	mux.HandleFunc("POST /grove-admin/usage/ack", adminAuth(s.adminToken, s.handleAdminUsageAck))

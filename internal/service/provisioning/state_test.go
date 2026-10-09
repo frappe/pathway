@@ -18,7 +18,7 @@ func keyBucket(hash string, ids ...string) repository.KeyBucket {
 	bucket := repository.KeyBucket{Hash: hash}
 	for _, id := range ids {
 		bucket.Records = append(bucket.Records, repository.KeyUpsert{
-			MeterID: id, Prefix: "K-" + id, User: "GU-1", Status: "active",
+			MeterID: id, Prefix: "K-" + id, Team: "T-1", Status: "active",
 		})
 	}
 	return bucket

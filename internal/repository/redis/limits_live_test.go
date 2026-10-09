@@ -58,31 +58,31 @@ func TestLimitsAgainstRealRedis(t *testing.T) {
 	}
 }
 
-// Limits ride the user record: a push writes them, a blank push clears them, and the record reads
+// Limits ride the key record: a push writes them, a blank push clears them, and the record reads
 // back parsed.
 func TestAPushWritesAndClearsLimitsAgainstRealRedis(t *testing.T) {
 	client, state := liveStore(t)
 	ctx := context.Background()
 	push := func(limits string) {
 		t.Helper()
-		_, err := state.Apply(ctx, repository.StatePush{Users: map[string]repository.UserBucket{
-			domain.BucketOf("GU-1"): {Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Limits: limits}}},
+		_, err := state.Apply(ctx, repository.StatePush{Keys: map[string]repository.KeyBucket{
+			domain.BucketOf("aa"): {Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Limits: limits}}},
 		}})
 		if err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
 	}
 	push("requests:1m:200")
-	if usr, _, err := client.Store().Users.Get(ctx, "GU-1"); err != nil || len(usr.Limits) != 1 || usr.Limits[0].Value != 200 {
-		t.Fatalf("user = %+v, %v", usr, err)
+	if holder, _, err := client.Store().Keys.Resolve(ctx, "aa"); err != nil || len(holder.Key.Limits) != 1 || holder.Key.Limits[0].Value != 200 {
+		t.Fatalf("key = %+v, %v", holder.Key, err)
 	}
 	push("")
-	if usr, _, err := client.Store().Users.Get(ctx, "GU-1"); err != nil || len(usr.Limits) != 0 {
-		t.Fatalf("after a blank push: %+v, %v", usr, err)
+	if holder, _, err := client.Store().Keys.Resolve(ctx, "aa"); err != nil || len(holder.Key.Limits) != 0 {
+		t.Fatalf("after a blank push: %+v, %v", holder.Key, err)
 	}
-	// A limit a newer binary wrote is an error, not a holder served uncapped.
-	client.rdb.HSet(ctx, "user:GU-1", "limits", "concurrent:1m:5")
-	if _, _, err := client.Store().Users.Get(ctx, "GU-1"); err == nil {
+	// A limit a newer binary wrote is an error, not a key served uncapped.
+	client.rdb.HSet(ctx, "key:aa", "limits", "concurrent:1m:5")
+	if _, _, err := client.Store().Keys.Resolve(ctx, "aa"); err == nil {
 		t.Error("an unreadable limit read as no limit")
 	}
 }

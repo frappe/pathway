@@ -28,10 +28,11 @@ vendor gets.
 | [An Anthropic front that reads a Bearer](#7-an-anthropic-front-that-reads-a-bearer) | Baseten | `bearerOnAnthropic` | Anthropic |
 | [A function tool while the model reasons](#8-a-function-tool-while-the-model-reasons) | OpenAI | `unreasonWithTools` | OpenAI |
 | [A temperature while the model reasons](#9-a-temperature-while-the-model-reasons) | OpenAI | `defaultSampling` | OpenAI |
+| [Fast mode](#10-fast-mode) | every vendor | none: ours | Anthropic |
 
-Three of these change what the model does: 6, 8 and 9. The caller is told of each on the answer,
-in the `X-Grove-Changed` header. 6 and 8 are not applied when the caller said what they wanted. 9
-is the one that overrides what the caller said.
+Four of these change what the model does: 6, 8, 9 and 10. The caller is told of each on the
+answer, in the `X-Grove-Changed` header. 6 and 8 are not applied when the caller said what they
+wanted. 9 and 10 override what the caller said.
 
 ---
 
@@ -109,8 +110,9 @@ expected `web_search_20250305` or `web_search_20260209`
 Anthropic's API takes that type: it is the written-out name of a caller's own tool, and a tool with
 no `type` means the same. litellm always writes it. Measured 2026-10-05.
 
-**The rewrite.** `"type": "custom"` is removed from each tool. Any other type is a tool the vendor
-runs, and stays.
+**The rewrite.** `"type": "custom"` is removed from each tool. Any other type stays. A type the
+route's `denied_tools` lists (a tool the vendor would run on its side) never gets here: `route`
+refuses it with a 400 first.
 
 The caller sends, on `/anthropic/v1/messages`:
 
@@ -442,3 +444,30 @@ per-model switch before it is routed.
 3. Add a flag to `upstream` in `vendors.go`, written out on every entry, and the rewrite beside the
    others in `vendorfields.go` with a test.
 4. Add a section here: what the vendor does, the rewrite, what is sent and what the vendor gets.
+
+## 10. Fast mode
+
+**What the vendor does.** Anthropic runs a request with `speed: "fast"` (and the
+`fast-mode-2026-02-01` beta) on its faster tier, at twice the per-token rate. Nothing here prices
+that tier, so a caller who sends it would be billed the standard rate for the fast one.
+
+**The rewrite.** `speed` is removed on the Anthropic shape for every vendor: the request runs at the
+standard speed. Not a vendor's quirk but our own refusal to pay for it, so there is no flag in the
+`vendors` table. OpenAI's tier is `service_tier`, which the `servicetier` transform drops on every
+hop. The answer says so:
+
+```
+X-Grove-Changed: speed=default
+```
+
+The caller sends, on `/anthropic/v1/messages`:
+
+```json
+{"model": "anthropic/claude-opus-5-5", "max_tokens": 64, "speed": "fast", "messages": [{"role": "user", "content": "hi"}]}
+```
+
+The vendor gets:
+
+```json
+{"max_tokens": 64, "messages": [{"role": "user", "content": "hi"}], "model": "claude-opus-5-5"}
+```

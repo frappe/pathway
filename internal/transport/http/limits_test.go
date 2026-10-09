@@ -14,7 +14,7 @@ import (
 
 const limitedBody = `{"model":"qwen3-4b","messages":[]}`
 
-// limitedFixture is newFixture with its user under limits, and the windows read off a clock the
+// limitedFixture is newFixture with its key under limits, and the windows read off a clock the
 // test moves. The engine answers 120 tokens a request.
 func limitedFixture(t *testing.T, limits string, clock *time.Time) *fixture {
 	t.Helper()
@@ -23,7 +23,7 @@ func limitedFixture(t *testing.T, limits string, clock *time.Time) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme"), Limits: parsed}
+	f.withKey(func(k *domain.KeyRecord) { k.Limits = parsed })
 	now := func() time.Time { return *clock }
 	f.handler = buildHandler(t, f.store, config.Config{}, 0, func(s *Services) {
 		s.Admission.Now, s.Metering.Now = now, now
@@ -79,7 +79,7 @@ func TestARequestLimitRefusesPastItsCeiling(t *testing.T) {
 }
 
 // Tokens are known only after the answer: the request that crosses the limit completes, and the
-// next is refused. The holder is not prepaid — a limit is the only gate a free user has.
+// next is refused. The key is not prepaid — a limit is the only gate a free team has.
 func TestATokenLimitRefusesOnceADebitCrossesIt(t *testing.T) {
 	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	f := limitedFixture(t, "total_tokens:1h:200", &clock)
@@ -120,7 +120,7 @@ func TestTheLimitThatResetsLastIsNamed(t *testing.T) {
 	}
 }
 
-// A holder with no limits never touches the limit store; one with limits is refused when it is down.
+// A key with no limits never touches the limit store; one with limits is refused when it is down.
 func TestTheLimitStoreIsOnlyReadForALimitedHolder(t *testing.T) {
 	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	f := limitedFixture(t, "", &clock)
@@ -129,23 +129,23 @@ func TestTheLimitStoreIsOnlyReadForALimitedHolder(t *testing.T) {
 		t.Fatalf("unlimited = %d, want 200 with the limit store down", resp.Code)
 	}
 
-	f.store.Users["test-user"] = domain.UserRecord{
-		Groups: domain.ModelSet("acme"), Limits: []domain.Limit{{Metric: domain.LimitRequests, Window: "1m", Value: 5}},
-	}
+	f.withKey(func(k *domain.KeyRecord) {
+		k.Limits = []domain.Limit{{Metric: domain.LimitRequests, Window: "1m", Value: 5}}
+	})
 	resp := f.post("/v1/chat/completions", limitedBody)
 	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusServiceUnavailable || message != "limit store error" {
 		t.Fatalf("limited = %d, %q; want 503 limit store error", resp.Code, message)
 	}
 }
 
-// The users section of a state push carries limits; a blank one clears them; one this binary cannot
+// The keys section of a state push carries limits; a blank one clears them; one this binary cannot
 // read is refused by name and nothing is stored.
-func TestAUsersPushCarriesLimits(t *testing.T) {
+func TestAKeysPushCarriesLimits(t *testing.T) {
 	store := memory.New()
 	handler := adminFixture(t, store)
 	push := func(limits string) (int, string) {
-		body := fmt.Sprintf(`{"users": {"buckets": {"%s": {"hash": "uh", "records": [
-			{"name": "GU-1", "group": "acme", "limits": "%s"}]}}}}`, domain.BucketOf("GU-1"), limits)
+		body := fmt.Sprintf(`{"keys": {"buckets": {"%s": {"hash": "kh", "records": [
+			{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "group": "acme", "limits": "%s"}]}}}}`, domain.BucketOf("aa"), limits)
 		w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body)
 		return w.Code, w.Body.String()
 	}
@@ -153,16 +153,16 @@ func TestAUsersPushCarriesLimits(t *testing.T) {
 	if code, body := push("requests:1m:200,total_tokens:1h:50000"); code != http.StatusOK {
 		t.Fatalf("push = %d: %s", code, body)
 	}
-	if limits := store.Users["GU-1"].Limits; len(limits) != 2 || limits[1] != (domain.Limit{Metric: "total_tokens", Window: "1h", Value: 50000}) {
+	if limits := store.Keys["aa"].Limits; len(limits) != 2 || limits[1] != (domain.Limit{Metric: "total_tokens", Window: "1h", Value: 50000}) {
 		t.Fatalf("limits = %+v", limits)
 	}
-	if code, body := push("requests:1w:200"); code != http.StatusBadRequest || body != "bad body: user GU-1: limit \"requests:1w:200\": unknown metric or window, or a value not above zero\n" {
+	if code, body := push("requests:1w:200"); code != http.StatusBadRequest || body != "bad body: key K-1: limit \"requests:1w:200\": unknown metric or window, or a value not above zero\n" {
 		t.Fatalf("unreadable limit = %d: %q", code, body)
 	}
-	if len(store.Users["GU-1"].Limits) != 2 {
+	if len(store.Keys["aa"].Limits) != 2 {
 		t.Error("a refused push moved the stored limits")
 	}
-	if code, _ := push(""); code != http.StatusOK || len(store.Users["GU-1"].Limits) != 0 {
-		t.Errorf("blank push = %d, limits = %+v; want cleared", code, store.Users["GU-1"].Limits)
+	if code, _ := push(""); code != http.StatusOK || len(store.Keys["aa"].Limits) != 0 {
+		t.Errorf("blank push = %d, limits = %+v; want cleared", code, store.Keys["aa"].Limits)
 	}
 }

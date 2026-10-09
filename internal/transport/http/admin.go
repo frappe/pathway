@@ -20,56 +20,40 @@ import (
 type adminKey struct {
 	KeyHash string `json:"key_hash"` // sha256(secret) hex — the record id
 	Prefix  string `json:"prefix"`
-	User    string `json:"user"`   // Grove User doc name — the pointer to the user record
+	Team    string `json:"team"`   // Central Team doc name — the tenant boundary
 	Status  string `json:"status"` // active | revoked
-	// CanReadBalance opens GET /v1/credits to this key. Absent on an older control plane's push,
-	// which decodes false.
-	CanReadBalance bool `json:"can_read_balance"`
-}
-
-func (k adminKey) upsert() repository.KeyUpsert {
-	return repository.KeyUpsert{
-		MeterID: k.KeyHash, Prefix: k.Prefix, User: k.User, Status: k.Status,
-		CanReadBalance: k.CanReadBalance,
-	}
-}
-
-type adminUser struct {
-	Name    string `json:"name"`
-	Email   string `json:"email"`
-	Group   string `json:"group"` // comma list of group names; "" = ungrouped
-	Allow   string `json:"allow"` // comma list: this user's adds on top of their groups'
-	Deny    string `json:"deny"`  // comma list: removals that beat every grant
+	Group   string `json:"group"`  // comma list of group names; "" = ungrouped
+	Allow   string `json:"allow"`  // comma list: this key's adds on top of its groups'
+	Deny    string `json:"deny"`   // comma list: removals that beat every grant
 	Limited bool   `json:"limited"`
-	// LogPayloads opts this user's prompts and outputs into the payload log. Absent on an older
-	// control plane's push, which decodes false — off.
+	// LogPayloads opts this key's prompts and outputs into the payload log. Absent decodes false — off.
 	LogPayloads bool   `json:"log_payloads"`
-	Geography   string `json:"geography"` // blank = unpinned, as an older push decodes
-	// Prepaid gates this user on Budget, a nano-USD ceiling. Absent on an older push: no gate.
+	Geography   string `json:"geography"` // blank = unpinned
+	// Prepaid gates this key on Budget, its cap in nano-USD. Absent: no gate.
 	Prepaid bool  `json:"prepaid"`
 	Budget  int64 `json:"budget"`
-	// Limits is the user's rate limits, a comma list of metric:window:value; "" = none.
+	// Limits is the key's rate limits, a comma list of metric:window:value; "" = none.
 	Limits string `json:"limits"`
 }
 
 // upsert refuses a limit this binary cannot read, the way decodeBody refuses a field it does not
 // know: stored, it would be a limit the control plane believes in and nothing enforces.
-func (u adminUser) upsert() (repository.UserUpsert, error) {
-	if _, err := domain.ParseLimits(u.Limits); err != nil {
-		return repository.UserUpsert{}, fmt.Errorf("user %s: %w", u.Name, err)
+func (k adminKey) upsert() (repository.KeyUpsert, error) {
+	if _, err := domain.ParseLimits(k.Limits); err != nil {
+		return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
 	}
-	return repository.UserUpsert{
-		Name: u.Name, Email: u.Email, Groups: u.Group,
-		Allow: u.Allow, Deny: u.Deny, Limited: u.Limited, LogPayloads: u.LogPayloads,
-		Geography: u.Geography, Prepaid: u.Prepaid, Budget: u.Budget, Limits: u.Limits,
+	return repository.KeyUpsert{
+		MeterID: k.KeyHash, Prefix: k.Prefix, Team: k.Team, Status: k.Status, Groups: k.Group,
+		Allow: k.Allow, Deny: k.Deny, Limited: k.Limited, LogPayloads: k.LogPayloads,
+		Geography: k.Geography, Prepaid: k.Prepaid, Budget: k.Budget, Limits: k.Limits,
 	}, nil
 }
 
-// userUpserts is every pushed user as the store takes it, or a 400 naming the first one refused.
-func userUpserts(w http.ResponseWriter, users []adminUser) ([]repository.UserUpsert, bool) {
-	records := make([]repository.UserUpsert, 0, len(users))
-	for _, u := range users {
-		record, err := u.upsert()
+// keyUpserts is every pushed key as the store takes it, or a 400 naming the first one refused.
+func keyUpserts(w http.ResponseWriter, keys []adminKey) ([]repository.KeyUpsert, bool) {
+	records := make([]repository.KeyUpsert, 0, len(keys))
+	for _, k := range keys {
+		record, err := k.upsert()
 		if err != nil {
 			http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
 			return nil, false
@@ -97,39 +81,15 @@ func (s *Server) handleAdminKeys(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	records := make([]repository.KeyUpsert, 0, len(body.Keys))
-	for _, k := range body.Keys {
-		records = append(records, k.upsert())
+	records, ok := keyUpserts(w, body.Keys)
+	if !ok {
+		return
 	}
 	if err := s.provisioning.UpsertKeys(r.Context(), records); err != nil {
 		respond.Error(w, http.StatusServiceUnavailable, "key store error")
 		return
 	}
 	respond.JSON(w, map[string]any{"ok": true, "count": len(body.Keys)})
-}
-
-// PUT /admin/users — upsert the access and budget state behind one or more Grove Users. The point
-// of the split: a person's keys are credentials, and this pushes one record instead of one per key.
-func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodDelete {
-		s.deleteRecords(w, r, s.provisioning.DeleteUsers)
-		return
-	}
-	var body struct {
-		Users []adminUser `json:"users"`
-	}
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	records, ok := userUpserts(w, body.Users)
-	if !ok {
-		return
-	}
-	if err := s.provisioning.UpsertUsers(r.Context(), records); err != nil {
-		respond.Error(w, http.StatusServiceUnavailable, "user store error")
-		return
-	}
-	respond.JSON(w, map[string]any{"ok": true, "count": len(body.Users)})
 }
 
 // PUT /admin/groups — upsert what each group grants. Upsert-only:
@@ -203,12 +163,6 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			Hash    string       `json:"hash"`
 			Records []adminGroup `json:"records"`
 		} `json:"groups"`
-		Users *struct {
-			Buckets map[string]struct {
-				Hash    string      `json:"hash"`
-				Records []adminUser `json:"records"`
-			} `json:"buckets"`
-		} `json:"users"`
 		Keys *struct {
 			Buckets map[string]struct {
 				Hash    string     `json:"hash"`
@@ -234,22 +188,12 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			Hash: body.Groups.Hash, Records: records,
 		}
 	}
-	if body.Users != nil {
-		push.Users = map[string]repository.UserBucket{}
-		for label, bucket := range body.Users.Buckets {
-			records, ok := userUpserts(w, bucket.Records)
-			if !ok {
-				return
-			}
-			push.Users[label] = repository.UserBucket{Hash: bucket.Hash, Records: records}
-		}
-	}
 	if body.Keys != nil {
 		push.Keys = map[string]repository.KeyBucket{}
 		for label, bucket := range body.Keys.Buckets {
-			records := make([]repository.KeyUpsert, 0, len(bucket.Records))
-			for _, k := range bucket.Records {
-				records = append(records, k.upsert())
+			records, ok := keyUpserts(w, bucket.Records)
+			if !ok {
+				return
 			}
 			push.Keys[label] = repository.KeyBucket{Hash: bucket.Hash, Records: records}
 		}
@@ -338,27 +282,28 @@ func (s *Server) handleAdminUsageAck(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"ok": true, "count": count})
 }
 
-// POST /grove-admin/spend-adjust {"user", "delta", "id"} — correct one holder's lifetime spend on
+// POST /grove-admin/spend-adjust {"key", "delta", "id"} — correct one key's lifetime spend on
 // this store by delta nano-USD, once per id: a retry answers applied=false and moves nothing.
+// key is the record id, sha256(secret) hex.
 func (s *Server) handleAdminSpendAdjust(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		User  string `json:"user"`
+		Key   string `json:"key"`
 		Delta int64  `json:"delta"`
 		ID    string `json:"id"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if body.User == "" || body.ID == "" {
-		http.Error(w, "user and id are required", http.StatusBadRequest)
+	if body.Key == "" || body.ID == "" {
+		http.Error(w, "key and id are required", http.StatusBadRequest)
 		return
 	}
-	spent, applied, found, err := s.provisioning.AdjustSpent(r.Context(), body.User, body.ID, body.Delta)
+	spent, applied, found, err := s.provisioning.AdjustSpent(r.Context(), body.Key, body.ID, body.Delta)
 	switch {
 	case err != nil:
-		respond.Error(w, http.StatusInternalServerError, "user store error")
+		respond.Error(w, http.StatusInternalServerError, "key store error")
 	case !found:
-		respond.Error(w, http.StatusNotFound, "no such user on this store")
+		respond.Error(w, http.StatusNotFound, "no such key on this store")
 	default:
 		respond.JSON(w, map[string]any{"spent": spent, "applied": applied})
 	}

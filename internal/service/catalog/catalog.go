@@ -27,7 +27,7 @@ func (s *Service) ForIdentity(ctx context.Context, id admission.Identity) ([]str
 	}
 	out := make([]string, 0, len(deployed))
 	for _, model := range deployed {
-		if domain.CanUse(id.User, id.Grant, model) {
+		if domain.CanUse(id.Key, id.Grant, model) {
 			out = append(out, model)
 		}
 	}

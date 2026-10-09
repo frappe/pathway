@@ -270,11 +270,11 @@ func TestCacheBucketsBeyondThePromptBillAsPlain(t *testing.T) {
 // them with the same table.
 func TestRecordAccruesCostAndSpend(t *testing.T) {
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Prepaid: true, Budget: 10_000_000}
+	store.Keys["k1"] = domain.KeyRecord{Prepaid: true, Budget: 10_000_000}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 
 	svc.Record(context.Background(), Report{
-		Prefix: "abc", Model: "qwen3-4b", Usage: openAIUsage, User: "GU-1", Prepaid: true, Budget: 10_000_000,
+		Prefix: "abc", Model: "qwen3-4b", Usage: openAIUsage, MeterID: "k1", Prepaid: true, Budget: 10_000_000,
 		// $3/Mtok plain, $0.30/Mtok cached, $15/Mtok completion, in nano-USD per Mtok.
 		Pricing: priced(t, "mp1", map[string]int64{"prompt_tokens": 3e9, "cached_tokens": 3e8, "completion_tokens": 15e9}),
 	})
@@ -283,7 +283,7 @@ func TestRecordAccruesCostAndSpend(t *testing.T) {
 	for field, n := range map[string]int64{
 		"cost": want, "p:mp1:cost": want, "prompt_tokens": 100, "p:mp1:prompt_tokens": 100,
 		"p:mp1:cached_tokens": 80, "p:mp1:completion_tokens": 20, "p:mp1:request_count": 1,
-		"user_spent": want, "user_balance": 10_000_000 - want,
+		"key_spent": want, "key_balance": 10_000_000 - want,
 	} {
 		if usage[field] != n {
 			t.Errorf("usage[%s] = %d, want %d", field, usage[field], n)
@@ -295,8 +295,8 @@ func TestRecordAccruesCostAndSpend(t *testing.T) {
 	if _, present := usage["p:mp1:total_tokens"]; present {
 		t.Error("only the priced counters are tagged")
 	}
-	if store.Users["GU-1"].Spent != want {
-		t.Errorf("spent = %d, want %d", store.Users["GU-1"].Spent, want)
+	if store.Keys["k1"].Spent != want {
+		t.Errorf("spent = %d, want %d", store.Keys["k1"].Spent, want)
 	}
 }
 
@@ -304,15 +304,15 @@ func TestRecordAccruesCostAndSpend(t *testing.T) {
 // spend is still reported — a request on an unpriced model is not an invisible one.
 func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Prepaid: true}
+	store.Keys["k1"] = domain.KeyRecord{Prepaid: true}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
-	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: openAIUsage, User: "GU-1", Prepaid: true})
+	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: openAIUsage, MeterID: "k1", Prepaid: true})
 
 	usage := store.Usage["abc"]
 	if _, present := usage["cost"]; present {
 		t.Error("a cost was written without rates")
 	}
-	spent, reported := usage["user_spent"]
+	spent, reported := usage["key_spent"]
 	if usage["total_tokens"] != 120 || !reported || spent != 0 {
 		t.Errorf("usage = %v", usage)
 	}
@@ -322,10 +322,10 @@ func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 // never moves and the drain carries no balance for them: there is nothing to gate and nothing owed.
 func TestAFreeHoldersSpendNeverMoves(t *testing.T) {
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Spent: 40}
+	store.Keys["k1"] = domain.KeyRecord{Spent: 40}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 	svc.Record(context.Background(), Report{
-		Prefix: "abc", Model: "m", Usage: openAIUsage, User: "GU-1",
+		Prefix: "abc", Model: "m", Usage: openAIUsage, MeterID: "k1",
 		Pricing: priced(t, "mp1", map[string]int64{"completion_tokens": 15e9}),
 	})
 
@@ -336,13 +336,13 @@ func TestAFreeHoldersSpendNeverMoves(t *testing.T) {
 	if _, present := usage["p:mp1:cost"]; present {
 		t.Error("a free holder's usage is tagged as charged")
 	}
-	for _, field := range []string{"user_spent", "user_balance"} {
+	for _, field := range []string{"key_spent", "key_balance"} {
 		if _, present := usage[field]; present {
 			t.Errorf("%s reported for a free holder", field)
 		}
 	}
-	if store.Users["GU-1"].Spent != 40 {
-		t.Errorf("spent = %d, want it left at 40", store.Users["GU-1"].Spent)
+	if store.Keys["k1"].Spent != 40 {
+		t.Errorf("spent = %d, want it left at 40", store.Keys["k1"].Spent)
 	}
 }
 

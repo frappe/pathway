@@ -9,12 +9,12 @@ import (
 	"github.com/phot0n/pathway/internal/domain"
 )
 
-// lim:<user>:<metric>:<window>:<bucket> — one counter per limit per window. Every gateway on this
+// lim:<key prefix>:<metric>:<window>:<bucket> — one counter per limit per window. Every gateway on this
 // store counts into the same ones, so a limit is exact across them.
 type limits struct{ rdb *redis.Client }
 
-func limitKey(user string, limit domain.Limit, label string) string {
-	return "lim:" + user + ":" + limit.Metric + ":" + limit.Window + ":" + label
+func limitKey(key string, limit domain.Limit, label string) string {
+	return "lim:" + key + ":" + limit.Metric + ":" + limit.Window + ":" + label
 }
 
 // admitScript checks every counter and, only when all have room, counts the request on those that
@@ -41,12 +41,12 @@ for i, key in ipairs(KEYS) do
 end
 return over`)
 
-func (l limits) Admit(ctx context.Context, user string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
+func (l limits) Admit(ctx context.Context, key string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
 	keys := make([]string, 0, len(lims))
 	args := make([]any, 0, 3*len(lims))
 	for _, limit := range lims {
 		label, _, ttl := limit.Bucket(now)
-		keys = append(keys, limitKey(user, limit, label))
+		keys = append(keys, limitKey(key, limit, label))
 		args = append(args, limit.Value, flag(limit.Metric == domain.LimitRequests), ttl)
 	}
 	over, err := admitScript.Run(ctx, l.rdb, keys, args...).Int64Slice()
@@ -60,13 +60,13 @@ func (l limits) Admit(ctx context.Context, user string, lims []domain.Limit, now
 	return exceeded, nil
 }
 
-func (l limits) Debit(ctx context.Context, user string, lims []domain.Limit, tokens int64, now time.Time) error {
+func (l limits) Debit(ctx context.Context, key string, lims []domain.Limit, tokens int64, now time.Time) error {
 	_, err := l.rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
 		for _, limit := range lims {
 			label, _, ttl := limit.Bucket(now)
-			key := limitKey(user, limit, label)
-			p.IncrBy(ctx, key, tokens)
-			p.Expire(ctx, key, time.Duration(ttl)*time.Second)
+			counter := limitKey(key, limit, label)
+			p.IncrBy(ctx, counter, tokens)
+			p.Expire(ctx, counter, time.Duration(ttl)*time.Second)
 		}
 		return nil
 	})

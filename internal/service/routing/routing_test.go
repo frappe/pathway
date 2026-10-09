@@ -154,6 +154,25 @@ func TestAnEjectedTargetIsNotChosen(t *testing.T) {
 	}
 }
 
+// A vendor row has no sibling to steer to, so a failure count never takes it out.
+func TestAVendorRowIsNeverEjected(t *testing.T) {
+	store := memory.New()
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect = "provider", domain.DialectOpenAI
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	store.Failures["https://vendor"] = domain.EjectAfter
+
+	decision, err := serviceOver(store, Options{}).Pick(context.Background(), Request{
+		Model: "qwen3-4b", RequestID: "rid", Dialect: domain.DialectOpenAI, Path: "/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("Pick: %v — a vendor row was ejected", err)
+	}
+	if got := decision.HealthTarget(); got != "" {
+		t.Errorf("HealthTarget = %q, want blank so no failure is counted", got)
+	}
+}
+
 // Ejection is an optimisation on top of a table that is already correct. An unreadable health
 // counter must not take a working engine out — that would turn one broken store into an outage.
 func TestAnUnreadableHealthCounterStillRoutes(t *testing.T) {
@@ -356,6 +375,41 @@ func TestTheRightSurfaceStillRoutes(t *testing.T) {
 	}
 	if decision.Route.EngineURL != "https://asr" {
 		t.Errorf("engine = %q", decision.Route.EngineURL)
+	}
+}
+
+// A vendor row that denies a tool the request names is refused before anything is claimed, with
+// the tool named; an engine of ours beside it takes the request instead; a row that denies nothing
+// runs everything.
+func TestAVendorRowThatDeniesTheToolNamedIsRefused(t *testing.T) {
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect, vendor.DeniedTools = "provider", domain.DialectOpenAI, []string{"web_search_options", "web_search_preview"}
+	search := Request{
+		Model: "qwen3-4b", MeterID: "meter", KeyPrefix: "abc123", Dialect: domain.DialectOpenAI,
+		Path: "/v1/chat/completions", Tools: []string{"messages", "model", "web_search_options"},
+	}
+	function := search
+	function.Tools = []string{"messages", "model", "tools", "function"}
+
+	store := memory.New()
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	svc := serviceOver(store, Options{})
+	_, err := svc.Pick(context.Background(), search)
+	var denial domain.Denial
+	if !errors.As(err, &denial) || denial.Status != 400 || denial.Reason != "qwen3-4b does not run web_search_options" {
+		t.Fatalf("err = %v, want a 400 naming the tool", err)
+	}
+	if len(store.InFlight) != 0 {
+		t.Errorf("a refused request claimed a slot: %v", store.InFlight)
+	}
+	if _, err := svc.Pick(context.Background(), function); err != nil {
+		t.Errorf("a function tool was refused: %v", err)
+	}
+
+	store.Routes["qwen3-4b"] = []domain.Route{vendor, engine("https://ours")}
+	decision, err := svc.Pick(context.Background(), search)
+	if err != nil || decision.Route.EngineURL != "https://ours" {
+		t.Errorf("decision = %+v, %v; want the engine of ours", decision.Route, err)
 	}
 }
 
