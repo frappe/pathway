@@ -61,6 +61,15 @@ type Decision struct {
 // EngineURL and RequestID together name the in-flight slot this decision claimed.
 func (d Decision) EngineURL() string { return d.Route.EngineURL }
 
+// HealthTarget is what this hop's outcome is counted against, blank for a vendor row: with no
+// sibling to steer to, ejecting it would only turn the vendor's errors into our 503.
+func (d Decision) HealthTarget() string {
+	if d.Route.IsProvider() {
+		return ""
+	}
+	return d.Route.EngineURL
+}
+
 type Service struct {
 	routes   repository.Routes
 	sessions repository.Sessions
@@ -391,18 +400,26 @@ func (s *Service) fillInFlight(ctx context.Context, table []domain.Route) {
 // check does the rest. A store failure leaves the table as the control plane pushed it — ejection
 // is an optimisation on something already correct, so an unreadable counter must not cause an outage.
 func (s *Service) markUnhealthy(ctx context.Context, table []domain.Route) {
-	targets := make([]string, len(table))
+	// A vendor row is never ejected (Decision.HealthTarget), whatever an older binary counted.
+	rows := make([]int, 0, len(table))
+	targets := make([]string, 0, len(table))
 	for i, r := range table {
-		targets[i] = r.EngineURL
+		if !r.IsProvider() {
+			rows = append(rows, i)
+			targets = append(targets, r.EngineURL)
+		}
+	}
+	if len(targets) == 0 {
+		return
 	}
 	failures, err := s.health.Failures(ctx, targets)
 	if err != nil {
 		return
 	}
-	for i := range table {
+	for i, row := range rows {
 		if failures[i] >= domain.EjectAfter {
-			table[i].Healthy = false
-			s.log.Debug("target ejected", "engine", table[i].EngineURL, "failures", failures[i])
+			table[row].Healthy = false
+			s.log.Debug("target ejected", "engine", table[row].EngineURL, "failures", failures[i])
 		}
 	}
 }

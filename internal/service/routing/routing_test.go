@@ -154,6 +154,25 @@ func TestAnEjectedTargetIsNotChosen(t *testing.T) {
 	}
 }
 
+// A vendor row has no sibling to steer to, so a failure count never takes it out.
+func TestAVendorRowIsNeverEjected(t *testing.T) {
+	store := memory.New()
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect = "provider", domain.DialectOpenAI
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	store.Failures["https://vendor"] = domain.EjectAfter
+
+	decision, err := serviceOver(store, Options{}).Pick(context.Background(), Request{
+		Model: "qwen3-4b", RequestID: "rid", Dialect: domain.DialectOpenAI, Path: "/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("Pick: %v — a vendor row was ejected", err)
+	}
+	if got := decision.HealthTarget(); got != "" {
+		t.Errorf("HealthTarget = %q, want blank so no failure is counted", got)
+	}
+}
+
 // Ejection is an optimisation on top of a table that is already correct. An unreadable health
 // counter must not take a working engine out — that would turn one broken store into an outage.
 func TestAnUnreadableHealthCounterStillRoutes(t *testing.T) {

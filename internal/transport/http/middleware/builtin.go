@@ -395,7 +395,7 @@ func newMeter(deps Deps) (Middleware, error) {
 					Prepaid:        state.Identity.Key.Prepaid,
 					Budget:         state.Identity.Key.Budget,
 					Limits:         state.Identity.Key.Limits,
-					Target:         state.Decision.EngineURL(),
+					Target:         state.Decision.HealthTarget(),
 					UpstreamStatus: statusText(state.Outcome.Status),
 					Reason:         state.Outcome.Reason,
 					Cut:            state.Outcome.Cut,

@@ -656,6 +656,10 @@ One that ends a stream early but cleanly cannot be told from one that finished, 
 This is cheaper than active probing and strictly better informed: a probe tests a path no customer
 is on.
 
+Engine and ingress rows only. A vendor row is never counted or ejected: it has no sibling to steer
+to, and its counter would be its base URL, shared by every model on that front. Its 5xx reaches the
+caller, and the caller's fallbacks, as it is.
+
 ### Fallback models
 
 A caller may name other models to take the request when the one asked for cannot, in a JSON body:
