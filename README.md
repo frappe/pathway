@@ -497,6 +497,7 @@ What a vendor is sent in place of what the client sent:
 | `max_completion_tokens` / `max_tokens` (OpenAI shape) | `max_completion_tokens` at OpenAI, `max_tokens` at every other vendor; sent under both names, the newer one's value (`vendorfields`) |
 | `stream_options` (OpenAI shape) | `include_usage: true` added on a stream (`streamusage`). `continuous_usage_stats` is added for Baseten and for an engine of ours, not for OpenAI (400s on it), DeepSeek (ignores it) or a vendor the gateway does not know |
 | a tool's `type` (Anthropic shape) | `"type": "custom"` removed at DeepSeek, which refuses it; a tool with no type means the same. Any other type stays (`vendorfields`) |
+| `speed` (Anthropic shape) | removed for every vendor: fast mode is twice the rate and nothing here prices it. The caller is told: `X-Grove-Changed: speed=default` (`vendorfields`) |
 | a `developer` message (OpenAI shape) | sent as a `system` message at DeepSeek, which knows no such role (`vendorfields`) |
 | a past tool-call turn that came back without its reasoning | at DeepSeek an empty one is added: `reasoning_content: ""` on the OpenAI shape, an empty thinking block on the Anthropic one. Not when the caller disabled `thinking` (`vendorfields`) |
 | `thinking`, when a tool is forced | at DeepSeek `{"type": "disabled"}` is added when `tool_choice` is `"required"` or names a function (`tool` on the Anthropic shape) and the caller sent no `thinking` or `reasoning_effort`. The caller is told: `X-Grove-Changed: thinking=disabled` (`vendorfields`) |
@@ -548,14 +549,15 @@ one list of it: add a row or a column when a new difference shows up, with the d
 | `model` in the answer | the id it was started under | the id it was asked by | may differ: `deepseek-v4-flash` answers as `deepseek-flash` (2026-10-04) | not checked | the response swap writes the client's id whatever came back |
 | Anthropic shape | yes | no | yes, its own front | yes; it reads the key as a Bearer, and answers 401 `please check the api-key you provided` to `x-api-key` (2026-10-05) | the route's `dialect`; `upstreamauth` sends Baseten a Bearer, from `vendors` |
 | A tool typed `"custom"` (Anthropic shape; Anthropic's API reference takes it, and litellm always sends it) | not checked | no such shape | 422 ``unknown variant `custom`, expected `web_search_20250305` or `web_search_20260209` ``; the same tool with no type is a 200 with a `tool_use` (2026-10-05) | taken (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets the tool without the type |
-| A server tool other than web search (Anthropic shape) | not checked | no such shape | 422 `unknown variant` for bash, text editor, web fetch and code execution (2026-10-05) | taken and not run: the answer is prose (2026-10-05) | not handled: the vendor refuses |
+| A server tool other than web search (Anthropic shape) | not checked | no such shape | 422 `unknown variant` for bash, text editor, web fetch and code execution (2026-10-05) | taken and not run: the answer is prose (2026-10-05) | the route's `denied_tools`, at `route`: a tool the control plane lists for the vendor is a 400 before the dial; the rest the vendor refuses |
 | A forced tool: `tool_choice` `"required"` or a named function, `tool` on the Anthropic shape | not checked | not checked | 400 `Thinking mode does not support this tool_choice` while thinking is on, its default; taken with `thinking` disabled, and `any` on the Anthropic shape is taken (2026-10-05) | taken on both shapes (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets `thinking` disabled, unless the caller spoke of thinking |
 | A past tool-call turn sent back without its reasoning | not checked | not checked | 400 ``The `reasoning_content` in the thinking mode must be passed back to the API``, and ``The `content[].thinking` …`` on the Anthropic shape; taken with it, with it empty, or with `thinking` disabled (2026-10-05) | taken on both shapes; a thinking block with no `signature` is a 400 (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets an empty one |
 | A function tool while the model reasons (chat) | not checked | 400 `Function tools with reasoning_effort are not supported … use /v1/responses or set reasoning_effort to 'none'` on luna and sol; taken with `reasoning_effort: "none"` (2026-10-05) | taken (2026-10-05) | taken (2026-10-05) | `vendorfields`, from `vendors`: OpenAI gets `reasoning_effort: "none"` when the caller set none |
 | A `temperature` or `top_p` other than 1, or `logprobs` (chat) | not checked | while the model reasons, its default: 400 `'temperature' does not support 0.7 with this model. Only the default (1) value is supported.`, 400 `'top_p' is not supported with this model` and the same for `logprobs`, on luna and sol; 1 is taken for the first two, and all of them with `reasoning_effort: "none"` (2026-10-06) | not checked | not checked | `vendorfields`, from `vendors`: OpenAI gets none of them unless reasoning is off |
+| `speed: "fast"` (Anthropic shape) | not checked | no such shape | not checked | not checked | `vendorfields`: dropped for every vendor, the caller told `speed=default`; ours to refuse to pay, not a quirk |
 | A `developer` message | not checked | followed (2026-10-05) | 422 ``unknown variant `developer`, expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder` `` (2026-10-05) | followed (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets it as `system` |
 | A past tool call with no `type` | not checked | 400 `Missing required parameter` (2026-10-05) | 422 ``missing field `type` `` (2026-10-05) | taken (2026-10-05) | not handled: the vendor refuses |
-| Fields only OpenAI reads: `prediction`, `prompt_cache_key`, `prompt_cache_retention`, `verbosity`, `store`, `web_search_options` | not checked | its own | all six ignored (2026-10-05) | 400 `Extra inputs are not permitted` on `prediction` and `web_search_options`; the other four ignored (2026-10-05) | not handled |
+| Fields only OpenAI reads: `prediction`, `prompt_cache_key`, `prompt_cache_retention`, `verbosity`, `store`, `web_search_options` | not checked | its own | all six ignored (2026-10-05) | 400 `Extra inputs are not permitted` on `prediction` and `web_search_options`; the other four ignored (2026-10-05) | `web_search_options` is a 400 before the dial where the route's `denied_tools` lists it (OpenAI's does); the rest not handled |
 | A remote image URL | not checked | not checked | downloads it itself. A Pexels photo was a 400 `unsupported image` 9 times in 12: Pexels serves AVIF to an `Accept` that offers it and JPEG otherwise, and DeepSeek takes JPEG, PNG, GIF and WebP only, judged by the file's bytes ([its guide](https://api-docs.deepseek.com/guides/vision)). With `fm=jpg` in the URL, 8 of 8 were taken. A Wikimedia PNG is a 400 `Failed to download image`. The image as base64 is taken. Only flash reads images: pro answers 200 and says it cannot see one (2026-10-05) | the Pexels photo is taken, the Wikimedia PNG a 500; base64 is taken (2026-10-05) | not handled: the gateway downloads nothing |
 
 What Baseten bills for a stream that was cut has not been compared with its own usage report.
@@ -671,7 +673,9 @@ OpenAI and Anthropic shapes, and a model answers only the paths its outputs allo
 without a dial, as is one the caller is not granted or one with no routes right now. So is one
 that declares its inputs and lacks what the request carries: a model that takes `["text"]` is not
 sent a request with an image in it. The image and file parts of `messages` are what is
-looked for, on either shape; the model asked for is never held to this, only its stand-ins. One
+looked for, on either shape; the model asked for is never held to this, only its stand-ins. So is
+one whose vendor row denies a tool the request names (`denied_tools`, see [The records themselves](#the-records-themselves)); there the model asked for is held to it
+too, as a 400, since a vendor-run tool is a bill and not a round trip. One
 that is dialled and refuses the request (a model that declares no inputs sent an image, or any
 model sent a field it does not take) costs that dial, and the next is tried.
 
@@ -1313,9 +1317,21 @@ own fields:
   "kind":           "provider",
   "upstream_model": "claude-sonnet-4-5-20250929",
   "api_version":    "2023-06-01",
-  "dialect":        "anthropic"
+  "dialect":        "anthropic",
+  "denied_tools":   ["web_search_20250305", "web_search_20260209", "code_execution_20260521"]
 }]
 ```
+
+`denied_tools` is what the vendor would run on its own side and bill outside the token counts,
+which nothing here meters: a `tools[].type` or a top-level request field, as the control plane's
+Denied Tool rows list them for that vendor. `route` reads every `tools[].type` and every top-level
+field off the client's own bytes and drops a row that denies one of them; when no row of the model
+is left, the request is a 400 `<model> does not run <name>` in the surface's own envelope, before
+any dial and above `meter`, so it bills nothing. A row that denies nothing runs everything, which
+is every row we run ourselves, so a model with an engine of ours beside the vendor row goes to the
+engine. A fallback whose rows deny the tool is passed over like one that lacks an input. Deleting
+a Denied Tool row is how a tool is let through once it is priced. The list is a deny list, so a
+tool a vendor adds tomorrow runs until its row exists.
 
 `upstream_model` is what the `modelmap` transform puts in `body.model`; blank means send the
 caller's unchanged, which is every route we run ourselves — an engine is started under the Grove

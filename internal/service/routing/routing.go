@@ -36,6 +36,10 @@ type Request struct {
 	// Inputs is what the request carries besides text (domain.SentInputs), checked against what
 	// the model takes. Set only for a fallback: the model asked for is the caller's to get wrong.
 	Inputs []string
+	// Tools is every name the request asks a tool by (domain.SentTools), checked against what a
+	// vendor row denies. Set for the model asked for too: a vendor-run tool is the vendor's bill,
+	// not the caller's mistake to pay for.
+	Tools []string
 	// RequestID was minted at the edge; the claim and the decision carry it. Blank is minted here
 	// rather than claimed as "" — a blank member would silently undercount the engine.
 	RequestID string
@@ -148,6 +152,20 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	})
 	if len(table) == 0 {
 		return Decision{}, domain.Deny(404, req.Model+" does not take "+strings.Join(req.Inputs, ", ")+" input")
+	}
+	// A vendor row that denies a tool the request names would run it at our cost. A model with
+	// an engine of ours beside the vendor row still routes, to the engine. 400 and not the 404
+	// above: the model serves this surface, the body asks for what is not offered.
+	var refused string
+	table = slices.DeleteFunc(table, func(candidate domain.Route) bool {
+		if name := domain.Refuses(candidate.DeniedTools, req.Tools); name != "" {
+			refused = name
+			return true
+		}
+		return false
+	})
+	if len(table) == 0 {
+		return Decision{}, domain.Deny(400, req.Model+" does not run "+refused)
 	}
 
 	var stickyURL string

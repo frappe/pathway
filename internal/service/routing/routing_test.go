@@ -359,6 +359,41 @@ func TestTheRightSurfaceStillRoutes(t *testing.T) {
 	}
 }
 
+// A vendor row that denies a tool the request names is refused before anything is claimed, with
+// the tool named; an engine of ours beside it takes the request instead; a row that denies nothing
+// runs everything.
+func TestAVendorRowThatDeniesTheToolNamedIsRefused(t *testing.T) {
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect, vendor.DeniedTools = "provider", domain.DialectOpenAI, []string{"web_search_options", "web_search_preview"}
+	search := Request{
+		Model: "qwen3-4b", MeterID: "meter", KeyPrefix: "abc123", Dialect: domain.DialectOpenAI,
+		Path: "/v1/chat/completions", Tools: []string{"messages", "model", "web_search_options"},
+	}
+	function := search
+	function.Tools = []string{"messages", "model", "tools", "function"}
+
+	store := memory.New()
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	svc := serviceOver(store, Options{})
+	_, err := svc.Pick(context.Background(), search)
+	var denial domain.Denial
+	if !errors.As(err, &denial) || denial.Status != 400 || denial.Reason != "qwen3-4b does not run web_search_options" {
+		t.Fatalf("err = %v, want a 400 naming the tool", err)
+	}
+	if len(store.InFlight) != 0 {
+		t.Errorf("a refused request claimed a slot: %v", store.InFlight)
+	}
+	if _, err := svc.Pick(context.Background(), function); err != nil {
+		t.Errorf("a function tool was refused: %v", err)
+	}
+
+	store.Routes["qwen3-4b"] = []domain.Route{vendor, engine("https://ours")}
+	decision, err := svc.Pick(context.Background(), search)
+	if err != nil || decision.Route.EngineURL != "https://ours" {
+		t.Errorf("decision = %+v, %v; want the engine of ours", decision.Route, err)
+	}
+}
+
 // A route pushed before the control plane said what a model gives carries nothing, and must keep
 // serving what it always did.
 func TestARouteThatDeclaresNothingIsUnrestricted(t *testing.T) {

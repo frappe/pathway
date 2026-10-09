@@ -99,6 +99,52 @@ func TestSentInputsAndTakes(t *testing.T) {
 	}
 }
 
+// What a request asks a tool by is read off the body the way a vendor reads it, and a route is
+// held to its denied list only.
+func TestSentToolsAndRefuses(t *testing.T) {
+	for _, c := range []struct {
+		body string
+		want []string
+		why  string
+	}{
+		{`{"model":"m","tools":[{"type":"function","function":{"name":"f"}}]}`,
+			[]string{"model", "tools", "function"}, "the fields, then each tool's type"},
+		{`{"tools":[{"name":"a","input_schema":{}},{"type":"custom","name":"b"}]}`,
+			[]string{"tools", "custom"}, "an untyped tool names nothing"},
+		{`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"type":"web_search_20250305"}]}`,
+			[]string{"tools", "web_search_20250305"}, "each type once"},
+		{`{"tools":[{"type":"web_search_20250305","Type":"function"}]}`,
+			[]string{"tools", "web_search_20250305"}, "the exact key, as a vendor reads it; not Go's case-folded match"},
+		{`{"tools":[{"type":"web_search_20250305"}]}`,
+			[]string{"tools", "web_search_20250305"}, "unescaped, as a vendor reads it"},
+		{`{"web_search_options":{},"model":"m"}`, []string{"model", "web_search_options"}, "a top-level field is a name too"},
+		{`{"tools":"none"}`, []string{"tools"}, "a tools that is not a list names no tool"},
+		{`{"tools":["x",{"type":5},{"type":"bash_20250124"}]}`,
+			[]string{"tools", "bash_20250124"}, "an odd entry does not hide the rest"},
+		{``, nil, "no body"},
+		{`not json`, nil, "unreadable is the upstream's to refuse"},
+	} {
+		if got := SentTools([]byte(c.body)); !slices.Equal(got, c.want) {
+			t.Errorf("SentTools(%s) = %v, want %v — %s", c.body, got, c.want, c.why)
+		}
+	}
+
+	for _, c := range []struct {
+		denied, sent []string
+		want         string
+		why          string
+	}{
+		{nil, []string{"tools", "web_search_20250305"}, "", "nothing denied = runs everything"},
+		{[]string{"web_search_20250305"}, []string{"model", "tools", "function"}, "", "a function tool is the caller's"},
+		{[]string{"web_search_20250305"}, []string{"tools", "web_search_20250305"}, "web_search_20250305", ""},
+		{[]string{"mcp_servers", "container"}, []string{"container", "mcp_servers", "model"}, "container", "the first name sent"},
+	} {
+		if got := Refuses(c.denied, c.sent); got != c.want {
+			t.Errorf("Refuses(%v, %v) = %q, want %q — %s", c.denied, c.sent, got, c.want, c.why)
+		}
+	}
+}
+
 // A vendor is a closed set: only its own chat dialect exists there, so anything else is our 404
 // rather than a round trip that comes back as theirs. The engine table is generous for the
 // opposite reason — an engine serves more than we have written down.

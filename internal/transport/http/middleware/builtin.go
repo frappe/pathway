@@ -365,6 +365,8 @@ func pickRequest(r *http.Request, state *State, model, session string) routing.R
 		KeyPrefix: state.Identity.Prefix(),
 		Path:      r.URL.Path,
 		Dialect:   respond.Dialect(r.Context()),
+		// Off the client's own bytes: the decoded body is the transforms' to change.
+		Tools:     domain.SentTools(state.Raw),
 		RequestID: state.RequestID,
 	}
 }

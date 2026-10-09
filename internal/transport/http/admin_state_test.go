@@ -77,7 +77,11 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 			{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "group": "acme"}]}}},
 		"routes": {"hash": "rh", "table": {"m1": [
 			{"engine_url": "https://box/e/md1", "internal_key": "ek", "healthy": true,
-			 "capacity": 8, "deployment": "MD-1", "server": "INF-1", "kind": "direct"}]}}
+			 "capacity": 8, "deployment": "MD-1", "server": "INF-1", "kind": "direct"}],
+			"m2": [
+			{"engine_url": "https://api.openai.com", "internal_key": "", "healthy": true, "capacity": 0,
+			 "deployment": "", "server": "", "vendor": "openai", "kind": "provider", "dialect": "openai",
+			 "denied_tools": ["web_search_options"]}]}}
 	}`, bucket)
 
 	w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body)
@@ -90,7 +94,7 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
 		t.Fatalf("reply: %v", err)
 	}
-	if reply.Counts["groups"] != 1 || reply.Counts["keys"] != 1 || reply.Counts["routes"] != 1 {
+	if reply.Counts["groups"] != 1 || reply.Counts["keys"] != 1 || reply.Counts["routes"] != 2 {
 		t.Errorf("counts = %v", reply.Counts)
 	}
 
@@ -102,6 +106,9 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 	}
 	if len(store.Routes["m1"]) != 1 || store.Routes["m1"][0].EngineURL != "https://box/e/md1" {
 		t.Errorf("routes = %+v", store.Routes["m1"])
+	}
+	if denied := store.Routes["m2"][0].DeniedTools; len(denied) != 1 || denied[0] != "web_search_options" {
+		t.Errorf("denied tools = %v, want the pushed list", denied)
 	}
 
 	w = adminCall(t, handler, http.MethodGet, "/grove-admin/state-hash", "")
