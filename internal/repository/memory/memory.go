@@ -21,12 +21,15 @@ import (
 type Store struct {
 	mu sync.Mutex
 
-	Keys     map[string]domain.KeyRecord
-	Groups   map[string]domain.GroupRecord
-	Routes   map[string][]domain.Route
-	Sticky   map[string]string
-	InFlight map[string]map[string]bool // engine → request ids
-	Failures map[string]int
+	Keys map[string]domain.KeyRecord
+	// SpentMonth is the month each key's Spent counts (domain.MonthOf), the memory twin of the
+	// real store's spent:<month> field. A key not listed counts the current one.
+	SpentMonth map[string]string
+	Groups     map[string]domain.GroupRecord
+	Routes     map[string][]domain.Route
+	Sticky     map[string]string
+	InFlight   map[string]map[string]bool // engine → request ids
+	Failures   map[string]int
 	// KeyStats is what each vendor credential answered, the memory twin of pk:<id>.
 	KeyStats map[string]domain.KeyStats
 	Usage    map[string]map[string]int64
@@ -54,7 +57,7 @@ var errStore = errors.New("store unavailable")
 
 func New() *Store {
 	return &Store{
-		Keys: map[string]domain.KeyRecord{}, Groups: map[string]domain.GroupRecord{},
+		Keys: map[string]domain.KeyRecord{}, SpentMonth: map[string]string{}, Groups: map[string]domain.GroupRecord{},
 		Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
@@ -92,6 +95,18 @@ func (s *Store) putKey(rec repository.KeyUpsert) {
 	}
 }
 
+// rollMonth matches the real store reading this month's field: a key last touched in an earlier
+// month starts this one at 0. Called with the lock held, on a key the store knows.
+func (s *Store) rollMonth(id string) {
+	month := domain.MonthOf(time.Now())
+	if was, ok := s.SpentMonth[id]; ok && was != month {
+		rec := s.Keys[id]
+		rec.Spent = 0
+		s.Keys[id] = rec
+	}
+	s.SpentMonth[id] = month
+}
+
 type keys struct{ s *Store }
 
 // Resolve matches the real script: a group is asked for only when the key lists one, so a failing
@@ -102,10 +117,11 @@ func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, boo
 	if err := k.s.failed("keys"); err != nil {
 		return repository.Holder{}, false, err
 	}
-	rec, ok := k.s.Keys[meterID]
-	if !ok {
+	if _, ok := k.s.Keys[meterID]; !ok {
 		return repository.Holder{}, false, nil
 	}
+	k.s.rollMonth(meterID)
+	rec := k.s.Keys[meterID]
 	holder := repository.Holder{Key: rec, Groups: map[string]domain.GroupRecord{}}
 	if len(rec.Groups) > 0 {
 		if err := k.s.failed("groups"); err != nil {
@@ -146,9 +162,13 @@ func (k keys) AdjustSpent(_ context.Context, meterID, id string, delta int64) (i
 	if err := k.s.failed("keys"); err != nil {
 		return 0, false, false, err
 	}
-	rec, found := k.s.Keys[meterID]
-	if !found || k.s.Adjusted[id] {
-		return rec.Spent, false, found, nil
+	if _, found := k.s.Keys[meterID]; !found {
+		return 0, false, false, nil
+	}
+	k.s.rollMonth(meterID)
+	rec := k.s.Keys[meterID]
+	if k.s.Adjusted[id] {
+		return rec.Spent, false, true, nil
 	}
 	rec.Spent += delta
 	k.s.Keys[meterID] = rec
@@ -451,8 +471,7 @@ func (u usage) accrue(a repository.Accrual) {
 	for field, n := range a.Fields {
 		u.s.Usage[a.Prefix][field] += n
 	}
-	rec, known := u.s.Keys[a.Key]
-	if a.Key == "" || !known {
+	if _, known := u.s.Keys[a.Key]; a.Key == "" || !known {
 		return
 	}
 	rec.Spent += a.Cost
@@ -460,6 +479,8 @@ func (u usage) accrue(a repository.Accrual) {
 	u.s.Usage[a.Prefix]["key_spent"] = rec.Spent
 	u.s.Usage[a.Prefix]["key_balance"] = a.Budget - rec.Spent
 }
+	u.s.rollMonth(a.Key)
+	rec := u.s.Keys[a.Key]
 
 // Drain matches the real one: live counters (all, or only keys) are set aside under newID, and
 // every unacknowledged pair is answered. Nothing is deleted until Ack.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -58,7 +59,7 @@ func (k keys) Resolve(ctx context.Context, meterID string) (repository.Holder, b
 	if len(key) == 0 {
 		return repository.Holder{}, false, nil
 	}
-	rec, err := keyRecord(key)
+	rec, err := keyRecord(key, spentField(time.Now()))
 	if err != nil {
 		return repository.Holder{}, false, err
 	}
@@ -82,7 +83,14 @@ func hashOf(reply any) map[string]string {
 	return h
 }
 
-func keyRecord(h map[string]string) (domain.KeyRecord, error) {
+// spentField names the hash field a key's spend lands under for the month of now. A month not yet
+// written reads 0, so a new month needs no reset. Earlier months' fields stay behind, ~20 bytes a
+// key a month, and nothing reads them.
+// ponytail: fields accumulate one per key per month; HDEL the previous month on first write if it ever matters.
+func spentField(now time.Time) string { return "spent:" + domain.MonthOf(now) }
+
+// keyRecord reads a record as HGETALL answered it; spent is the field this month's spend is under.
+func keyRecord(h map[string]string, spent string) (domain.KeyRecord, error) {
 	// A push is refused unless every limit reads, so one that does not was written by a newer
 	// binary. Serving that key uncapped would hide it.
 	limits, err := domain.ParseLimits(h["limits"])
@@ -101,13 +109,13 @@ func keyRecord(h map[string]string) (domain.KeyRecord, error) {
 		Geography:   strings.TrimSpace(h["geography"]),
 		Prepaid:     strings.TrimSpace(h["prepaid"]) == "1",
 		Budget:      int64Field(h, "budget"),
-		Spent:       int64Field(h, "spent"),
+		Spent:       int64Field(h, spent),
 		Limits:      limits,
 	}, nil
 }
 
-// keyFields is what a push writes. `spent` is not among them: it is this box's own counter, and
-// an HSET here never clears a field it does not name.
+// keyFields is what a push writes. No `spent:<month>` is among them: those are this box's own
+// counters, and an HSET here never clears a field it does not name.
 func keyFields(rec repository.KeyUpsert) map[string]any {
 	return map[string]any{
 		"status":       rec.Status,
@@ -126,9 +134,10 @@ func keyFields(rec repository.KeyUpsert) map[string]any {
 }
 
 // staleKeyFields were written by control planes before the policy moved onto the key: the user
-// pointer and the balance-read flag, and the flattened model set before that. Dropped with every
-// write so a record never shows new fields beside stale ones.
-var staleKeyFields = []string{"user", "can_read_balance", "models", "priority"}
+// pointer and the balance-read flag, and the flattened model set before that; and `spent`, the
+// lifetime counter this gateway kept before spend was counted by month. Dropped with every write
+// so a record never shows new fields beside stale ones.
+var staleKeyFields = []string{"user", "can_read_balance", "models", "priority", "spent"}
 
 // writeKey lands one record whole: the write and the strip of stale fields go in one
 // transaction, so a reader never sees it half-updated.
@@ -164,19 +173,20 @@ func int64Field(h map[string]string, field string) int64 {
 	return n
 }
 
-// adjustScript moves one key's spend once per adjustment id. Replies {spent, code}: code 1
-// applied, 0 already applied, -1 no such key. The id is kept a week: a retry comes within
+// adjustScript moves one key's spend for the month once per adjustment id. Replies {spent, code}:
+// code 1 applied, 0 already applied, -1 no such key. The id is kept a week: a retry comes within
 // minutes, and the control plane names each adjustment after its own row, so ids never recur.
 //
-// KEYS[1] adjust:<id>, KEYS[2] key:<meter id>; ARGV[1] delta, ARGV[2] seconds to keep the id
+// KEYS[1] adjust:<id>, KEYS[2] key:<meter id>; ARGV[1] delta, ARGV[2] seconds to keep the id,
+// ARGV[3] the key's spent field for the month
 var adjustScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[2]) == 0 then
   return {'0', -1}
 end
 if redis.call('EXISTS', KEYS[1]) == 1 then
-  return {redis.call('HGET', KEYS[2], 'spent') or '0', 0}
+  return {redis.call('HGET', KEYS[2], ARGV[3]) or '0', 0}
 end
-local spent = redis.call('HINCRBY', KEYS[2], 'spent', ARGV[1])
+local spent = redis.call('HINCRBY', KEYS[2], ARGV[3], ARGV[1])
 redis.call('SET', KEYS[1], '1', 'EX', ARGV[2])
 return {tostring(spent), 1}
 `)
@@ -185,7 +195,7 @@ const adjustKeep = 7 * 24 * 60 * 60
 
 func (k keys) AdjustSpent(ctx context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
 	res, err := adjustScript.Run(ctx, k.rdb, []string{"adjust:" + id, "key:" + meterID},
-		strconv.FormatInt(delta, 10), adjustKeep).Slice()
+		strconv.FormatInt(delta, 10), adjustKeep, spentField(time.Now())).Slice()
 	if err != nil || len(res) != 2 {
 		return 0, false, false, err
 	}

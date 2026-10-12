@@ -66,11 +66,42 @@ func TestAccrueAgainstRealRedis(t *testing.T) {
 	}
 }
 
+// Spend counts under this month's field: an earlier month's counter and the lifetime `spent` of
+// older gateways read as nothing, a push strips the latter, and an accrue moves only this month's.
+func TestSpentIsThisMonthsOnRealRedis(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	client.rdb.HSet(ctx, "key:aa", "spent", "900", "spent:2000-01", "800")
+	bucket := domain.BucketOf("aa")
+	push := repository.StatePush{Keys: map[string]repository.KeyBucket{bucket: {
+		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Prepaid: true, Budget: 1_000}},
+	}}}
+	if _, err := state.Apply(ctx, push); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if holder, _, _ := client.Store().Keys.Resolve(ctx, "aa"); holder.Key.Spent != 0 {
+		t.Errorf("a new month reads spent %d, want 0", holder.Key.Spent)
+	}
+	if client.rdb.HExists(ctx, "key:aa", "spent").Val() {
+		t.Error("the lifetime spent survived the push")
+	}
+
+	if err := client.Store().Usage.Accrue(ctx, liveAccrual("abc", "aa", 250)); err != nil {
+		t.Fatalf("Accrue: %v", err)
+	}
+	if got := client.rdb.HGet(ctx, "key:aa", spentField(time.Now())).Val(); got != "250" {
+		t.Errorf("this month's spent = %q, want 250", got)
+	}
+	if got := client.rdb.HGet(ctx, "key:aa", "spent:2000-01").Val(); got != "800" {
+		t.Errorf("an old month's counter moved to %q", got)
+	}
+}
+
 // A nano-USD total past 14 digits must survive the trip through Lua unrounded.
 func TestAccrueKeepsBigTotalsExact(t *testing.T) {
 	client, _ := liveStore(t)
 	ctx := context.Background()
-	client.rdb.HSet(ctx, "key:aa", "spent", "123456789012345678")
+	client.rdb.HSet(ctx, "key:aa", spentField(time.Now()), "123456789012345678")
 	a := liveAccrual("abc", "aa", 1)
 	a.Budget = 223456789012345678
 	if err := client.Store().Usage.Accrue(ctx, a); err != nil {
@@ -182,7 +213,7 @@ func TestAnUnackedKeyIsResentOnRealRedis(t *testing.T) {
 func TestAdjustSpentOnRealRedis(t *testing.T) {
 	client, _ := liveStore(t)
 	ctx := context.Background()
-	client.rdb.HSet(ctx, "key:aa", "spent", "3000")
+	client.rdb.HSet(ctx, "key:aa", spentField(time.Now()), "3000")
 	keys := client.Store().Keys
 
 	if spent, applied, found, err := keys.AdjustSpent(ctx, "aa", "CD-1", -1000); spent != 2000 || !applied || !found || err != nil {

@@ -1,8 +1,10 @@
 package domain
 
-import "errors"
-
-import "strings"
+import (
+	"errors"
+	"strings"
+	"time"
+)
 
 // KeyRecord is key:<sha256(secret)>: the credential and the whole policy behind it. The team is
 // the ledger the control plane bills; the KEY is what every gate reads — its models, its
@@ -26,10 +28,11 @@ type KeyRecord struct {
 	LogPayloads bool
 	// Geography pins this key to one geography's gateways; blank serves anywhere.
 	Geography string
-	// Prepaid bills this key against a balance. Budget is the key's cap (nano-USD), the slice of
-	// the team's balance the control plane allotted it; Spent is this store's own lifetime
-	// counter, moved by every metered request and never by a push. This box's balance for the
-	// key is Budget − Spent. The control plane keeps the team's own from the same credits.
+	// Prepaid gates this key on its cap. Budget is the cap the control plane set for one calendar
+	// month (nano-USD); Spent is what this store has counted against it in the current UTC month,
+	// moved by every metered request and never by a push. A new month starts at 0 with nothing
+	// reset: the store keeps one counter per month and reads the current one. This box's balance
+	// for the key is Budget − Spent.
 	Prepaid bool
 	Budget  int64
 	Spent   int64
@@ -44,8 +47,12 @@ type GroupRecord struct {
 }
 
 // Exhausted reports whether the key has run out: the control plane's verdict on its team, or this
-// box's own view of the key's cap.
+// box's own view of the key's cap for the month.
 func (k KeyRecord) Exhausted() bool { return k.Limited || (k.Prepaid && k.Spent >= k.Budget) }
+
+// MonthOf names the month a spend counts in, "2006-01" in UTC: the field the store keeps a key's
+// Spent under, and what the control plane's monthly cap is for.
+func MonthOf(t time.Time) string { return t.UTC().Format("2006-01") }
 
 // ExhaustedDenial is the 402 for an exhausted key, nil otherwise. The control plane's verdict and
 // this box's own balance answer alike: a client cannot tell, and should not need to, which side

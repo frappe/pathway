@@ -737,7 +737,7 @@ balance running out flips `limited` on every key it holds, one field each.
 | Gate | Status | Why in this position |
 |---|---|---|
 | key is `active` | 401 | Checked first: a revoked key is 401 even when it is also over quota, because the key is the thing that is wrong |
-| key has credit | 402 | `limited` is a pushed flag (the team's balance is gone); `prepaid && spent >= budget` is this Redis's own counter against the key's cap. Either → 402 |
+| key has credit | 402 | `limited` is a pushed flag (the control plane's verdict on the team); `prepaid && spent >= budget` is this Redis's own counter for the month against the key's monthly cap. Either → 402 |
 | `CanUse(model)` | 403 | |
 
 `CanUse` is the whole access rule and fails closed:
@@ -754,10 +754,10 @@ something the inference path would refuse.
 ### Credit gates
 
 Two, both read off the key record before the body is, both answering 402
-`credit balance exhausted`. The control plane's: the team's balance priced from the pull, flipped as
-`limited` and pushed onto every key of the team. This box's own: `prepaid && spent >= budget`, the
-key's cap against the one counter this process keeps (see *The records themselves*). A client
-cannot tell which one refused it.
+`credit balance exhausted`. The control plane's: its verdict on the team, flipped as `limited` and
+pushed onto every key of the team. This box's own: `prepaid && spent >= budget`, the key's monthly
+cap against this month's counter on the record (see *The records themselves*). A client cannot
+tell which one refused it.
 
 ### Rate limiting
 
@@ -894,8 +894,9 @@ root (a vendor fee reported in `usage`) is one parser line that fills its bucket
 pricing in force; a price change lands with the push that carries it, and a request is charged by
 the pricing its gateway held. One Lua script per request: HINCRBY every counter, each priced counter again as `p:<pricing id>:<counter>`,
 then `cost` and `p:<pricing id>:cost` — Σ counter × rate, nano-USD, truncated per counter, 0 on an
-unpriced route — then, for a prepaid key only, `HINCRBY key:<hash> spent cost` and `HSET key_spent
-key_balance` (`budget − spent`, negative once overspent; last writer wins) on the usage hash. A free
+unpriced route — then, for a prepaid key only, `HINCRBY key:<hash> spent:<YYYY-MM> cost` (the UTC
+month the request lands in) and `HSET key_spent key_balance` (`budget − spent`, negative once
+overspent; last writer wins) on the usage hash. A free
 team's usage is counted and priced the same, but tagged `f:<pricing id>:` instead of `p:`; its keys'
 `spent` never moves and the drain carries no balance for them, so turning the team prepaid later
 starts it at what it loads. The tag is set per request, so a drain that spans a flip carries both and the
@@ -1162,7 +1163,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 
 | Key | Type | Written by |
 |---|---|---|
-| `key:<sha256(secret)>` | hash | state push, `keys` section; `spent` by the gateway |
+| `key:<sha256(secret)>` | hash | state push, `keys` section; `spent:<YYYY-MM>` by the gateway |
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
@@ -1246,8 +1247,8 @@ ack — `"dead": ["<request id>", ...]` beside `"acks"` — which removes it; `c
 failed, last_used, last_rate_limited}}` per vendor credential, lifetime and never drained; an id
 never dialled is zeros. The control plane sums it across stores for the operator.
 
-`POST /grove-admin/spend-adjust {"key", "delta", "id"}` corrects one key's `spent` on this store
-by `delta` nano-USD, once per `id` (`key` is the record id, sha256 hex) — a retry answers
+`POST /grove-admin/spend-adjust {"key", "delta", "id"}` corrects one key's `spent:<YYYY-MM>` for
+the current month on this store by `delta` nano-USD, once per `id` (`key` is the record id, sha256 hex) — a retry answers
 `{"spent", "applied": false}` and moves nothing. A key this store does not hold is a 404; nothing
 is invented.
 
@@ -1255,7 +1256,7 @@ is invented.
 
 ```
 key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
-                           geography  prepaid  budget  spent  limits
+                           geography  prepaid  budget  spent:<YYYY-MM>  limits
 model_group:<Model Group>  models
 usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
@@ -1272,12 +1273,14 @@ to everything, which is the fail-closed default. `group` holds every group the k
 name containing a comma would split — Grove refuses one. `team` is the Central Team the key bills
 to: the cache-salt namespace and the payload log's join field, read by no gate.
 
-`prepaid` / `budget` / `spent` are the credit gate. `budget` is the key's cap — the slice of its
-team's balance the control plane allotted it, nano-USD; Grove keeps Σ caps within the balance.
-`spent` is this Redis's own lifetime counter: every metered request of a prepaid key moves it, a
-push never does (the push is an HSET of the fields it names), and only `spend-adjust` corrects it.
-This box's balance for the key is `budget − spent`; Grove keeps the team's own from the same
-credits and audits the two every pull. `prepaid && spent >= budget` → 402 `credit balance
+`prepaid` / `budget` / `spent:<YYYY-MM>` are the credit gate. `budget` is the key's monthly cap,
+nano-USD; Grove keeps Σ caps within the team's tier limit. `spent:<YYYY-MM>` is this Redis's own
+counter for the UTC month: every metered request of a prepaid key moves this month's field, a push
+never does (the push is an HSET of the fields it names), and only `spend-adjust` corrects it. A new
+month is a field not yet written, which reads 0, so nothing resets and nothing runs at midnight;
+earlier months' fields stay behind (about 20 bytes a key a month) and nothing reads them. This
+box's balance for the key is `budget − spent`; Grove keeps the team's own from the pulled usage and
+audits the two every pull. `prepaid && spent >= budget` → 402 `credit balance
 exhausted` (`billing_error` on the Anthropic surface), at `quota` before the body is read, and
 `/v1/models` refuses through the same `Evaluate`. `limited` is the control plane's verdict on the
 team and refuses alike. A key pinned by `geography` lives on one store, so its gate is exact —
@@ -1410,7 +1413,7 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 | `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` only — anything else under it is a 404 in Anthropic's shape — keyed by `x-api-key` or a Bearer |
 | `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
-| `GET /v1/credits` | answered here: what the key has left of its own cap on this store, in US dollars — `{"balance", "spent", "is_free_user"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it. A key of a free team reads zeros and `"is_free_user": true` |
+| `GET /v1/credits` | answered here: what the key has left of its own monthly cap on this store this month, in US dollars — `{"balance", "spent"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it. A key of a free team reads zeros |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
 | `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |

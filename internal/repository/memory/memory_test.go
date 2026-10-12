@@ -44,6 +44,31 @@ func TestAccrueMovesCountersAndSpendTogether(t *testing.T) {
 	}
 }
 
+// Spent counts one month: a key last touched in an earlier month starts this one at 0, whether a
+// read or an accrue touches it first, and an adjustment lands on this month.
+func TestSpentStartsEachMonthAtZero(t *testing.T) {
+	store := New()
+	store.Keys["k1"] = domain.KeyRecord{Prepaid: true, Budget: 1_000, Spent: 900}
+	store.Keys["k2"] = domain.KeyRecord{Prepaid: true, Budget: 1_000, Spent: 900}
+	store.SpentMonth["k1"], store.SpentMonth["k2"] = "2000-01", "2000-01"
+	repos := store.Repositories()
+	ctx := context.Background()
+
+	if holder, _, _ := repos.Keys.Resolve(ctx, "k1"); holder.Key.Spent != 0 {
+		t.Errorf("read after the flip = %d, want 0", holder.Key.Spent)
+	}
+	if err := repos.Usage.Accrue(ctx, accrual("abc", "k2", 250)); err != nil {
+		t.Fatalf("Accrue: %v", err)
+	}
+	if store.Keys["k2"].Spent != 250 || store.Usage["abc"]["key_balance"] != 750 {
+		t.Errorf("accrue after the flip: spent = %d balance = %d, want 250 and 750",
+			store.Keys["k2"].Spent, store.Usage["abc"]["key_balance"])
+	}
+	if spent, _, _, _ := repos.Keys.AdjustSpent(ctx, "k2", "CD-1", -50); spent != 200 {
+		t.Errorf("adjusted = %d, want 200", spent)
+	}
+}
+
 // A key this store was never told about gets no record invented for it: the counters land,
 // nobody's spend moves, and the drain carries no balance to reconcile.
 func TestAccrueOnAnUnknownHolderMovesNoSpend(t *testing.T) {

@@ -95,7 +95,7 @@ func (s *Service) AckUsage(ctx context.Context, acks map[string][]string, retent
 	return s.store.Usage.Ack(ctx, acks, retention)
 }
 
-// AdjustSpent corrects a key's lifetime spend on this store, once per id.
+// AdjustSpent corrects a key's spend for the current month on this store, once per id.
 func (s *Service) AdjustSpent(ctx context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
 	return s.store.Keys.AdjustSpent(ctx, meterID, id, delta)
 }

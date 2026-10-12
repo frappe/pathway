@@ -210,8 +210,9 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"counts": counts})
 }
 
-// GET /grove-admin/provider-keys?ids=a,b — what each vendor credential answered, lifetime, by the
-// id the control plane pushed it under. A key never dialled answers zeros.
+// GET /grove-admin/provider-keys?ids=a,b — what each vendor credential answered since the last
+// call, by the id the control plane pushed it under, and the counts cleared. A key never dialled
+// answers zeros.
 func (s *Server) handleAdminProviderKeys(w http.ResponseWriter, r *http.Request) {
 	ids := commaList(r.URL.Query().Get("ids"))
 	if s.providerKeys == nil || len(ids) == 0 {
@@ -282,8 +283,9 @@ func (s *Server) handleAdminUsageAck(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"ok": true, "count": count})
 }
 
-// POST /grove-admin/spend-adjust {"key", "delta", "id"} — correct one key's lifetime spend on
-// this store by delta nano-USD, once per id: a retry answers applied=false and moves nothing.
+// POST /grove-admin/spend-adjust {"key", "delta", "id"} — correct one key's spend for the
+// current month on this store by delta nano-USD, once per id: a retry answers applied=false and
+// moves nothing.
 // key is the record id, sha256(secret) hex.
 func (s *Server) handleAdminSpendAdjust(w http.ResponseWriter, r *http.Request) {
 	var body struct {

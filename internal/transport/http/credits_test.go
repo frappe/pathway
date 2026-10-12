@@ -163,10 +163,10 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 		want      string
 	}{
 		{"prepaid", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 15_750_000_000, 3_250_000_000 },
-			200, `{"balance":12.5,"spent":3.25,"is_free_user":false}`},
+			200, `{"balance":12.5,"spent":3.25}`},
 		{"overspent still reads", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1_000_000_000, 1_500_000_000 },
-			200, `{"balance":-0.5,"spent":1.5,"is_free_user":false}`},
-		{"free", "active", func(*domain.KeyRecord) {}, 200, `{"balance":0,"spent":0,"is_free_user":true}`},
+			200, `{"balance":-0.5,"spent":1.5}`},
+		{"free", "active", func(*domain.KeyRecord) {}, 200, `{"balance":0,"spent":0}`},
 		{"revoked key", "revoked", func(k *domain.KeyRecord) { k.Prepaid, k.Budget = true, 1_000_000_000 }, 401, "unknown or revoked api key"},
 	}
 	for _, tc := range cases {

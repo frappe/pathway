@@ -10,6 +10,7 @@ import (
 	goflag "flag"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
 	"github.com/phot0n/pathway/internal/repository"
@@ -136,7 +137,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 func TestAKeyRecordRoundTripsItsPolicy(t *testing.T) {
 	client, state := liveStore(t)
 	ctx := context.Background()
-	client.rdb.HSet(ctx, "key:aa", "user", "GU-1", "can_read_balance", "1", "spent", "40")
+	client.rdb.HSet(ctx, "key:aa", "user", "GU-1", "can_read_balance", "1", spentField(time.Now()), "40")
 	bucket := domain.BucketOf("aa")
 	if _, err := state.Apply(ctx, repository.StatePush{Keys: map[string]repository.KeyBucket{
 		bucket: {Hash: "kh", Records: []repository.KeyUpsert{{

@@ -18,8 +18,8 @@ type Keys interface {
 	Resolve(ctx context.Context, meterID string) (holder Holder, found bool, err error)
 	Upsert(ctx context.Context, records []KeyUpsert) error
 	Delete(ctx context.Context, ids []string) (int, error)
-	// AdjustSpent moves a key's lifetime spend by delta nano-USD, once per id: a repeated id
-	// answers the current spend with applied=false. found=false when the key is not here.
+	// AdjustSpent moves a key's spend for the current month by delta nano-USD, once per id: a
+	// repeated id answers the current spend with applied=false. found=false when the key is not here.
 	AdjustSpent(ctx context.Context, meterID, id string, delta int64) (spent int64, applied, found bool, err error)
 }
 
@@ -72,8 +72,8 @@ type Health interface {
 	RecordSuccess(ctx context.Context, target string) error
 }
 
-// ProviderKeys counts what each vendor credential answered — lifetime, by the id the control
-// plane pushed it under. Read live by the control plane; never drained.
+// ProviderKeys counts what each vendor credential answered, by the id the control plane pushed it
+// under, since the control plane last took the counts.
 type ProviderKeys interface {
 	// Count lands one attempt on one key: the upstream's status, or 0 when the hop produced none.
 	Count(ctx context.Context, id string, status int) error
@@ -164,7 +164,7 @@ type GroupUpsert struct {
 }
 
 // Accrual is one metered request. Fields already carry the cost beside the counters; Cost is
-// repeated so the store can move the key's lifetime spend without reading the map back.
+// repeated so the store can move the key's spend for the month without reading the map back.
 type Accrual struct {
 	// ID is the request id: what makes a spooled accrual's replay land once.
 	ID     string           `json:"id"`

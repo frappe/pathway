@@ -13,27 +13,28 @@ import (
 
 // usage:<key prefix> — one hash per API key, holding both the flat metrics and their per-model and
 // per-deployment twins, so a single drain carries the aggregate and the breakdown together. The
-// month is NOT tracked here: the control plane stamps it from its own clock when it pulls.
+// counters carry no month: the control plane stamps it when it pulls. The key's spend does, as
+// the field it lands under (spentField).
 type usage struct{ rdb *redis.Client }
 
-// accrueBody lands one request in one call: the counters, then the key's lifetime spend and the
-// balance view the drain carries. One script rather than a pipeline because key_spent needs the
-// incremented total, and a drain landing between two calls would split one request across two
+// accrueBody lands one request in one call: the counters, then the key's spend for the month and
+// the balance view the drain carries. One script rather than a pipeline because key_spent needs
+// the incremented total, and a drain landing between two calls would split one request across two
 // pulls. The spend moves only on a key the control plane has pushed: writing to an absent hash
 // would fabricate a record that grants nothing. Values travel as strings — a Lua number is a
 // double, and would round a nano-USD total past 14 digits on its way back into a command.
 //
-// ARGV[1] cost, ARGV[2] budget, ARGV[3..] field, value, ...
+// ARGV[1] cost, ARGV[2] budget, ARGV[3] the key's spent field for the month, ARGV[4..] field, value, ...
 const accrueBody = `
 local function accrue(usage, key)
-  for i = 3, #ARGV, 2 do
+  for i = 4, #ARGV, 2 do
     redis.call('HINCRBY', usage, ARGV[i], ARGV[i + 1])
   end
   if key == nil or redis.call('EXISTS', key) == 0 then
     return 0
   end
-  redis.call('HINCRBY', key, 'spent', ARGV[1])
-  local spent = redis.call('HGET', key, 'spent')
+  redis.call('HINCRBY', key, ARGV[3], ARGV[1])
+  local spent = redis.call('HGET', key, ARGV[3])
   redis.call('HSET', usage, 'key_spent', spent, 'key_balance', ARGV[2])
   if spent ~= '0' then
     redis.call('HINCRBY', usage, 'key_balance', '-' .. spent)
@@ -57,8 +58,10 @@ end
 accrue(KEYS[2], KEYS[3])
 return 1`)
 
+// accrueArgs stamps the spend with the month it lands in. A spooled accrual replayed after the
+// month turned counts in the new one, like the control plane's own late landing does.
 func accrueArgs(a repository.Accrual) []any {
-	args := []any{a.Cost, a.Budget}
+	args := []any{a.Cost, a.Budget, spentField(time.Now())}
 	for field, n := range a.Fields {
 		args = append(args, field, strconv.FormatInt(n, 10))
 	}
