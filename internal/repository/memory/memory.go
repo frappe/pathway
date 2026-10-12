@@ -362,8 +362,12 @@ func (p providerKeys) Count(_ context.Context, id string, status int) error {
 	case "rate_limited":
 		stats.RateLimited++
 		stats.LastRateLimited = now
-	case "rejected":
-		stats.Rejected++
+	case "unauthorized":
+		stats.Unauthorized, stats.Rejected = stats.Unauthorized+1, stats.Rejected+1
+	case "unpaid":
+		stats.Unpaid, stats.Rejected = stats.Unpaid+1, stats.Rejected+1
+	case "forbidden":
+		stats.Forbidden, stats.Rejected = stats.Forbidden+1, stats.Rejected+1
 	case "ok":
 		stats.OK++
 	default:
@@ -373,7 +377,7 @@ func (p providerKeys) Count(_ context.Context, id string, status int) error {
 	return nil
 }
 
-func (p providerKeys) Stats(_ context.Context, ids []string) (map[string]domain.KeyStats, error) {
+func (p providerKeys) Take(_ context.Context, ids []string) (map[string]domain.KeyStats, error) {
 	p.s.mu.Lock()
 	defer p.s.mu.Unlock()
 	if err := p.s.failed("providerkeys"); err != nil {
@@ -382,6 +386,7 @@ func (p providerKeys) Stats(_ context.Context, ids []string) (map[string]domain.
 	stats := make(map[string]domain.KeyStats, len(ids))
 	for _, id := range ids {
 		stats[id] = p.s.KeyStats[id]
+		delete(p.s.KeyStats, id)
 	}
 	return stats, nil
 }
@@ -474,13 +479,13 @@ func (u usage) accrue(a repository.Accrual) {
 	if _, known := u.s.Keys[a.Key]; a.Key == "" || !known {
 		return
 	}
+	u.s.rollMonth(a.Key)
+	rec := u.s.Keys[a.Key]
 	rec.Spent += a.Cost
 	u.s.Keys[a.Key] = rec
 	u.s.Usage[a.Prefix]["key_spent"] = rec.Spent
 	u.s.Usage[a.Prefix]["key_balance"] = a.Budget - rec.Spent
 }
-	u.s.rollMonth(a.Key)
-	rec := u.s.Keys[a.Key]
 
 // Drain matches the real one: live counters (all, or only keys) are set aside under newID, and
 // every unacknowledged pair is answered. Nothing is deleted until Ack.

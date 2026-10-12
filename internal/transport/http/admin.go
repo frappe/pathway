@@ -219,7 +219,7 @@ func (s *Server) handleAdminProviderKeys(w http.ResponseWriter, r *http.Request)
 		respond.JSON(w, map[string]domain.KeyStats{})
 		return
 	}
-	stats, err := s.providerKeys.Stats(r.Context(), ids)
+	stats, err := s.providerKeys.Take(r.Context(), ids)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "provider key store error")
 		return

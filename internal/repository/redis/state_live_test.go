@@ -193,3 +193,30 @@ func TestPushedStateNeverExpires(t *testing.T) {
 		}
 	}
 }
+
+// Take answers what was counted and leaves nothing behind: the next read is zeros.
+func TestProviderKeysTakeClears(t *testing.T) {
+	client, _ := liveStore(t)
+	ctx, keys := context.Background(), client.Store().ProviderKeys
+	for _, status := range []int{200, 429, 401} {
+		if err := keys.Count(ctx, "k1", status); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+	}
+	stats, err := keys.Take(ctx, []string{"k1", "k2"})
+	if err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	if got := stats["k1"]; got.Requests != 3 || got.OK != 1 || got.RateLimited != 1 || got.Rejected != 1 || got.LastUsed == 0 {
+		t.Errorf("first take = %+v", got)
+	}
+	if stats["k2"] != (domain.KeyStats{}) {
+		t.Errorf("never dialled = %+v, want zeros", stats["k2"])
+	}
+	if n := client.rdb.Exists(ctx, providerKeyKey("k1")).Val(); n != 0 {
+		t.Errorf("pk:k1 still exists after take")
+	}
+	if again, _ := keys.Take(ctx, []string{"k1"}); again["k1"] != (domain.KeyStats{}) {
+		t.Errorf("second take = %+v, want zeros", again["k1"])
+	}
+}

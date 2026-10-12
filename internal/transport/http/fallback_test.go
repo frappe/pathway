@@ -594,3 +594,18 @@ func TestADeadDialLeavesItsReasonOnTheAttemptLine(t *testing.T) {
 		t.Errorf("attempt line = %v", held)
 	}
 }
+
+// A vendor refusing our credential cannot serve the model: the caller's fallback answers, and
+// the refusal is a held attempt, never the client's.
+func TestARefusedCredentialFallsBackToTheNext(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 402}, "A")
+	addBackup(t, f, jsonEngine(`{"id":"chatcmpl-2","model":"backup",`+usageObject+`}`))
+
+	resp := f.post("/v1/chat/completions", `{"model":"deepseek/chat","messages":[],"fallbacks":["backup"]}`)
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"model":"backup"`) {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
+	}
+	if len(vendor.keys) != 1 || resp.Header().Get("X-Grove-Fallback") != "backup" {
+		t.Errorf("keys dialled = %v, headers = %v", vendor.keys, resp.Header())
+	}
+}

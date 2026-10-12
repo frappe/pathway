@@ -145,12 +145,15 @@ type providerKeys struct{ rdb *redis.Client }
 func providerKeyKey(id string) string { return "pk:" + id }
 
 // Count is one transaction so a counter never lands without its class, and an attempt never
-// shows as a request that answered nothing. Lifetime: there is no expiry and no drain.
+// shows as a request that answered nothing. No expiry: Take is what clears it.
 func (p providerKeys) Count(ctx context.Context, id string, status int) error {
 	key, now := providerKeyKey(id), time.Now().Unix()
 	_, err := p.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.HIncrBy(ctx, key, "requests", 1)
 		pipe.HIncrBy(ctx, key, domain.KeyStatusClass(status), 1)
+		if domain.IsKeyRejected(status) {
+			pipe.HIncrBy(ctx, key, "rejected", 1)
+		}
 		pipe.HSet(ctx, key, "last_used", now)
 		if status == 429 {
 			pipe.HSet(ctx, key, "last_rate_limited", now)
@@ -160,17 +163,29 @@ func (p providerKeys) Count(ctx context.Context, id string, status int) error {
 	return err
 }
 
-func (p providerKeys) Stats(ctx context.Context, ids []string) (map[string]domain.KeyStats, error) {
-	stats := make(map[string]domain.KeyStats, len(ids))
-	for _, id := range ids {
-		fields, err := p.rdb.HGetAll(ctx, providerKeyKey(id)).Result()
-		if err != nil {
-			return nil, err
+// Take reads and deletes every hash in one transaction, so a Count lands either before the read
+// or after the delete — never between.
+func (p providerKeys) Take(ctx context.Context, ids []string) (map[string]domain.KeyStats, error) {
+	reads := make([]*redis.MapStringStringCmd, len(ids))
+	_, err := p.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		for i, id := range ids {
+			reads[i] = pipe.HGetAll(ctx, providerKeyKey(id))
+			pipe.Del(ctx, providerKeyKey(id))
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	stats := make(map[string]domain.KeyStats, len(ids))
+	for i, id := range ids {
+		fields := reads[i].Val()
 		stats[id] = domain.KeyStats{
 			Requests: counter(fields["requests"]), OK: counter(fields["ok"]),
 			RateLimited: counter(fields["rate_limited"]), Rejected: counter(fields["rejected"]),
-			Failed: counter(fields["failed"]), LastUsed: counter(fields["last_used"]),
+			Unauthorized: counter(fields["unauthorized"]), Unpaid: counter(fields["unpaid"]),
+			Forbidden: counter(fields["forbidden"]),
+			Failed:    counter(fields["failed"]), LastUsed: counter(fields["last_used"]),
 			LastRateLimited: counter(fields["last_rate_limited"]),
 		}
 	}

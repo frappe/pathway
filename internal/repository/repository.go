@@ -77,8 +77,9 @@ type Health interface {
 type ProviderKeys interface {
 	// Count lands one attempt on one key: the upstream's status, or 0 when the hop produced none.
 	Count(ctx context.Context, id string, status int) error
-	// Stats answers one record per id, zero for a key that never answered.
-	Stats(ctx context.Context, ids []string) (map[string]domain.KeyStats, error)
+	// Take answers one record per id, zero for a key that never answered, and clears each in the
+	// same step: the next Take starts from zero, and no attempt lands between the read and the clear.
+	Take(ctx context.Context, ids []string) (map[string]domain.KeyStats, error)
 }
 
 // Limits counts what a key has used inside each limit's current window. now picks the window:

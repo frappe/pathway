@@ -535,7 +535,8 @@ What a vendor is sent in place of what the client sent:
 - Of an upstream's response headers only a named few reach the client (see [Headers](#headers)).
 - Responses are not rewritten: same shape in, same shape out, with `model` swapped back to the name
   the client knows — whatever the vendor wrote there, since one asked by an alias answers under the
-  name behind it.
+  name behind it. The one exception is a refusal of our own credential (401/402/403, or an account
+  the vendor reports exhausted under a 400 or 429): that answer is the gateway's, below under `retry`.
 
 What each upstream was seen to do, through a gateway, and where the gateway acts on it. This is the
 one list of it: add a row or a column when a new difference shows up, with the date it was measured.
@@ -558,6 +559,7 @@ one list of it: add a row or a column when a new difference shows up, with the d
 | A `developer` message | not checked | followed (2026-10-05) | 422 ``unknown variant `developer`, expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder` `` (2026-10-05) | followed (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets it as `system` |
 | A past tool call with no `type` | not checked | 400 `Missing required parameter` (2026-10-05) | 422 ``missing field `type` `` (2026-10-05) | taken (2026-10-05) | not handled: the vendor refuses |
 | Fields only OpenAI reads: `prediction`, `prompt_cache_key`, `prompt_cache_retention`, `verbosity`, `store`, `web_search_options` | not checked | its own | all six ignored (2026-10-05) | 400 `Extra inputs are not permitted` on `prediction` and `web_search_options`; the other four ignored (2026-10-05) | `web_search_options` is a 400 before the dial where the route's `denied_tools` lists it (OpenAI's does); the rest not handled |
+| The account behind our key is out of credit | n/a | 429 `insufficient_quota` | 402 `Insufficient Balance` | not checked | `retry`, from `domain.ClassifyUpstream`: read as the 402 it is (Anthropic's is a 400 `credit balance`, read the same), the key retires, and the client gets the gateway's 502 `upstream account unpaid`; the vendor's words go to the error log. From the vendors' docs and Bifrost's fixtures (2026-10-12), not yet measured through a gateway |
 | A remote image URL | not checked | not checked | downloads it itself. A Pexels photo was a 400 `unsupported image` 9 times in 12: Pexels serves AVIF to an `Accept` that offers it and JPEG otherwise, and DeepSeek takes JPEG, PNG, GIF and WebP only, judged by the file's bytes ([its guide](https://api-docs.deepseek.com/guides/vision)). With `fm=jpg` in the URL, 8 of 8 were taken. A Wikimedia PNG is a 400 `Failed to download image`. The image as base64 is taken. Only flash reads images: pro answers 200 and says it cannot see one (2026-10-05) | the Pexels photo is taken, the Wikimedia PNG a 500; base64 is taken (2026-10-05) | not handled: the gateway downloads nothing |
 
 What Baseten bills for a stream that was cut has not been compared with its own usage report.
@@ -1176,7 +1178,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `sticky:<session>` | string, 30m | the gateway |
 | `inflight:<engine>` | sorted set, member = request id; never a vendor's URL | the gateway |
 | `health:<target>` | counter, 60s | the gateway |
-| `pk:<key id>` | hash, lifetime | the gateway — what each vendor credential answered; read by `GET /grove-admin/provider-keys` |
+| `pk:<key id>` | hash, until taken | the gateway — what each vendor credential answered; read and deleted by `GET /grove-admin/provider-keys` |
 
 Nothing the control plane pushes carries a TTL. The push is hash-gated, so a record that expired
 would stay missing until its section changed; only gateway-owned keys expire
@@ -1244,8 +1246,9 @@ since the process started). The control plane lands or records each dead line an
 ack — `"dead": ["<request id>", ...]` beside `"acks"` — which removes it; `count` includes them.
 
 `GET /grove-admin/provider-keys?ids=a,b` answers `{id: {requests, ok, rate_limited, rejected,
-failed, last_used, last_rate_limited}}` per vendor credential, lifetime and never drained; an id
-never dialled is zeros. The control plane sums it across stores for the operator.
+failed, last_used, last_rate_limited}}` per vendor credential since the last call, and deletes
+each `pk:<key id>` in the same transaction, so the next call starts from zero; an id never dialled
+is zeros. A pull that does not land is lost — these are stats, not usage.
 
 `POST /grove-admin/spend-adjust {"key", "delta", "id"}` corrects one key's `spent:<YYYY-MM>` for
 the current month on this store by `delta` nano-USD, once per `id` (`key` is the record id, sha256 hex) — a retry answers
@@ -1369,12 +1372,20 @@ is a second strategy. A session still changes key between requests, so a vendor'
 per credential. The `retry` stage then walks on round the ring from the loser, on the key's own
 failures only: a **429** spends the key — each is tried once, then the rate-limited ones are opened
 once more, since a quota window may have slid — and a **401/402/403** retires it for the rest of the
-request. The second exhaustion is the
-client's answer, headers and body as the vendor sent them. Nothing else is retried: a 502 on one
-key is a 502 on the next. A held attempt leaks nothing to the client; the request is billed once
-whatever it walked, and the access line's `attempts` counts the dials. Every attempt lands in
-`pk:<key id>` (`requests`, `ok`, `rate_limited`, `rejected`, `failed`, `last_used`,
-`last_rate_limited`), lifetime, which `GET /grove-admin/provider-keys?ids=a,b` answers.
+request. A provider row's 400 or 429 is read to its end (64 KiB) before it is classed, because an
+exhausted account hides under both — OpenAI's 429 `insufficient_quota`, Anthropic's 400 "credit
+balance" — and reads as the 402 it is (`domain.ClassifyUpstream`). A second 429 exhaustion is the
+client's answer, headers and body as the vendor sent them. A 401/402/403 the ring cannot move off —
+every key refused, a single key, an engine's own — never is: the client gets the gateway's **502**
+`api_error`, `upstream credential rejected` / `upstream account unpaid` /
+`upstream credential lacks permission`, the access line says `reason="credential unauthorized|unpaid|forbidden"`
+with the vendor's status in `upstream_status`, and the error log keeps the vendor's own words with
+the key id (`upstream refused the credential`). Nothing else is retried: a 502 on one key is a 502
+on the next. A held attempt leaks nothing to the client; the request is billed once whatever it
+walked, and the access line's `attempts` counts the dials. Every attempt lands in `pk:<key id>`
+(`requests`, `ok`, `rate_limited`, `unauthorized`, `unpaid`, `forbidden`, `rejected` — the three
+before it together — `failed`, `last_used`, `last_rate_limited`) until
+`GET /grove-admin/provider-keys?ids=a,b` takes it.
 
 `dialect` is the API shape the row speaks, `openai` or `anthropic`, and nothing translates between
 them: a request reaches only rows of its surface's dialect. A vendor with both fronts is two rows. On

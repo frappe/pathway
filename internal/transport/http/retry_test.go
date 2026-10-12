@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,7 +18,9 @@ import (
 // dials, in order; the fixture's `seen` holds the last dial whole.
 type keyedVendor struct {
 	answers map[string]int
-	keys    []string
+	// bodies is what a refusal says, per key, when the test cares; else "refused <key>".
+	bodies map[string]string
+	keys   []string
 }
 
 func (v *keyedVendor) handler(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +30,11 @@ func (v *keyedVendor) handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", key)
 		w.WriteHeader(status)
-		_, _ = w.Write([]byte(`{"error":{"message":"refused ` + key + `"}}`))
+		body, said := v.bodies[key]
+		if !said {
+			body = `{"error":{"message":"refused ` + key + `"}}`
+		}
+		_, _ = w.Write([]byte(body))
 		return
 	}
 	jsonEngine(`{"id":"chatcmpl-1",`+usageObject+`}`)(w, r)
@@ -71,6 +78,17 @@ func rotated(t *testing.T, f *fixture, vendor *keyedVendor) *httptest.ResponseRe
 }
 
 func (f *fixture) keyStats(id string) domain.KeyStats { return f.store.KeyStats["id-"+id] }
+
+// keyCounts is a key's stats by field name, so a test can name the class it expects.
+func (f *fixture) keyCounts(t *testing.T, id string) map[string]int64 {
+	t.Helper()
+	raw, _ := json.Marshal(f.keyStats(id))
+	counts := map[string]int64{}
+	if err := json.Unmarshal(raw, &counts); err != nil {
+		t.Fatalf("stats %s: %v", id, err)
+	}
+	return counts
+}
 
 // Requests take the keys in turn, so a vendor's per-key limits are drawn on evenly.
 func TestRequestsTakeTheKeysInTurn(t *testing.T) {
@@ -226,10 +244,12 @@ func TestAGoneClientIsNotRetried(t *testing.T) {
 	}
 }
 
-// The control plane reads the counts by id; a key never dialled is zeros, not absent.
+// The control plane takes the counts by id; a key never dialled is zeros, not absent, and a
+// second read starts from zero.
 func TestProviderKeyStatsReadBack(t *testing.T) {
 	store := memory.New()
-	store.KeyStats["k1"] = domain.KeyStats{Requests: 3, OK: 2, RateLimited: 1, LastUsed: 100, LastRateLimited: 90}
+	taken := domain.KeyStats{Requests: 3, OK: 2, RateLimited: 1, LastUsed: 100, LastRateLimited: 90}
+	store.KeyStats["k1"] = taken
 	handler := adminFixture(t, store)
 
 	w := adminCall(t, handler, http.MethodGet, "/grove-admin/provider-keys?ids=k1,k2", "")
@@ -237,7 +257,149 @@ func TestProviderKeyStatsReadBack(t *testing.T) {
 	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &stats) != nil {
 		t.Fatalf("GET = %d: %s", w.Code, w.Body)
 	}
-	if len(stats) != 2 || stats["k1"] != store.KeyStats["k1"] || stats["k2"] != (domain.KeyStats{}) {
+	if len(stats) != 2 || stats["k1"] != taken || stats["k2"] != (domain.KeyStats{}) {
 		t.Errorf("stats = %+v", stats)
+	}
+
+	w = adminCall(t, handler, http.MethodGet, "/grove-admin/provider-keys?ids=k1", "")
+	if json.Unmarshal(w.Body.Bytes(), &stats) != nil || stats["k1"] != (domain.KeyStats{}) {
+		t.Errorf("second read = %s, want zeros", w.Body)
+	}
+}
+
+// A credential turned away on every key — unauthorised, unpaid or forbidden — is the gateway's
+// answer, in its own words: the vendor's text and headers never reach the client, the access
+// line says which refusal it was, and the key's stats count it under that class.
+func TestEveryKeyRefusedIsTheGatewaysAnswer(t *testing.T) {
+	for status, want := range map[int]struct{ class, message string }{
+		401: {"unauthorized", "upstream credential rejected"},
+		402: {"unpaid", "upstream account unpaid"},
+		403: {"forbidden", "upstream credential lacks permission"},
+	} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			f, vendor := keyedFixture(t, map[string]int{"A": status, "B": status}, "A", "B")
+			access := captureAccess(t, f)
+			resp := vendor.chat(f)
+
+			if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), want.message) {
+				t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
+			}
+			if strings.Contains(resp.Body.String(), "refused") || resp.Header().Get("Retry-After") != "" {
+				t.Errorf("the vendor's answer reached the client: %s %v", resp.Body, resp.Header())
+			}
+			if len(vendor.keys) != 2 {
+				t.Errorf("keys dialled = %v, want each once", vendor.keys)
+			}
+			for _, key := range []string{"A", "B"} {
+				if counts := f.keyCounts(t, key); counts[want.class] != 1 || counts["rejected"] != 1 || counts["ok"] != 0 {
+					t.Errorf("stats %s = %v, want one %s", key, counts, want.class)
+				}
+			}
+			lines := accessLines(t, access)
+			last := lines[len(lines)-1]
+			if last["status"] != 502. || last["upstream_status"] != float64(status) || last["reason"] != "credential "+want.class {
+				t.Errorf("access line = %v", last)
+			}
+		})
+	}
+}
+
+// One key has nowhere to go, and its refusal is still not the client's to read.
+func TestASingleKeyRefusedIsTheGatewaysAnswer(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 402}, "A")
+	resp := vendor.chat(f)
+
+	if resp.Code != http.StatusBadGateway || strings.Contains(resp.Body.String(), "refused") || len(vendor.keys) != 1 {
+		t.Errorf("status = %d, body = %s, keys dialled = %v", resp.Code, resp.Body, vendor.keys)
+	}
+	if a := f.keyStats("A"); a.Requests != 1 || a.Unpaid != 1 || a.Rejected != 1 {
+		t.Errorf("stats A = %+v", a)
+	}
+}
+
+// An engine refusing our key is as little the caller's fault as a vendor doing it: the same
+// answer, and nothing counted — an engine's one credential has no id.
+func TestAnEngineRefusingItsKeyIsTheGatewaysAnswer(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"bad api key"}`))
+	})
+	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+
+	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "upstream credential rejected") {
+		t.Errorf("status = %d, body = %s", resp.Code, resp.Body)
+	}
+	if strings.Contains(resp.Body.String(), "bad api key") || len(f.store.KeyStats) != 0 {
+		t.Errorf("body = %s, stats = %v", resp.Body, f.store.KeyStats)
+	}
+}
+
+const (
+	quotaBody  = `{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}`
+	creditBody = `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`
+)
+
+// OpenAI reports an exhausted account as a 429: read, it retires the key like a 402 would — the
+// next key answers, and the first is counted unpaid, not rate-limited.
+func TestAnExhaustedAccountUnderA429RetiresTheKey(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 429}, "A", "B")
+	vendor.bodies = map[string]string{"A": quotaBody}
+	access := captureAccess(t, f)
+	resp := vendor.chat(f)
+
+	if resp.Code != http.StatusOK || strings.Join(vendor.keys, ",") != "A,B" {
+		t.Fatalf("status = %d, keys dialled = %v", resp.Code, vendor.keys)
+	}
+	if a := f.keyStats("A"); a.Unpaid != 1 || a.Rejected != 1 || a.RateLimited != 0 {
+		t.Errorf("stats A = %+v", a)
+	}
+	attempt := accessLines(t, access)[0]
+	if attempt["upstream_status"] != 429. || attempt["reason"] != "credential unpaid" || attempt["moved"] != "key" {
+		t.Errorf("attempt line = %v", attempt)
+	}
+}
+
+// Anthropic reports one as a 400. Every key out of credit is the gateway's answer, and the
+// vendor's billing page never reaches the client.
+func TestAnExhaustedAccountUnderA400IsTheGatewaysAnswer(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 400, "B": 400}, "A", "B")
+	vendor.bodies = map[string]string{"A": creditBody, "B": creditBody}
+	resp := vendor.chat(f)
+
+	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "upstream account unpaid") {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
+	}
+	if strings.Contains(resp.Body.String(), "Billing") || len(vendor.keys) != 2 {
+		t.Errorf("body = %s, keys dialled = %v", resp.Body, vendor.keys)
+	}
+}
+
+// A 400 the request earned is the caller's, as the vendor wrote it: read, not moved, not counted
+// against the key.
+func TestACallersOwn400IsRelayed(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 400}, "A", "B")
+	vendor.bodies = map[string]string{"A": `{"error":{"message":"messages[0].content is invalid","type":"invalid_request_error"}}`}
+	resp := vendor.chat(f)
+
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "messages[0]") || len(vendor.keys) != 1 {
+		t.Errorf("status = %d, body = %s, keys dialled = %v", resp.Code, resp.Body, vendor.keys)
+	}
+	if resp.Header().Get("Retry-After") != "A" {
+		t.Errorf("the vendor's headers were lost: %v", resp.Header())
+	}
+	if a := f.keyStats("A"); a.OK != 1 || a.Rejected != 0 {
+		t.Errorf("stats A = %+v", a)
+	}
+}
+
+// A 400 longer than the read cap is decided on its head and still reaches the client whole.
+func TestALong400IsRelayedWhole(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 400}, "A")
+	long := `{"error":{"message":"` + strings.Repeat("x", 100<<10) + `"}}`
+	vendor.bodies = map[string]string{"A": long}
+	resp := vendor.chat(f)
+
+	if resp.Code != http.StatusBadRequest || resp.Body.String() != long {
+		t.Errorf("status = %d, body length = %d of %d", resp.Code, resp.Body.Len(), len(long))
 	}
 }
