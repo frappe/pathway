@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -159,7 +160,7 @@ func TestNonStreamingRequestIsMetered(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	for field, want := range map[string]int64{
 		"request_count": 1, "prompt_tokens": 100, "completion_tokens": 20,
 		"total_tokens": 120, "cached_tokens": 80,
@@ -280,7 +281,7 @@ func TestAStreamIsRelayedUnmodifiedAndStillMetered(t *testing.T) {
 	if resp.Body.String() != want {
 		t.Errorf("stream was altered.\n got: %q\nwant: %q", resp.Body.String(), want)
 	}
-	if got := f.store.Usage["abc123"]["total_tokens"]; got != 120 {
+	if got := f.store.UsageOf("abc123")["total_tokens"]; got != 120 {
 		t.Errorf("total_tokens = %d, want 120 — the usage frame was not captured", got)
 	}
 }
@@ -299,20 +300,31 @@ func TestAUsageFrameSplitAcrossWritesIsStillCaptured(t *testing.T) {
 	})
 	f.post("/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
 
-	if got := f.store.Usage["abc123"]["total_tokens"]; got != 120 {
+	if got := f.store.UsageOf("abc123")["total_tokens"]; got != 120 {
 		t.Errorf("total_tokens = %d, want 120", got)
 	}
 }
 
+// firstByte is a client that says when the first byte of the answer reached it: the upstream's
+// 200 is on record by then, so a client that leaves after it abandons a served request.
+type firstByte struct {
+	*httptest.ResponseRecorder
+	once sync.Once
+	got  chan struct{}
+}
+
+func (c *firstByte) Write(b []byte) (int, error) {
+	c.once.Do(func() { close(c.got) })
+	return c.ResponseRecorder.Write(b)
+}
+
 // The case a metering call placed after the proxy would miss, and the one that leaves an engine
-// counted as busy forever.
+// counted as busy forever. The upstream served the request, so it is still a request.
 func TestAClientDisconnectStillReleasesTheSlot(t *testing.T) {
-	started := make(chan struct{})
 	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
 		w.(http.Flusher).Flush()
-		close(started)
 		<-r.Context().Done() // hold the stream open until the client goes away
 	})
 
@@ -321,13 +333,14 @@ func TestAClientDisconnectStillReleasesTheSlot(t *testing.T) {
 		strings.NewReader(`{"model":"qwen3-4b","stream":true}`)).WithContext(ctx)
 	r.Header.Set("Authorization", "Bearer "+secret)
 
+	client := &firstByte{ResponseRecorder: httptest.NewRecorder(), got: make(chan struct{})}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.handler.ServeHTTP(httptest.NewRecorder(), r)
+		f.handler.ServeHTTP(client, r)
 	}()
 
-	<-started
+	<-client.got
 	cancel()
 	<-done
 
@@ -335,7 +348,7 @@ func TestAClientDisconnectStillReleasesTheSlot(t *testing.T) {
 	if got := len(f.store.InFlight[engineURL]); got != 0 {
 		t.Errorf("in-flight = %d after a disconnect — the engine stays out of rotation", got)
 	}
-	if f.store.Usage["abc123"]["request_count"] != 1 {
+	if f.store.UsageOf("abc123")["request_count"] != 1 {
 		t.Error("an abandoned request was not counted at all")
 	}
 }
@@ -380,7 +393,7 @@ func TestAnIngressRouteGetsHeadersAndAHashedSession(t *testing.T) {
 	}
 	// The replica the ingress chose, off its response header — the only way usage reaches a
 	// placement this gateway never picked.
-	if got := f.store.Usage["abc123"]["m:total_tokens:MD-00099"]; got != 120 {
+	if got := f.store.UsageOf("abc123")["m:total_tokens:MD-00099"]; got != 120 {
 		t.Errorf("m:total_tokens:MD-00099 = %d, want 120", got)
 	}
 }

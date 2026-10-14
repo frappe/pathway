@@ -94,7 +94,32 @@ func TestAStreamIsCapturedWithoutBeingAltered(t *testing.T) {
 	if line["output"] != frames {
 		t.Errorf("captured output = %q", line["output"])
 	}
-	if f.store.Usage["abc123"]["total_tokens"] != 120 {
-		t.Errorf("metering lost under the capture: %v", f.store.Usage["abc123"])
+	if f.store.UsageOf("abc123")["total_tokens"] != 120 {
+		t.Errorf("metering lost under the capture: %v", f.store.UsageOf("abc123"))
+	}
+}
+
+// The opt-in is the team's once its record is there: a key flagged off logs when its team is on,
+// and a key flagged on logs nothing when its team is off.
+func TestTheTeamRecordDecidesTheOptIn(t *testing.T) {
+	prompt := `{"model":"qwen3-4b","messages":[{"role":"user","content":"hi"}]}`
+	for _, tc := range []struct {
+		name       string
+		key, team  bool
+		wantLogged bool
+	}{
+		{"team on, key off", false, true, true},
+		{"team off, key on", true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, buf := payloadFixture(t, jsonEngine(`{"id":"chatcmpl-1",`+usageObject+`}`), tc.key)
+			f.store.Teams["test-team"] = domain.TeamRecord{LogPayloads: tc.team}
+			if resp := f.post("/v1/chat/completions", prompt); resp.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", resp.Code, resp.Body)
+			}
+			if logged := strings.Contains(buf.String(), `"prompt"`); logged != tc.wantLogged {
+				t.Errorf("logged = %v, want %v: %s", logged, tc.wantLogged, buf)
+			}
+		})
 	}
 }

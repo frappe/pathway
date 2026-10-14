@@ -35,8 +35,9 @@ type Report struct {
 	Budget  int64
 	// Limits is the key's rate limits: the answer's tokens are debited from the token ones.
 	Limits []domain.Limit
-	// How the hop went, for passive ejection: the upstream's status, and the X-Grove-Reason an
-	// ingress sets when it is healthy but has no replica for this model.
+	// How the hop went: the upstream's status, which decides whether the request is accounted at
+	// all (domain.IsServed) and, with the X-Grove-Reason an ingress sets when it is healthy but has
+	// no replica for this model, how the target is scored for passive ejection.
 	Target         string
 	UpstreamStatus string
 	Reason         string
@@ -76,9 +77,10 @@ func (s *Service) debit(ctx context.Context, rep Report, tokens int64) {
 // returned to the caller: the request is over, and failing it retroactively helps nobody.
 func (s *Service) Record(ctx context.Context, rep Report) {
 	s.recordOutcome(ctx, rep)
-	if rep.Prefix == "" {
-		// No bucket to accrue to. The outcome above still counted — how a target behaves is not
-		// contingent on the usage record that happened to ride along with the report.
+	if rep.Prefix == "" || !domain.IsServed(rep.UpstreamStatus) {
+		// No bucket to accrue to, or nothing to accrue: an upstream that refused, failed or never
+		// answered served the caller nothing, and is not a request of theirs. The outcome above
+		// still counted — how a target behaves is not contingent on the usage that rode along.
 		return
 	}
 	fields, trusted := UsageFields(rep)

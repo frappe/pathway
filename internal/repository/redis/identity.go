@@ -13,28 +13,35 @@ import (
 	"github.com/phot0n/pathway/internal/repository"
 )
 
-// key:<sha256(secret)> and model_group:<Model Group name>. The key carries its own policy — what
-// it may call, where, how fast, and the cap it spends against — because a key lives in one
-// geography and so on one store, which is what lets that store gate the cap exactly. The group is
-// its own record so a grant shared by many keys is one write.
+// key:<sha256(secret)>, team:<Central Team> and model_group:<Model Group name>. The key carries
+// its own policy — what it may call, where, how fast, and the cap it spends against — because a
+// key lives in one geography and so on one store, which is what lets that store gate the cap
+// exactly. The team is its own record so a verdict on the team is one write, not one per key; the
+// group is its own record so a grant shared by many keys is one write.
 
 type keys struct{ rdb *redis.Client }
 
-// resolveScript follows a credential to its groups in one call: which groups to read comes from
-// the key record's list, so a pipeline could not join them. It only fetches; every decision over
-// what comes back is made in Go. Replies {key, {name, group, ...}}, each record as HGETALL
-// answers it and empty when absent.
+// resolveScript follows a credential to its team and its groups in one call: which to read comes
+// off the key record, so a pipeline could not join them. It only fetches; every decision over what
+// comes back is made in Go. Replies {key, team, {name, group, ...}}, each record as HGETALL answers
+// it and empty when absent.
 //
-// It reads model_group: keys it is not handed, so the store must be a single Redis.
+// It reads team: and model_group: keys it is not handed, so the store must be a single Redis.
 //
 // KEYS[1] key:<meter id>
 var resolveScript = redis.NewScript(`
 local key = redis.call('HGETALL', KEYS[1])
-local names = ''
+local names, team = '', ''
 for i = 1, #key, 2 do
   if key[i] == 'group' then
     names = key[i + 1]
+  elseif key[i] == 'team' then
+    team = key[i + 1]
   end
+end
+local teamrec = {}
+if team ~= '' then
+  teamrec = redis.call('HGETALL', 'team:' .. team)
 end
 local groups = {}
 for name in string.gmatch(names, '[^,]+') do
@@ -44,7 +51,7 @@ for name in string.gmatch(names, '[^,]+') do
     groups[#groups + 1] = redis.call('HGETALL', 'model_group:' .. name)
   end
 end
-return {key, groups}
+return {key, teamrec, groups}
 `)
 
 func (k keys) Resolve(ctx context.Context, meterID string) (repository.Holder, bool, error) {
@@ -52,8 +59,8 @@ func (k keys) Resolve(ctx context.Context, meterID string) (repository.Holder, b
 	if err != nil {
 		return repository.Holder{}, false, err
 	}
-	if len(res) != 2 {
-		return repository.Holder{}, false, fmt.Errorf("resolve answered %d records, want 2", len(res))
+	if len(res) != 3 {
+		return repository.Holder{}, false, fmt.Errorf("resolve answered %d records, want 3", len(res))
 	}
 	key := hashOf(res[0])
 	if len(key) == 0 {
@@ -64,7 +71,14 @@ func (k keys) Resolve(ctx context.Context, meterID string) (repository.Holder, b
 		return repository.Holder{}, false, err
 	}
 	holder := repository.Holder{Key: rec, Groups: map[string]domain.GroupRecord{}}
-	groups, _ := res[1].([]any)
+	if team := hashOf(res[1]); len(team) > 0 {
+		teamRec, err := teamRecord(team)
+		if err != nil {
+			return repository.Holder{}, false, err
+		}
+		holder.Team = &teamRec
+	}
+	groups, _ := res[2].([]any)
 	for i := 0; i+1 < len(groups); i += 2 {
 		name, _ := groups[i].(string)
 		holder.Groups[name] = domain.GroupRecord{Models: domain.ModelSet(hashOf(groups[i+1])["models"])}
@@ -112,6 +126,31 @@ func keyRecord(h map[string]string, spent string) (domain.KeyRecord, error) {
 		Spent:       int64Field(h, spent),
 		Limits:      limits,
 	}, nil
+}
+
+// teamRecord reads a team as HGETALL answered it. A limit that does not read was written by a
+// newer binary, and is refused the way a key's is.
+func teamRecord(h map[string]string) (domain.TeamRecord, error) {
+	limits, err := domain.ParseLimits(h["limits"])
+	if err != nil {
+		return domain.TeamRecord{}, err
+	}
+	return domain.TeamRecord{
+		Limited:     strings.TrimSpace(h["limited"]) == "1",
+		Prepaid:     strings.TrimSpace(h["prepaid"]) == "1",
+		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
+		Limits:      limits,
+	}, nil
+}
+
+// writeTeam lands one team record whole.
+func writeTeam(ctx context.Context, p redis.Pipeliner, rec repository.TeamUpsert) {
+	p.HSet(ctx, "team:"+rec.Team, map[string]any{
+		"limited":      flag(rec.Limited),
+		"prepaid":      flag(rec.Prepaid),
+		"log_payloads": flag(rec.LogPayloads),
+		"limits":       rec.Limits, // always written: blank is what clears a removed limit
+	})
 }
 
 // keyFields is what a push writes. No `spent:<month>` is among them: those are this box's own

@@ -135,7 +135,7 @@ func TestTheWinnerGetsTheBodyAgain(t *testing.T) {
 	if body["model"] != "deepseek-chat" || body["messages"] == nil {
 		t.Errorf("winner's body = %v, want the client's, with the upstream id", body)
 	}
-	if got := f.store.Usage["abc123"]["request_count"]; got == 0 {
+	if got := f.store.UsageOf("abc123")["request_count"]; got == 0 {
 		t.Errorf("request_count = %d", got)
 	}
 }
@@ -144,7 +144,7 @@ func TestTheWinnerGetsTheBodyAgain(t *testing.T) {
 func TestARotatedRequestIsBilledOnce(t *testing.T) {
 	f, vendor := keyedFixture(t, map[string]int{"A": 429}, "A", "B")
 	rotated(t, f, vendor)
-	runs := f.store.Usage["abc123"]["request_count"]
+	runs := f.store.UsageOf("abc123")["request_count"]
 	// One post, two dials: the rotated request must not have been billed as two.
 	var attempts int64
 	for id := range f.store.KeyStats {
@@ -197,8 +197,8 @@ func TestEveryKeyRateLimitedRelaysTheLastAnswer(t *testing.T) {
 	if len(vendor.keys) != 4 {
 		t.Errorf("keys dialled = %v, want each twice", vendor.keys)
 	}
-	if got := f.store.Usage["abc123"]["request_count"]; got != 1 {
-		t.Errorf("request_count = %d", got)
+	if got := f.store.UsageOf("abc123")["request_count"]; got != 0 {
+		t.Errorf("request_count = %d, want 0: nobody served the caller", got)
 	}
 }
 

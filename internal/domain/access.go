@@ -46,6 +46,27 @@ type GroupRecord struct {
 	Models map[string]bool // models the group grants
 }
 
+// TeamRecord is team:<Central Team id>: what is the team's and holds for every key it owns, so a
+// team suspended or marked Free is one record, not one field on each of its keys. Verdicts and
+// settings only — nothing here counts; the cap and its spend stay on the key.
+type TeamRecord struct {
+	Limited     bool    // the team's balance is spent → 402 on every key it holds
+	Prepaid     bool    // its keys are gated on their caps
+	LogPayloads bool    // its keys' prompts and outputs go to the payload log
+	Limits      []Limit // what a key with no limits of its own runs under; none = uncapped
+}
+
+// Under is the key's policy with its team's applied: the team's verdicts and flags stand in for
+// the copies a key record carried before teams were pushed, and its limits where the key names
+// none of its own.
+func (k KeyRecord) Under(team TeamRecord) KeyRecord {
+	k.Limited, k.Prepaid, k.LogPayloads = team.Limited, team.Prepaid, team.LogPayloads
+	if len(k.Limits) == 0 {
+		k.Limits = team.Limits
+	}
+	return k
+}
+
 // Exhausted reports whether the key has run out: the control plane's verdict on its team, or this
 // box's own view of the key's cap for the month.
 func (k KeyRecord) Exhausted() bool { return k.Limited || (k.Prepaid && k.Spent >= k.Budget) }
@@ -53,6 +74,10 @@ func (k KeyRecord) Exhausted() bool { return k.Limited || (k.Prepaid && k.Spent 
 // MonthOf names the month a spend counts in, "2006-01" in UTC: the field the store keeps a key's
 // Spent under, and what the control plane's monthly cap is for.
 func MonthOf(t time.Time) string { return t.UTC().Format("2006-01") }
+
+// DayOf names the day a request's usage counts in, "2006-01-02" in UTC: the bucket the store keeps
+// a key's live counters under, and the day the control plane records them on.
+func DayOf(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 // ExhaustedDenial is the 402 for an exhausted key, nil otherwise. The control plane's verdict and
 // this box's own balance answer alike: a client cannot tell, and should not need to, which side

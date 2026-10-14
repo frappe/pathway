@@ -30,6 +30,7 @@ func (s state) Apply(ctx context.Context, push repository.StatePush) (repository
 	held := map[string][]string{}
 	for prefix, present := range map[string]bool{
 		"model_group:": push.Groups != nil,
+		"team:":        push.Teams != nil,
 		"key:":         push.Keys != nil,
 		"deploy:":      push.Routes != nil,
 	} {
@@ -46,6 +47,9 @@ func (s state) Apply(ctx context.Context, push repository.StatePush) (repository
 	_, err := s.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
 		if push.Groups != nil {
 			counts.Groups = applyGroups(ctx, p, *push.Groups, held["model_group:"])
+		}
+		if push.Teams != nil {
+			counts.Teams = applyTeams(ctx, p, push.Teams, held["team:"])
 		}
 		if push.Keys != nil {
 			counts.Keys = applyKeys(ctx, p, push.Keys, held["key:"])
@@ -72,6 +76,28 @@ func applyGroups(ctx context.Context, p redis.Pipeliner, push repository.GroupsP
 	deleteUnnamed(ctx, p, "model_group:", held, func(id string) bool { return named[id] })
 	p.HSet(ctx, stateHashKey, "groups", push.Hash)
 	return len(named)
+}
+
+// applyTeams lands the team buckets as applyKeys lands the key buckets: a bucket prunes only its
+// own members, and one pushed empty drops its hash.
+func applyTeams(ctx context.Context, p redis.Pipeliner, buckets map[string]repository.TeamBucket, held []string) int {
+	named, count := map[string]bool{}, 0
+	for label, bucket := range buckets {
+		for _, rec := range bucket.Records {
+			if rec.Team == "" {
+				continue
+			}
+			named[rec.Team] = true
+			count++
+			writeTeam(ctx, p, rec)
+		}
+		setBucketHash(ctx, p, "teams:"+label, bucket.Hash, len(bucket.Records))
+	}
+	deleteUnnamed(ctx, p, "team:", held, func(id string) bool {
+		_, pushed := buckets[domain.BucketOf(id)]
+		return !pushed || named[id]
+	})
+	return count
 }
 
 func applyKeys(ctx context.Context, p redis.Pipeliner, buckets map[string]repository.KeyBucket, held []string) int {

@@ -120,7 +120,7 @@ func TestProviderUsageIsRecordedAgainstTheGroveID(t *testing.T) {
 	f := providerFixture(t)
 	f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5"}`)
 
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	if usage["m:total_tokens:anthropic/claude-4-5"] == 0 {
 		t.Errorf("no usage against the Grove id; usage = %v", usage)
 	}
@@ -163,8 +163,8 @@ func TestAProviderStreamSpeaksTheGroveModelIDInEveryFrame(t *testing.T) {
 	if resp.Body.String() != want {
 		t.Errorf("stream altered beyond the model swap.\n got: %q\nwant: %q", resp.Body.String(), want)
 	}
-	if f.store.Usage["abc123"]["m:total_tokens:anthropic/claude-4-5"] == 0 {
-		t.Errorf("usage lost under the swap: %v", f.store.Usage["abc123"])
+	if f.store.UsageOf("abc123")["m:total_tokens:anthropic/claude-4-5"] == 0 {
+		t.Errorf("usage lost under the swap: %v", f.store.UsageOf("abc123"))
 	}
 }
 

@@ -7,21 +7,25 @@ import (
 	"time"
 
 	"github.com/phot0n/pathway/internal/domain"
+	"github.com/phot0n/pathway/internal/repository"
 	"github.com/phot0n/pathway/internal/repository/memory"
 )
 
-// The pull as the control plane runs it: every unacknowledged key comes back grouped by drain id,
-// an ack keeps the named keys for the retention window, and an unacked key keeps coming back.
+// The pull as the control plane runs it: every unacknowledged bucket comes back grouped by drain
+// id, an ack names the buckets it recorded and keeps them for the retention window, an unacked one
+// keeps coming back, and ?keys= names prefixes, which match their buckets.
 func TestTheDrainAckCycle(t *testing.T) {
 	store := memory.New()
-	store.Usage["K-1"] = map[string]int64{"request_count": 3}
-	store.Usage["K-2"] = map[string]int64{"request_count": 1}
+	day := domain.DayOf(time.Now())
+	k1 := repository.UsageBucket("K-1", time.Now())
+	store.Usage[k1] = map[string]int64{"request_count": 3}
+	store.Usage["K-2"] = map[string]int64{"request_count": 1} // from before buckets carried a day
 	handler := adminFixture(t, store)
 
-	get := func(path string) map[string]map[string]map[string]string {
+	get := func(path string) repository.Drains {
 		w := adminCall(t, handler, http.MethodGet, path, "")
 		var p struct {
-			Drains map[string]map[string]map[string]string `json:"drains"`
+			Drains repository.Drains `json:"drains"`
 		}
 		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &p) != nil || p.Drains == nil {
 			t.Fatalf("GET %s = %d: %s", path, w.Code, w.Body)
@@ -35,10 +39,10 @@ func TestTheDrainAckCycle(t *testing.T) {
 	var id string
 	for id = range first {
 	}
-	if first[id]["K-1"]["request_count"] != "3" || first[id]["K-2"]["request_count"] != "1" {
+	if first[id]["K-1"][day]["request_count"] != "3" || first[id]["K-2"][""]["request_count"] != "1" {
 		t.Fatalf("first = %+v", first)
 	}
-	w := adminCall(t, handler, http.MethodPost, "/grove-admin/usage/ack", `{"acks": {"`+id+`": ["K-1"]}}`)
+	w := adminCall(t, handler, http.MethodPost, "/grove-admin/usage/ack", `{"acks": {"`+id+`": {"K-1": ["`+day+`"]}}}`)
 	var ack struct {
 		OK    bool `json:"ok"`
 		Count int  `json:"count"`
@@ -46,8 +50,8 @@ func TestTheDrainAckCycle(t *testing.T) {
 	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &ack) != nil || !ack.OK || ack.Count != 1 {
 		t.Fatalf("ack = %d: %s", w.Code, w.Body)
 	}
-	if store.Retained[id+":K-1"] != 7*24*time.Hour {
-		t.Errorf("retained %v, want the default week", store.Retained[id+":K-1"])
+	if store.Retained[id+":"+k1] != 7*24*time.Hour {
+		t.Errorf("retained %v, want the default week", store.Retained[id+":"+k1])
 	}
 	if after := get("/grove-admin/usage"); len(after) != 1 || after[id]["K-2"] == nil || after[id]["K-1"] != nil {
 		t.Errorf("after ack = %+v, want only the unacked K-2 again", after)
@@ -56,8 +60,46 @@ func TestTheDrainAckCycle(t *testing.T) {
 		t.Errorf("K-1 alone = %+v, want nothing: it was acked and nothing new was metered", mine)
 	}
 	// A retried ack is harmless.
-	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/usage/ack", `{"acks": {"`+id+`": ["K-1"]}}`); w.Code != http.StatusOK {
+	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/usage/ack", `{"acks": {"`+id+`": {"K-1": ["`+day+`"]}}}`); w.Code != http.StatusOK {
 		t.Errorf("retried ack = %d", w.Code)
+	}
+}
+
+// A peek is the pull's answer without the pull: the control plane reads what the box holds for a
+// check it makes now, and nothing is set aside, so the next pull finds it all.
+func TestAPeekMovesNothing(t *testing.T) {
+	store := memory.New()
+	day := domain.DayOf(time.Now())
+	store.Usage[repository.UsageBucket("K-1", time.Now())] = map[string]int64{"request_count": 3, "cost": 300}
+	store.Usage[repository.UsageBucket("K-2", time.Now())] = map[string]int64{"request_count": 1}
+	handler := adminFixture(t, store)
+	get := func(path string) repository.Drains {
+		w := adminCall(t, handler, http.MethodGet, path, "")
+		var p struct {
+			Drains repository.Drains `json:"drains"`
+		}
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &p) != nil {
+			t.Fatalf("GET %s = %d: %s", path, w.Code, w.Body)
+		}
+		return p.Drains
+	}
+	// K-2 set aside once and never acked: a peek shows it under its drain id, K-1 live under "".
+	drained := get("/grove-admin/usage?keys=K-2")
+	var id string
+	for id = range drained {
+	}
+	peek := get("/grove-admin/usage?keys=K-1,K-2&peek=1")
+	if peek[""]["K-1"][day]["cost"] != "300" || peek[id]["K-2"][day]["request_count"] != "1" || len(peek) != 2 {
+		t.Fatalf("peek = %+v, want K-1 live and K-2 under %s", peek, id)
+	}
+	if alone := get("/grove-admin/usage?keys=K-1&peek=1"); len(alone) != 1 || alone[""]["K-1"] == nil {
+		t.Errorf("K-1 alone = %+v", alone)
+	}
+	if len(store.Usage) != 1 || len(store.Unacked) != 1 {
+		t.Errorf("after the peeks: live %v, unacked %v — a peek moves nothing", store.Usage, store.Unacked)
+	}
+	if pull := get("/grove-admin/usage"); pull[id]["K-2"] == nil || len(pull) != 2 {
+		t.Errorf("the pull after a peek = %+v, want K-2 still waiting and K-1 set aside now", pull)
 	}
 }
 

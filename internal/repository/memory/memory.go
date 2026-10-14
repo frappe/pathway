@@ -26,19 +26,22 @@ type Store struct {
 	// real store's spent:<month> field. A key not listed counts the current one.
 	SpentMonth map[string]string
 	Groups     map[string]domain.GroupRecord
+	Teams      map[string]domain.TeamRecord
 	Routes     map[string][]domain.Route
 	Sticky     map[string]string
 	InFlight   map[string]map[string]bool // engine → request ids
 	Failures   map[string]int
 	// KeyStats is what each vendor credential answered, the memory twin of pk:<id>.
 	KeyStats map[string]domain.KeyStats
-	Usage    map[string]map[string]int64
+	// Usage is every live counter, bucket ("<key prefix>:<YYYY-MM-DD>", repository.UsageBucket) →
+	// counters: the memory twin of usage:<bucket>.
+	Usage map[string]map[string]int64
 	// Limits is every limit counter, "<key prefix>:<metric>:<window>:<bucket>" → count: the memory
 	// twin of lim:….
 	Limits map[string]int64
 	Hashes map[string]string // grove:state_hash — section/bucket → hash
 
-	// Drained is every counter set aside, drain id → prefix → counters; Unacked the "<id>:<prefix>"
+	// Drained is every counter set aside, drain id → bucket → counters; Unacked the "<id>:<bucket>"
 	// pairs not yet acknowledged; Retained how long each acknowledged pair is kept. Adjusted is
 	// every spend adjustment id already applied.
 	Drained map[string]map[string]map[string]int64
@@ -58,7 +61,7 @@ var errStore = errors.New("store unavailable")
 func New() *Store {
 	return &Store{
 		Keys: map[string]domain.KeyRecord{}, SpentMonth: map[string]string{}, Groups: map[string]domain.GroupRecord{},
-		Routes: map[string][]domain.Route{},
+		Teams: map[string]domain.TeamRecord{}, Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
 		Limits: map[string]int64{}, Hashes: map[string]string{}, Fail: map[string]bool{},
@@ -95,6 +98,13 @@ func (s *Store) putKey(rec repository.KeyUpsert) {
 	}
 }
 
+func (s *Store) putTeam(rec repository.TeamUpsert) {
+	limits, _ := domain.ParseLimits(rec.Limits) // the push handler already refused one that does not read
+	s.Teams[rec.Team] = domain.TeamRecord{
+		Limited: rec.Limited, Prepaid: rec.Prepaid, LogPayloads: rec.LogPayloads, Limits: limits,
+	}
+}
+
 // rollMonth matches the real store reading this month's field: a key last touched in an earlier
 // month starts this one at 0. Called with the lock held, on a key the store knows.
 func (s *Store) rollMonth(id string) {
@@ -123,6 +133,9 @@ func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, boo
 	k.s.rollMonth(meterID)
 	rec := k.s.Keys[meterID]
 	holder := repository.Holder{Key: rec, Groups: map[string]domain.GroupRecord{}}
+	if team, ok := k.s.Teams[rec.Team]; ok && rec.Team != "" {
+		holder.Team = &team
+	}
 	if len(rec.Groups) > 0 {
 		if err := k.s.failed("groups"); err != nil {
 			return repository.Holder{}, false, err
@@ -434,6 +447,11 @@ func (l limits) Debit(_ context.Context, key string, lims []domain.Limit, tokens
 	return nil
 }
 
+// UsageOf is the live counters prefix has today: what a test reads back after an Accrue.
+func (s *Store) UsageOf(prefix string) map[string]int64 {
+	return s.Usage[repository.UsageBucket(prefix, time.Now())]
+}
+
 type usage struct{ s *Store }
 
 // Accrue matches the real one: counters, cost and the key's spend land under one lock, and the
@@ -470,11 +488,12 @@ func (u usage) Ping(_ context.Context) error {
 }
 
 func (u usage) accrue(a repository.Accrual) {
-	if u.s.Usage[a.Prefix] == nil {
-		u.s.Usage[a.Prefix] = map[string]int64{}
+	bucket := repository.UsageBucket(a.Prefix, time.Now())
+	if u.s.Usage[bucket] == nil {
+		u.s.Usage[bucket] = map[string]int64{}
 	}
 	for field, n := range a.Fields {
-		u.s.Usage[a.Prefix][field] += n
+		u.s.Usage[bucket][field] += n
 	}
 	if _, known := u.s.Keys[a.Key]; a.Key == "" || !known {
 		return
@@ -483,65 +502,102 @@ func (u usage) accrue(a repository.Accrual) {
 	rec := u.s.Keys[a.Key]
 	rec.Spent += a.Cost
 	u.s.Keys[a.Key] = rec
-	u.s.Usage[a.Prefix]["key_spent"] = rec.Spent
-	u.s.Usage[a.Prefix]["key_balance"] = a.Budget - rec.Spent
+	u.s.Usage[bucket]["key_spent"] = rec.Spent
+	u.s.Usage[bucket]["key_balance"] = a.Budget - rec.Spent
 }
 
-// Drain matches the real one: live counters (all, or only keys) are set aside under newID, and
-// every unacknowledged pair is answered. Nothing is deleted until Ack.
+// Drain matches the real one: live counters (all, or only keys' buckets) are set aside under
+// newID, and every unacknowledged pair is answered. Nothing is deleted until Ack.
 func (u usage) Drain(_ context.Context, newID string, keys []string) (repository.Drains, error) {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
 	if err := u.s.failed("usage"); err != nil {
 		return nil, err
 	}
-	wanted := map[string]bool{}
-	for _, key := range keys {
-		wanted[key] = true
-	}
-	for prefix, fields := range u.s.Usage {
-		if len(wanted) > 0 && !wanted[prefix] {
+	want := wantedBuckets(keys)
+	for bucket, fields := range u.s.Usage {
+		if !want(bucket) {
 			continue
 		}
 		if u.s.Drained[newID] == nil {
 			u.s.Drained[newID] = map[string]map[string]int64{}
 		}
-		u.s.Drained[newID][prefix] = fields
-		u.s.Unacked[newID+":"+prefix] = true
-		delete(u.s.Usage, prefix)
+		u.s.Drained[newID][bucket] = fields
+		u.s.Unacked[newID+":"+bucket] = true
+		delete(u.s.Usage, bucket)
 	}
-	out := repository.Drains{}
-	for member := range u.s.Unacked {
-		id, prefix, _ := strings.Cut(member, ":")
-		if len(wanted) > 0 && !wanted[prefix] {
-			continue
+	return u.unacked(want), nil
+}
+
+// Peek matches the real one: every unacknowledged pair, and every live counter under the id "",
+// nothing moved.
+func (u usage) Peek(_ context.Context, keys []string) (repository.Drains, error) {
+	u.s.mu.Lock()
+	defer u.s.mu.Unlock()
+	if err := u.s.failed("usage"); err != nil {
+		return nil, err
+	}
+	want := wantedBuckets(keys)
+	out := u.unacked(want)
+	for bucket, fields := range u.s.Usage {
+		if want(bucket) {
+			prefix, day := repository.SplitBucket(bucket)
+			out.Put("", prefix, day, counters(fields))
 		}
-		snapshot := map[string]string{}
-		for field, n := range u.s.Drained[id][prefix] {
-			snapshot[field] = strconv.FormatInt(n, 10)
-		}
-		if out[id] == nil {
-			out[id] = map[string]map[string]string{}
-		}
-		out[id][prefix] = snapshot
 	}
 	return out, nil
 }
 
+// unacked is every set-aside pair not yet acknowledged, as the wire carries it. Caller holds mu.
+func (u usage) unacked(want func(string) bool) repository.Drains {
+	out := repository.Drains{}
+	for member := range u.s.Unacked {
+		id, bucket, _ := strings.Cut(member, ":")
+		if !want(bucket) {
+			continue
+		}
+		prefix, day := repository.SplitBucket(bucket)
+		out.Put(id, prefix, day, counters(u.s.Drained[id][bucket]))
+	}
+	return out
+}
+
+// wantedBuckets says whether a bucket is one of keys' — every bucket when none are named.
+func wantedBuckets(keys []string) func(bucket string) bool {
+	wanted := map[string]bool{}
+	for _, key := range keys {
+		wanted[key] = true
+	}
+	return func(bucket string) bool {
+		prefix, _ := repository.SplitBucket(bucket)
+		return len(wanted) == 0 || wanted[prefix]
+	}
+}
+
+func counters(fields map[string]int64) map[string]string {
+	snapshot := map[string]string{}
+	for field, n := range fields {
+		snapshot[field] = strconv.FormatInt(n, 10)
+	}
+	return snapshot
+}
+
 // Ack matches the real one: only unacknowledged pairs move anything.
-func (u usage) Ack(_ context.Context, acks map[string][]string, retention time.Duration) (int, error) {
+func (u usage) Ack(_ context.Context, acks repository.Acks, retention time.Duration) (int, error) {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
 	if err := u.s.failed("usage"); err != nil {
 		return 0, err
 	}
 	count := 0
-	for id, prefixes := range acks {
-		for _, prefix := range prefixes {
-			if member := id + ":" + prefix; u.s.Unacked[member] {
-				delete(u.s.Unacked, member)
-				u.s.Retained[member] = retention
-				count++
+	for id, keys := range acks {
+		for prefix, days := range keys {
+			for _, day := range days {
+				if member := id + ":" + repository.Bucket(prefix, day); u.s.Unacked[member] {
+					delete(u.s.Unacked, member)
+					u.s.Retained[member] = retention
+					count++
+				}
 			}
 		}
 	}
@@ -588,6 +644,25 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 		}
 		st.s.Hashes["groups"] = push.Groups.Hash
 		counts.Groups = len(named)
+	}
+	if push.Teams != nil {
+		named := map[string]bool{}
+		for label, bucket := range push.Teams {
+			for _, rec := range bucket.Records {
+				if rec.Team == "" {
+					continue
+				}
+				named[rec.Team] = true
+				counts.Teams++
+				st.s.putTeam(rec)
+			}
+			st.setBucketHash("teams:"+label, bucket.Hash, len(bucket.Records))
+		}
+		for id := range st.s.Teams {
+			if _, pushed := push.Teams[domain.BucketOf(id)]; pushed && !named[id] {
+				delete(st.s.Teams, id)
+			}
+		}
 	}
 	if push.Keys != nil {
 		named := map[string]bool{}

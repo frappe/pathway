@@ -209,3 +209,32 @@ func TestAUsersSectionIsRefused(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
 	}
 }
+
+// The teams section: bucketed like keys, its hash under teams:<label>, a limit this binary cannot
+// read refused by the team's name.
+func TestATeamsSectionLandsAndReadsBack(t *testing.T) {
+	store := memory.New()
+	handler := adminFixture(t, store)
+	bucket := domain.BucketOf("T-1")
+
+	w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", fmt.Sprintf(`{
+		"teams": {"buckets": {"%s": {"hash": "th", "records": [
+			{"team": "T-1", "limited": true, "prepaid": true, "log_payloads": false, "limits": "requests:1m:5"}]}}}}`, bucket))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"teams":1`) {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	team, ok := store.Teams["T-1"]
+	if !ok || !team.Limited || !team.Prepaid || team.LogPayloads || len(team.Limits) != 1 {
+		t.Errorf("team = %+v, %v", team, ok)
+	}
+	hashes, _ := store.Repositories().State.Hashes(context.Background())
+	if hashes["teams:"+bucket] != "th" {
+		t.Errorf("hashes = %v", hashes)
+	}
+
+	w = adminCall(t, handler, http.MethodPost, "/grove-admin/state", fmt.Sprintf(`{
+		"teams": {"buckets": {"%s": {"hash": "x", "records": [{"team": "T-2", "limits": "requests:fortnight:5"}]}}}}`, bucket))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "team T-2") {
+		t.Fatalf("an unreadable team limit: status = %d, body = %s", w.Code, w.Body)
+	}
+}

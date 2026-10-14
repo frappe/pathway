@@ -25,7 +25,8 @@ never registered, so no handler on that box could read a key store even if one w
 4. Rewrites the request body where the endpoint's schema allows it, and swaps the client's key for
    the engine's own.
 5. Proxies it, streaming the response through untouched, and reads the usage frame out on the way.
-6. Records tokens and the hop's outcome, on every request including the ones that were abandoned.
+6. Records the hop's outcome on every request, and the tokens on every one the upstream took — a
+   2xx that was then abandoned or cut short included; a refusal, a 5xx or no answer is not a request.
 7. Answers `/v1/models` and `/v1/credits` itself, and `/metrics/node` behind basic auth.
 8. Upgrades its own binary and reloads its own configuration without dropping a connection.
 
@@ -724,15 +725,19 @@ health mark and gives its slot back, and leaves an `attempt` line on the access 
 
 ## Admission
 
-Two records, resolved in order — `key:` → `model_group:`. A key names any number of groups; their
-grants are unioned into one before the gates run.
+Three records, resolved in one call — `key:` → `team:` → `model_group:`. A key names one team and
+any number of groups; the team's verdicts are applied onto the key (`KeyRecord.Under`) and the
+groups' grants are unioned into one before the gates run, so every gate reads one record.
 
-**The key is the policy.** Its team (a Central Team) is the ledger the control plane bills, but
-everything a gate reads — models, geography, rate limits, and the cap it spends against — sits on
-the key itself. That is what lets a team spread keys across geographies: a key lives on one
-geography's store, that store holds the key's whole cap and counts all its spend, so the gate is
-exact however many other keys the team holds elsewhere. A revoked key dies alone; the team's
-balance running out flips `limited` on every key it holds, one field each.
+**The key is the policy; the team is the verdict.** Everything that is the key's — models,
+geography, its own rate limits, and the cap it spends against — sits on the key. What is the
+team's — `limited` (its balance is spent), `prepaid` (its keys are gated on their caps),
+`log_payloads`, and the rate limits a key with none of its own runs under — sits on `team:<Central
+Team>`, one record however many keys the team holds, so suspending a team is one write. The cap and
+its counter stay on the key: a key lives on one geography's store, that store holds the key's whole
+cap and counts all its spend, so the gate is exact however many other keys the team holds
+elsewhere. A key whose team record the store does not hold is read as pushed — the fields a control
+plane from before teams wrote onto it — until the cleanup release, when it is a 503.
 
 `Evaluate` then runs three gates, in this order:
 
@@ -1166,13 +1171,14 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | Key | Type | Written by |
 |---|---|---|
 | `key:<sha256(secret)>` | hash | state push, `keys` section; `spent:<YYYY-MM>` by the gateway |
+| `team:<Central Team>` | hash | state push, `teams` section |
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
 | `lim:<key prefix>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see *Rate limiting* |
-| `usage:<key prefix>` | hash | the gateway; set aside by `GET /grove-admin/usage` |
-| `drained:<drain id>:<key prefix>` | hash, kept `usage_retention` once acked | `GET /grove-admin/usage` renames a live counter here |
-| `drain:unacked` | set of `<drain id>:<key prefix>` | every counter set aside and not yet acked |
+| `usage:<key prefix>:<YYYY-MM-DD>` | hash, one per key per UTC day it was served | the gateway; set aside by `GET /grove-admin/usage` |
+| `drained:<drain id>:<key prefix>:<YYYY-MM-DD>` | hash, kept `usage_retention` once acked | `GET /grove-admin/usage` renames a live counter here |
+| `drain:unacked` | set of `<drain id>:<key prefix>:<YYYY-MM-DD>` | every counter set aside and not yet acked |
 | `adjust:<id>` | string, 7 days | `POST /grove-admin/spend-adjust` — ids already applied |
 | `accrued:<request id>` | string, 7 days | the spool's replay — requests already landed from it |
 | `sticky:<session>` | string, 30m | the gateway |
@@ -1187,11 +1193,11 @@ would stay missing until its section changed; only gateway-owned keys expire
 ### How the push works
 
 `POST /grove-admin/state` is desired state, whole, and **absence prunes**. The body carries any
-subset of three sections — groups, keys, routes — each stamped with a
+subset of four sections — groups, teams, keys, routes — each stamped with a
 hash Grove computed. The agent applies the whole body in ONE Redis MULTI: HSET every named
 record, DEL every record in a pushed section the payload does not name, then store the hashes in
 `grove:state_hash`. A Redis error is a 500 and none of it lands — the hashes never claim state
-that did not arrive. Only `model_group:/key:/deploy:` are ever pruned; usage,
+that did not arrive. Only `model_group:/team:/key:/deploy:` are ever pruned; usage,
 sticky, inflight and health keys are the gateway's own.
 
 Every admin body is decoded strictly: a field this binary does not know is a 400 naming it
@@ -1202,9 +1208,9 @@ which is what happened once. Consequence: a new route field ships in the binary 
 pushes it.
 
 `GET /grove-admin/state-hash` returns that stored map. Grove diffs its computed hashes against it
-every 2 minutes and pushes only what differs — an in-sync box costs one GET. `keys` is split into
-256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
-independently, so one minted key ships one bucket, not the population. A wiped Redis has no
+every 2 minutes and pushes only what differs — an in-sync box costs one GET. `teams` and `keys` are
+split into 256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
+independently, so one minted key or one suspended team ships one bucket, not the population. A wiped Redis has no
 hashes, reads as total drift, and is fully rebuilt on the next tick — that is the only repair
 path and the only one needed. Both planes mount these endpoints; an ingress only ever receives
 the routes section. Contract: `plan_agent_state_sync.md` in the infer-plat tree. The old
@@ -1216,18 +1222,26 @@ Every admin endpoint is gated on `X-Grove-Admin-Token`, compared in constant tim
 `GET /grove-admin/in-flight` is read-only: `{"maintenance": bool, "in_flight": n}`, where
 `in_flight` counts data requests past the `drain` stage, realtime sessions until they close.
 
-`GET /grove-admin/usage[?keys=p1,p2]` answers `{"drains": {"<drain id>": {prefix: hash}}}` and
-deletes nothing. Each live `usage:<prefix>` — every one, or only the listed prefixes, with no SCAN —
-is RENAMEd to `drained:<id>:<prefix>` under a new drain id and added to `drain:unacked`, in one Lua
-call, so a request metered mid-drain lands wholly in the drain or wholly on a fresh counter. The
-answer is every pair still in `drain:unacked` (only the listed prefixes' when `keys` is given),
-old drains included. `POST /grove-admin/usage/ack {"acks": {"<drain id>": [prefix, ...]}}` takes
-the pairs the control plane recorded out of `drain:unacked` and keeps them for `usage_retention`
-(default a week), answering `{"ok": true, "count": n}`; a pair not waiting is a no-op. A key it never
-acks is answered again, under its own id, on every pull, while the rest move on: a control plane
-that failed to record one user loses nothing and holds nobody else back, and one that recorded it
-but lost the ack dedupes on the (drain id, prefix) pair. Nothing live and nothing waiting answers
-`{"drains": {}}`.
+`GET /grove-admin/usage[?keys=p1,p2]` answers `{"drains": {"<drain id>": {"<prefix>": {"<YYYY-MM-DD>":
+hash}}}}` and deletes nothing. With `peek=1` it answers the same shape and sets nothing aside —
+the live counters come under the id `""` beside every unacked pair — for a control plane that
+needs this box's figure now (a cap check) and will land it on its next pull; it holds its own
+pull lock meanwhile, so no drain moves a counter under it. A live counter is one key's usage for one UTC day — the day this box
+served it, off the clock that names the key's `spent:<month>` — so the day and the month the
+control plane records are this store's own. Each live `usage:<prefix>:<day>` — every one, or only
+the listed prefixes', found by one SCAN either way — is RENAMEd to `drained:<id>:<prefix>:<day>`
+under a new drain id and added to `drain:unacked`, in one Lua call, so a request metered mid-drain
+lands wholly in the drain or wholly on a fresh counter. The answer is every pair still in
+`drain:unacked` (only the listed prefixes' when `keys` is given), old drains included.
+A day of `""` is a counter from before this build bucketed by day, which the control plane lands on
+the day it pulls. `POST /grove-admin/usage/ack {"acks": {"<drain id>": {"<prefix>": ["<day>", ...]}}}`
+takes the counters the control plane recorded out of `drain:unacked` and keeps them for
+`usage_retention` (default a week), answering `{"ok": true, "count": n}`; one not waiting is a
+no-op. A bucket it never acks
+is answered again, under its own id, on every pull, while the rest move on: a control plane that
+failed to record one user loses nothing and holds nobody else back, and one that recorded it but
+lost the ack dedupes on the (drain id, prefix, day) triple. Nothing live and nothing waiting
+answers `{"drains": {}}`.
 
 **The spool.** A request that finishes while the store is down (new ones already 503 at admission)
 cannot land its usage. It is appended as one JSON line — `{"id": "<request id>", "prefix", "fields",
@@ -1260,8 +1274,9 @@ is invented.
 ```
 key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
                            geography  prepaid  budget  spent:<YYYY-MM>  limits
+team:<Central Team>        limited  prepaid  log_payloads  limits
 model_group:<Model Group>  models
-usage:<key prefix>         request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
+usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
                            prompt_tokens_above_272k  cached_tokens_above_272k
                            cache_write_tokens_above_272k  completion_tokens_above_272k
@@ -1274,7 +1289,10 @@ usage:<key prefix>         request_count  prompt_tokens  completion_tokens  tota
 `group` / `allow` / `deny` / `models` are comma lists; blank parses to a map that answers false
 to everything, which is the fail-closed default. `group` holds every group the key is in, so a
 name containing a comma would split — Grove refuses one. `team` is the Central Team the key bills
-to: the cache-salt namespace and the payload log's join field, read by no gate.
+to: the cache-salt namespace, the payload log's join field, and the record whose `limited`,
+`prepaid`, `log_payloads` and default `limits` are applied onto the key at resolve. The same four
+fields on the key record are what a control plane from before teams wrote, read only while the
+store holds no team record.
 
 `prepaid` / `budget` / `spent:<YYYY-MM>` are the credit gate. `budget` is the key's monthly cap,
 nano-USD; Grove keeps Σ caps within the team's tier limit. `spent:<YYYY-MM>` is this Redis's own
@@ -1424,7 +1442,7 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 | `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` only — anything else under it is a 404 in Anthropic's shape — keyed by `x-api-key` or a Bearer |
 | `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
-| `GET /v1/credits` | answered here: what the key has left of its own monthly cap on this store this month, in US dollars — `{"balance", "spent"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it. A key of a free team reads zeros |
+| `GET /v1/credits` | answered here: what the key has left of its own monthly cap on this store this month, in US dollars to the cent — `{"balance", "spent"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it. A key of a free team reads zeros |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
 | `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |
@@ -1519,10 +1537,10 @@ curl localhost:8080/v1/chat/completions -H 'Authorization: Bearer gr_demo' \
 redis-cli -p 6399 HGETALL usage:dev
 ```
 
-With nothing listening on `:8000` that last call is a 502 and only `request_count` accrues — which
-is itself the correct behaviour, and worth seeing once: an abandoned or failed request still counts
-as a request, and the failure counts against the target. Point `engine_url` at a real vLLM (or the
-fake in `dataplane_test.go`) for token counts.
+With nothing listening on `:8000` that last call is a 502 and nothing accrues — which is itself the
+correct behaviour, and worth seeing once: a request nobody served is not the caller's request, and
+the failure counts against the target. Point `engine_url` at a real vLLM (or the fake in
+`dataplane_test.go`) for token counts.
 
 ---
 

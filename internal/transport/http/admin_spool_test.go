@@ -22,7 +22,7 @@ func TestThePullHandsOverDeadLinesAndAnAckForgetsThem(t *testing.T) {
 	meter := metering.New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, logs.Process)
 	meter.Spool = metering.NewSpool(store.Repositories().Usage, logs.Process, func() string { return path }, func() int64 { return 1 << 20 })
 	store.Fail["usage"] = true
-	meter.Record(context.Background(), metering.Report{RequestID: "rid-1", Prefix: "K-1", Model: "m"})
+	meter.Record(context.Background(), metering.Report{RequestID: "rid-1", Prefix: "K-1", Model: "m", UpstreamStatus: "200"})
 	for range 5 {
 		meter.Spool.Replay(context.Background())
 	}

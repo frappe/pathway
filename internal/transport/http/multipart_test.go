@@ -80,7 +80,7 @@ func TestAMultipartUploadIsRoutedAndForwardedByteForByte(t *testing.T) {
 	// The per-model counter is where the parsed name shows up on a direct route, which deletes
 	// X-Grove-Model on the way out.
 	for field, want := range map[string]int64{"request_count": 1, "m:request_count:qwen3-4b": 1} {
-		if got := f.store.Usage["abc123"][field]; got != want {
+		if got := f.store.UsageOf("abc123")[field]; got != want {
 			t.Errorf("usage[%s] = %d, want %d", field, got, want)
 		}
 	}
@@ -104,7 +104,7 @@ func TestAMultipartUploadFindsTheModelAfterTheFile(t *testing.T) {
 	if !bytes.Equal(f.seen.body, body) {
 		t.Errorf("engine body was rewritten (%d bytes sent, %d received)", len(body), len(f.seen.body))
 	}
-	if got := f.store.Usage["abc123"]["m:request_count:qwen3-4b"]; got != 1 {
+	if got := f.store.UsageOf("abc123")["m:request_count:qwen3-4b"]; got != 1 {
 		t.Errorf("m:request_count:qwen3-4b = %d, want 1", got)
 	}
 }
@@ -314,7 +314,7 @@ func TestJSONBodiesAreUnaffectedByTheMultipartBranch(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
-	if got := f.store.Usage["abc123"]["m:total_tokens:qwen3-4b"]; got != 120 {
+	if got := f.store.UsageOf("abc123")["m:total_tokens:qwen3-4b"]; got != 120 {
 		t.Errorf("m:total_tokens:qwen3-4b = %d, want 120", got)
 	}
 }

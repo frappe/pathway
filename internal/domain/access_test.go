@@ -143,3 +143,22 @@ func TestGeographyDenial(t *testing.T) {
 		})
 	}
 }
+
+// The team's record decides what was the team's on the key — the verdicts and the flags — and its
+// limits stand in only where the key names none of its own.
+func TestUnderTakesTheTeamsVerdicts(t *testing.T) {
+	stale := KeyRecord{Status: "active", Limited: true, Prepaid: false, LogPayloads: false, Budget: 1000}
+	team := TeamRecord{Limited: false, Prepaid: true, LogPayloads: true, Limits: []Limit{{Metric: "requests", Window: "1m", Value: 5}}}
+
+	got := stale.Under(team)
+	if got.Limited || !got.Prepaid || !got.LogPayloads || got.Budget != 1000 {
+		t.Errorf("under team = %+v, want the team's flags over the key's and the key's budget kept", got)
+	}
+	if len(got.Limits) != 1 || got.Limits[0].Value != 5 {
+		t.Errorf("limits = %+v, want the team's when the key has none", got.Limits)
+	}
+	own := KeyRecord{Status: "active", Limits: []Limit{{Metric: "requests", Window: "1m", Value: 2}}}
+	if got := own.Under(team); got.Limits[0].Value != 2 {
+		t.Errorf("limits = %+v, want the key's own to win", got.Limits)
+	}
+}

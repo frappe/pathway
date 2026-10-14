@@ -13,6 +13,20 @@ import (
 	"github.com/phot0n/pathway/internal/repository"
 )
 
+// todays is where an accrual for prefix lands today.
+func todays(prefix string) string { return repository.UsageBucket(prefix, time.Now()) }
+
+// flatten is every counter of one drain, whatever its key and day.
+func flatten(keys map[string]map[string]map[string]string) []map[string]string {
+	var out []map[string]string
+	for _, days := range keys {
+		for _, fields := range days {
+			out = append(out, fields)
+		}
+	}
+	return out
+}
+
 func liveAccrual(prefix, key string, cost int64) repository.Accrual {
 	return repository.Accrual{
 		Prefix: prefix, Key: key, Cost: cost, Budget: 1_000,
@@ -45,7 +59,7 @@ func TestAccrueAgainstRealRedis(t *testing.T) {
 		t.Error("a key record was fabricated")
 	}
 
-	h, _ := client.rdb.HGetAll(ctx, "usage:abc").Result()
+	h, _ := client.rdb.HGetAll(ctx, "usage:"+todays("abc")).Result()
 	for field, want := range map[string]string{
 		"request_count": "2", "completion_tokens": "20", "cost": "500", "key_spent": "500", "key_balance": "500",
 	} {
@@ -107,7 +121,7 @@ func TestAccrueKeepsBigTotalsExact(t *testing.T) {
 	if err := client.Store().Usage.Accrue(ctx, a); err != nil {
 		t.Fatalf("Accrue: %v", err)
 	}
-	h, _ := client.rdb.HGetAll(ctx, "usage:abc").Result()
+	h, _ := client.rdb.HGetAll(ctx, "usage:"+todays("abc")).Result()
 	if h["key_spent"] != "123456789012345679" || h["key_balance"] != "99999999999999999" {
 		t.Errorf("key_spent = %q key_balance = %q", h["key_spent"], h["key_balance"])
 	}
@@ -140,16 +154,19 @@ func TestADrainNeverSplitsARequestFromItsCostOnRealRedis(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Drain: %v", err)
 		}
-		acks := map[string][]string{}
-		for id, usages := range drained {
-			for prefix := range usages {
-				acks[id] = append(acks[id], prefix)
+		acks := repository.Acks{}
+		for id, keys := range drained {
+			acks[id] = map[string][]string{}
+			for prefix, days := range keys {
+				for day := range days {
+					acks[id][prefix] = append(acks[id][prefix], day)
+				}
 			}
 		}
 		if _, err := usage.Ack(ctx, acks, time.Hour); err != nil {
 			t.Fatalf("Ack: %v", err)
 		}
-		for _, fields := range drained["d"+strconv.Itoa(drains)] {
+		for _, fields := range flatten(drained["d"+strconv.Itoa(drains)]) {
 			n, _ := strconv.ParseInt(fields["request_count"], 10, 64)
 			c, _ := strconv.ParseInt(fields["cost"], 10, 64)
 			if c != n*3 {
@@ -185,27 +202,53 @@ func TestAnUnackedKeyIsResentOnRealRedis(t *testing.T) {
 	if err != nil || len(first["d1"]) != 2 {
 		t.Fatalf("first = %+v, %v", first, err)
 	}
-	if n, err := usage.Ack(ctx, map[string][]string{"d1": {"good", "stray"}, "d0": {"bad"}}, time.Hour); err != nil || n != 1 {
+	today := domain.DayOf(time.Now())
+	if n, err := usage.Ack(ctx, repository.Acks{"d1": {"good": {today}, "stray": {""}}, "d0": {"bad": {today}}}, time.Hour); err != nil || n != 1 {
 		t.Fatalf("Ack = %d, %v; want only d1:good", n, err)
 	}
-	if ttl := client.rdb.TTL(ctx, "drained:d1:good").Val(); ttl <= 0 || ttl > time.Hour {
+	if ttl := client.rdb.TTL(ctx, "drained:d1:"+todays("good")).Val(); ttl <= 0 || ttl > time.Hour {
 		t.Errorf("acked counter ttl = %v, want kept up to an hour", ttl)
 	}
-	if ttl := client.rdb.TTL(ctx, "drained:d1:bad").Val(); ttl != -1 {
+	if ttl := client.rdb.TTL(ctx, "drained:d1:"+todays("bad")).Val(); ttl != -1 {
 		t.Errorf("unacked counter ttl = %v, want none", ttl)
 	}
 	_ = usage.Accrue(ctx, liveAccrual("bad", "", 3))
 	_ = usage.Accrue(ctx, liveAccrual("good", "", 3))
 	second, _ := usage.Drain(ctx, "d2", []string{"good"})
-	if len(second) != 1 || second["d2"]["good"]["request_count"] != "1" {
+	if len(second) != 1 || second["d2"]["good"][today]["request_count"] != "1" {
 		t.Errorf("good alone = %+v, want only d2:good", second)
 	}
 	third, _ := usage.Drain(ctx, "d3", nil)
-	if third["d1"]["bad"]["request_count"] != "1" || third["d3"]["bad"]["request_count"] != "1" || third["d2"]["good"] == nil {
+	if third["d1"]["bad"][today]["request_count"] != "1" || third["d3"]["bad"][today]["request_count"] != "1" || third["d2"]["good"] == nil {
 		t.Errorf("third = %+v, want d1:bad resent, d2:good still waiting, d3:bad new", third)
 	}
 	if empty, _ := client.Store().Usage.Drain(ctx, "d4", []string{"nobody"}); len(empty) != 0 {
 		t.Errorf("nobody = %+v", empty)
+	}
+}
+
+// A peek on the real store: the unacked pair under its id, the live bucket under "", nothing moved.
+func TestAPeekMovesNothingOnRealRedis(t *testing.T) {
+	client, _ := liveStore(t)
+	ctx := context.Background()
+	usage := client.Store().Usage
+	today := domain.DayOf(time.Now())
+	_ = usage.Accrue(ctx, liveAccrual("bad", "", 3))
+	if _, err := usage.Drain(ctx, "d1", []string{"bad"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = usage.Accrue(ctx, liveAccrual("bad", "", 3))
+	_ = usage.Accrue(ctx, liveAccrual("good", "", 3))
+
+	peek, err := usage.Peek(ctx, []string{"bad"})
+	if err != nil || peek["d1"]["bad"][today]["request_count"] != "1" || peek[""]["bad"][today]["request_count"] != "1" || peek[""]["good"] != nil {
+		t.Fatalf("peek = %+v, %v; want d1:bad and the live bad only", peek, err)
+	}
+	if n := client.rdb.Exists(ctx, "usage:"+todays("bad"), "usage:"+todays("good"), "drained:d1:"+todays("bad")).Val(); n != 3 {
+		t.Errorf("a peek moved something: %d of the three keys left", n)
+	}
+	if members := client.rdb.SMembers(ctx, "drain:unacked").Val(); len(members) != 1 {
+		t.Errorf("unacked = %v, want d1:bad alone", members)
 	}
 }
 
@@ -253,7 +296,7 @@ func TestReplayLandsOncePerRequestAgainstRealRedis(t *testing.T) {
 			t.Fatalf("replay %d = %v, %v; want %v", i, landed, err, want)
 		}
 	}
-	h, _ := client.rdb.HGetAll(ctx, "usage:replayed").Result()
+	h, _ := client.rdb.HGetAll(ctx, "usage:"+todays("replayed")).Result()
 	if h["request_count"] != "1" || h["key_spent"] != "250" {
 		t.Errorf("usage:replayed = %v, want one request and 250 spent", h)
 	}

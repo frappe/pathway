@@ -220,3 +220,38 @@ func TestProviderKeysTakeClears(t *testing.T) {
 		t.Errorf("second take = %+v, want zeros", again["k1"])
 	}
 }
+
+// A team record lands in its bucket and comes back with the key that names it, in the one call;
+// a key naming a team the store does not hold comes back without one.
+func TestATeamRecordResolvesWithItsKey(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	bucket := domain.BucketOf("T-1")
+	key := sibling(t, "aa")
+
+	counts, err := state.Apply(ctx, repository.StatePush{
+		Teams: map[string]repository.TeamBucket{bucket: {Hash: "th", Records: []repository.TeamUpsert{
+			{Team: "T-1", Limited: true, Prepaid: true, Limits: "requests:1m:5"},
+		}}},
+		Keys: map[string]repository.KeyBucket{domain.BucketOf(key): {Hash: "kh", Records: []repository.KeyUpsert{
+			{MeterID: key, Prefix: "K-1", Team: "T-1", Status: "active"},
+			{MeterID: "aa", Prefix: "K-2", Team: "T-none", Status: "active"},
+		}}},
+	})
+	if err != nil || counts.Teams != 1 || counts.Keys != 2 {
+		t.Fatalf("Apply: %v, counts %+v", err, counts)
+	}
+	holder, found, err := client.Store().Keys.Resolve(ctx, key)
+	if err != nil || !found || holder.Team == nil {
+		t.Fatalf("resolve = %+v, %v, %v; want the team record", holder, found, err)
+	}
+	if !holder.Team.Limited || !holder.Team.Prepaid || len(holder.Team.Limits) != 1 || holder.Team.Limits[0].Value != 5 {
+		t.Errorf("team = %+v", *holder.Team)
+	}
+	if holder, _, _ := client.Store().Keys.Resolve(ctx, "aa"); holder.Team != nil {
+		t.Errorf("a key naming an unpushed team carries %+v", holder.Team)
+	}
+	if hashes, _ := state.Hashes(ctx); hashes["teams:"+bucket] != "th" {
+		t.Errorf("hashes = %v", hashes)
+	}
+}

@@ -121,7 +121,7 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 	// lands at DISCONNECT — an open session is unbilled while it stays open. Nothing waits on such a
 	// handler (httptest.Close included), so poll through Drain, which locks and cannot race.
 	conn.Close()
-	var drained map[string]map[string]string
+	var drained map[string]map[string]map[string]string
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
 		snapshot, err := store.Repositories().Usage.Drain(context.Background(), "d", nil)
 		if err != nil {
@@ -133,7 +133,7 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := drained["abc123"]["request_count"]; got != "1" {
+	if got := drained["abc123"][domain.DayOf(time.Now())]["request_count"]; got != "1" {
 		t.Errorf("request_count = %q, want 1 once the session closed", got)
 	}
 }

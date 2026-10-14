@@ -58,7 +58,7 @@ func TestAnAnthropicResponseIsMetered(t *testing.T) {
 	f := providerFixtureAnswering(t, jsonEngine(anthropicMessage))
 	f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16,"messages":[]}`)
 
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	for field, want := range map[string]int64{
 		"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110, "cached_tokens": 80,
 		"m:total_tokens:anthropic/claude-4-5": 110,

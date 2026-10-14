@@ -90,8 +90,14 @@ func (s *Service) DrainUsage(ctx context.Context, keys []string) (repository.Dra
 	return s.store.Usage.Drain(ctx, NewDrainID(time.Now()), keys)
 }
 
-// AckUsage says these (drain, prefix) pairs are recorded: kept for retention, then expired.
-func (s *Service) AckUsage(ctx context.Context, acks map[string][]string, retention time.Duration) (int, error) {
+// PeekUsage answers what DrainUsage would, moving nothing: the control plane's figure for a check
+// it makes now, landed on its next drain.
+func (s *Service) PeekUsage(ctx context.Context, keys []string) (repository.Drains, error) {
+	return s.store.Usage.Peek(ctx, keys)
+}
+
+// AckUsage says these (drain, prefix, day) counters are recorded: kept for retention, then expired.
+func (s *Service) AckUsage(ctx context.Context, acks repository.Acks, retention time.Duration) (int, error) {
 	return s.store.Usage.Ack(ctx, acks, retention)
 }
 

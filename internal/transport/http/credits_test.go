@@ -112,7 +112,7 @@ func TestAServedRequestSpendsTheCap(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
 	cost := int64(20*3000 + 80*300 + 20*15000)
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	for field, want := range map[string]int64{
 		"cost": cost, "p:mp1:cost": cost, "key_spent": cost, "key_balance": 400_000 - cost,
 		"prompt_tokens": 100, "cached_tokens": 80, "completion_tokens": 20,
@@ -163,10 +163,12 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 		want      string
 	}{
 		{"prepaid", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 15_750_000_000, 3_250_000_000 },
-			200, `{"balance":12.5,"spent":3.25}`},
+			200, `{"balance":12.50,"spent":3.25}`},
 		{"overspent still reads", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1_000_000_000, 1_500_000_000 },
-			200, `{"balance":-0.5,"spent":1.5}`},
-		{"free", "active", func(*domain.KeyRecord) {}, 200, `{"balance":0,"spent":0}`},
+			200, `{"balance":-0.50,"spent":1.50}`},
+		{"rounded to the cent", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1_000_000_000, 123_456_789 },
+			200, `{"balance":0.88,"spent":0.12}`},
+		{"free", "active", func(*domain.KeyRecord) {}, 200, `{"balance":0.00,"spent":0.00}`},
 		{"revoked key", "revoked", func(k *domain.KeyRecord) { k.Prepaid, k.Budget = true, 1_000_000_000 }, 401, "unknown or revoked api key"},
 	}
 	for _, tc := range cases {
@@ -183,6 +185,35 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 			}
 			if f.seen.path != "" {
 				t.Error("/v1/credits was forwarded to an engine")
+			}
+		})
+	}
+}
+
+// The team record gates the keys it owns: its verdict, its prepaid flag and nothing of the key's
+// own copies — a stale `limited` on the key is not read once the team record is there.
+func TestTheTeamRecordGatesItsKeys(t *testing.T) {
+	cases := []struct {
+		name   string
+		key    func(*domain.KeyRecord)
+		team   domain.TeamRecord
+		status int
+	}{
+		{"a limited team refuses a funded key", func(k *domain.KeyRecord) { k.Budget = 1000 }, domain.TeamRecord{Limited: true, Prepaid: true}, 402},
+		{"a prepaid team gates the key on its cap", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 1000 }, domain.TeamRecord{Prepaid: true}, 402},
+		{"a funded key under a prepaid team admits", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 999 }, domain.TeamRecord{Prepaid: true}, 200},
+		{"a free team ignores the cap", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 5000 }, domain.TeamRecord{}, 200},
+		{"the team record wins over a stale flag on the key", func(k *domain.KeyRecord) { k.Limited = true }, domain.TeamRecord{}, 200},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
+			f.withKey(tc.key)
+			f.store.Teams["test-team"] = tc.team
+
+			resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+			if resp.Code != tc.status {
+				t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 			}
 		})
 	}

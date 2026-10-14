@@ -68,6 +68,26 @@ type adminGroup struct {
 	Models string `json:"models"` // comma list; "" = grants nothing
 }
 
+type adminTeam struct {
+	Team    string `json:"team"` // Central Team doc name — the record id
+	Limited bool   `json:"limited"`
+	Prepaid bool   `json:"prepaid"`
+	// LogPayloads opts the team's keys' prompts and outputs into the payload log. Absent: off.
+	LogPayloads bool `json:"log_payloads"`
+	// Limits is what a key with none of its own runs under, a comma list of metric:window:value.
+	Limits string `json:"limits"`
+}
+
+// upsert refuses a limit this binary cannot read, as adminKey.upsert does.
+func (t adminTeam) upsert() (repository.TeamUpsert, error) {
+	if _, err := domain.ParseLimits(t.Limits); err != nil {
+		return repository.TeamUpsert{}, fmt.Errorf("team %s: %w", t.Team, err)
+	}
+	return repository.TeamUpsert{
+		Team: t.Team, Limited: t.Limited, Prepaid: t.Prepaid, LogPayloads: t.LogPayloads, Limits: t.Limits,
+	}, nil
+}
+
 // PUT /admin/keys — upsert. DELETE /admin/keys — remove them. Revocation deletes the credential
 // rather than flagging it, so the DELETE is what takes a revoked key out of service.
 func (s *Server) handleAdminKeys(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +183,12 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			Hash    string       `json:"hash"`
 			Records []adminGroup `json:"records"`
 		} `json:"groups"`
+		Teams *struct {
+			Buckets map[string]struct {
+				Hash    string      `json:"hash"`
+				Records []adminTeam `json:"records"`
+			} `json:"buckets"`
+		} `json:"teams"`
 		Keys *struct {
 			Buckets map[string]struct {
 				Hash    string     `json:"hash"`
@@ -186,6 +212,21 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 		}
 		push.Groups = &repository.GroupsPush{
 			Hash: body.Groups.Hash, Records: records,
+		}
+	}
+	if body.Teams != nil {
+		push.Teams = map[string]repository.TeamBucket{}
+		for label, bucket := range body.Teams.Buckets {
+			records := make([]repository.TeamUpsert, 0, len(bucket.Records))
+			for _, team := range bucket.Records {
+				record, err := team.upsert()
+				if err != nil {
+					http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				records = append(records, record)
+			}
+			push.Teams[label] = repository.TeamBucket{Hash: bucket.Hash, Records: records}
 		}
 	}
 	if body.Keys != nil {
@@ -241,9 +282,17 @@ func commaList(value string) []string {
 // GET /grove-admin/usage[?keys=p1,p2] — pull: live counters set aside under a new drain id (only
 // the listed prefixes when keys is given), answered with every counter not yet acknowledged,
 // grouped by drain id. Nothing is deleted here, so a key the control plane failed to record is
-// answered again on the next pull under its own id, while the rest move on.
+// answered again on the next pull under its own id, while the rest move on. With peek=1 the same
+// shape is answered and nothing is set aside: the live counters come under the id "".
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
-	drains, err := s.provisioning.DrainUsage(r.Context(), commaList(r.URL.Query().Get("keys")))
+	keys := commaList(r.URL.Query().Get("keys"))
+	var drains repository.Drains
+	var err error
+	if r.URL.Query().Get("peek") == "1" {
+		drains, err = s.provisioning.PeekUsage(r.Context(), keys)
+	} else {
+		drains, err = s.provisioning.DrainUsage(r.Context(), keys)
+	}
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "usage store error")
 		return
@@ -256,13 +305,14 @@ func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, answer)
 }
 
-// POST /grove-admin/usage/ack {"acks": {"<drain id>": ["<prefix>", ...]}, "dead": ["<request id>"]}
-// — the control plane has committed these keys, and recorded these dead spool lines. Each is kept for the retention window, then expires. A pair not waiting
-// is a no-op, so a retried ack is harmless.
+// POST /grove-admin/usage/ack {"acks": {"<drain id>": {"<prefix>": ["<day>", ...]}}, "dead": ["<request id>"]}
+// — the control plane has committed these counters, and recorded these dead spool lines. Each is
+// kept for the retention window, then expires. A counter not waiting is a no-op, so a retried ack
+// is harmless.
 func (s *Server) handleAdminUsageAck(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Acks map[string][]string `json:"acks"`
-		Dead []string            `json:"dead"`
+		Acks repository.Acks `json:"acks"`
+		Dead []string        `json:"dead"`
 	}
 	if !decodeBody(w, r, &body) {
 		return

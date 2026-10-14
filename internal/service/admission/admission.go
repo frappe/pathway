@@ -50,8 +50,10 @@ func (s *Service) Admit(ctx context.Context, id Identity) error {
 	return nil
 }
 
-// Identify resolves an Authorization header to its key. One read: the key and the groups it is
-// in come back together.
+// Identify resolves an Authorization header to its key. One read: the key, its team's record and
+// the groups it is in come back together. The team's verdicts are applied onto the key here, so
+// every later stage reads one record; a key with no team record is read as pushed, its team's
+// fields still on it.
 func (s *Service) Identify(ctx context.Context, authorization string) (Identity, error) {
 	secret := domain.Bearer(authorization)
 	if secret == "" {
@@ -71,7 +73,11 @@ func (s *Service) Identify(ctx context.Context, authorization string) (Identity,
 	if err != nil {
 		return Identity{}, domain.Deny(503, "group store error")
 	}
-	return Identity{MeterID: meterID, Key: holder.Key, Grant: grant}, nil
+	key := holder.Key
+	if holder.Team != nil {
+		key = key.Under(*holder.Team)
+	}
+	return Identity{MeterID: meterID, Key: key, Grant: grant}, nil
 }
 
 // grant is the union of what every group the key is in grants. Always a fresh map: the store hands

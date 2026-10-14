@@ -54,7 +54,7 @@ func TestARequestLimitRefusesPastItsCeiling(t *testing.T) {
 		}
 	}
 	*f.seen = engineRecord{}
-	metered := f.store.Usage["abc123"]["request_count"]
+	metered := f.store.UsageOf("abc123")["request_count"]
 
 	resp := f.post("/v1/chat/completions", limitedBody)
 	if resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "30" {
@@ -63,7 +63,7 @@ func TestARequestLimitRefusesPastItsCeiling(t *testing.T) {
 	if message, errorType := refusal(t, resp.Body.Bytes()); message != "rate limit exceeded: 2 requests per 1m" || errorType != "rate_limit_error" {
 		t.Errorf("error = %q, %q", message, errorType)
 	}
-	if f.seen.path != "" || f.store.Usage["abc123"]["request_count"] != metered {
+	if f.seen.path != "" || f.store.UsageOf("abc123")["request_count"] != metered {
 		t.Error("a refused request reached the engine or was metered")
 	}
 	for key, count := range f.store.Limits {
@@ -164,5 +164,32 @@ func TestAKeysPushCarriesLimits(t *testing.T) {
 	}
 	if code, _ := push(""); code != http.StatusOK || len(store.Keys["aa"].Limits) != 0 {
 		t.Errorf("blank push = %d, limits = %+v; want cleared", code, store.Keys["aa"].Limits)
+	}
+}
+
+// A key with no limits of its own runs under its team's; one with its own keeps them whatever the
+// team says.
+func TestTeamLimitsStandInWhereTheKeyNamesNone(t *testing.T) {
+	clock := time.Date(2026, 10, 13, 12, 0, 30, 0, time.UTC)
+	teamLimit, _ := domain.ParseLimits("requests:1m:1")
+
+	f := limitedFixture(t, "", &clock)
+	f.store.Teams["test-team"] = domain.TeamRecord{Limits: teamLimit}
+	if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("first = %d: %s", resp.Code, resp.Body)
+	}
+	if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("second under the team's limit = %d, want 429: %s", resp.Code, resp.Body)
+	}
+
+	own := limitedFixture(t, "requests:1m:2", &clock)
+	own.store.Teams["test-team"] = domain.TeamRecord{Limits: teamLimit}
+	for i := 0; i < 2; i++ {
+		if resp := own.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+			t.Fatalf("request %d under the key's own limit = %d: %s", i+1, resp.Code, resp.Body)
+		}
+	}
+	if resp := own.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("third = %d, want 429 from the key's own limit: %s", resp.Code, resp.Body)
 	}
 }

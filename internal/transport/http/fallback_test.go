@@ -108,7 +108,7 @@ func TestAFailedModelFallsBackToTheNext(t *testing.T) {
 		t.Errorf("backup's body = %v, want the client's, naming backup, without fallbacks", sent)
 	}
 
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	for field, want := range map[string]int64{
 		"request_count": 1, "m:request_count:backup": 1, "m:request_count:qwen3-4b": 0, "m:total_tokens:backup": 120,
 	} {
@@ -193,7 +193,7 @@ func TestAModelsKeysAreWalkedBeforeTheFallback(t *testing.T) {
 	if len(vendor.keys) != 4 {
 		t.Errorf("keys dialled = %v, want each twice before the fallback", vendor.keys)
 	}
-	if got := f.store.Usage["abc123"]["request_count"]; got != 1 {
+	if got := f.store.UsageOf("abc123")["request_count"]; got != 1 {
 		t.Errorf("request_count = %d", got)
 	}
 }
@@ -232,7 +232,7 @@ func TestAFallbackTheCallerMayNotUseIsSkipped(t *testing.T) {
 	resp := f.post("/v1/chat/completions",
 		`{"model":"qwen3-4b","messages":[],"fallbacks":["ungranted","unknown","backup"]}`)
 
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	if resp.Code != http.StatusOK || usage["m:request_count:backup"] != 1 || usage["m:request_count:ungranted"] != 0 {
 		t.Fatalf("status = %d, usage = %v", resp.Code, usage)
 	}
@@ -246,7 +246,8 @@ func TestAFallbackTheCallerMayNotUseIsSkipped(t *testing.T) {
 	}
 }
 
-// Every model failing leaves the last one's answer as the client's, body and headers, billed once.
+// Every model failing leaves the last one's answer as the client's, body and headers, and no request
+// billed: nobody served them.
 func TestEveryModelFailingRelaysTheLastAnswer(t *testing.T) {
 	f := newFixture(t, failing(http.StatusBadGateway))
 	addBackup(t, f, func(w http.ResponseWriter, _ *http.Request) {
@@ -262,8 +263,8 @@ func TestEveryModelFailingRelaysTheLastAnswer(t *testing.T) {
 	if got := resp.Header().Values("Retry-After"); len(got) != 1 || got[0] != "2" {
 		t.Errorf("headers = %v, want the backup's only", resp.Header())
 	}
-	if got := f.store.Usage["abc123"]["request_count"]; got != 1 {
-		t.Errorf("request_count = %d", got)
+	if got := f.store.UsageOf("abc123")["request_count"]; got != 0 {
+		t.Errorf("request_count = %d, want 0", got)
 	}
 }
 
@@ -290,8 +291,8 @@ func TestAVendorFallbackAnswersUnderItsOwnName(t *testing.T) {
 	if !bytes.Contains(f.seen.body, []byte(`"model":"deepseek-chat"`)) {
 		t.Errorf("vendor's body = %s, want its own id", f.seen.body)
 	}
-	if got := f.store.Usage["abc123"]["m:request_count:deepseek/chat"]; got != 1 {
-		t.Errorf("usage = %v", f.store.Usage["abc123"])
+	if got := f.store.UsageOf("abc123")["m:request_count:deepseek/chat"]; got != 1 {
+		t.Errorf("usage = %v", f.store.UsageOf("abc123"))
 	}
 }
 

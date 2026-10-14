@@ -13,8 +13,9 @@ import (
 // Keys holds credentials and the policy behind each: what it may call, where, how fast, and the
 // cap it spends against.
 type Keys interface {
-	// Resolve reads a credential and what stands behind it in one step: the key and each group it
-	// is in. found=false for a key that was never pushed.
+	// Resolve reads a credential and what stands behind it in one step: the key, its team's
+	// record when the store holds one, and each group it is in. found=false for a key that was
+	// never pushed.
 	Resolve(ctx context.Context, meterID string) (holder Holder, found bool, err error)
 	Upsert(ctx context.Context, records []KeyUpsert) error
 	Delete(ctx context.Context, ids []string) (int, error)
@@ -26,6 +27,9 @@ type Keys interface {
 // Holder is a credential and what stands behind it, as the store read them.
 type Holder struct {
 	Key domain.KeyRecord
+	// Team is the record of the team the key names; nil when the store holds none, which is a
+	// key pushed with its team's fields on it, from before teams were pushed.
+	Team *domain.TeamRecord
 	// Groups is each group the key lists, by name. One never pushed is here as the zero value.
 	Groups map[string]domain.GroupRecord
 }
@@ -99,13 +103,17 @@ type Usage interface {
 	// Accrue lands one request in one atomic step — its counters, its cost, and the key's
 	// spend — so a drain never sees half a request, and never a counter without its cost.
 	Accrue(ctx context.Context, accrual Accrual) error
-	// Drain sets live counters aside under newID — every one, or only these prefixes when keys is
+	// Drain sets live counters aside under newID — every one, or only these prefixes' when keys is
 	// non-empty — and answers every counter not yet acknowledged, old drains included, so one the
 	// control plane failed to record comes back under its own id. Nothing is deleted here.
 	Drain(ctx context.Context, newID string, keys []string) (Drains, error)
-	// Ack marks (drain id → prefixes) recorded: each is kept for retention, then expires. A pair
-	// that is not unacknowledged is a no-op. → how many pairs moved.
-	Ack(ctx context.Context, acks map[string][]string, retention time.Duration) (int, error)
+	// Peek answers what Drain would without setting anything aside: every live counter under the
+	// id "" beside every counter not yet acknowledged, only these prefixes' when keys is non-empty.
+	// For a control plane that needs this box's figure now and will land it on its next drain.
+	Peek(ctx context.Context, keys []string) (Drains, error)
+	// Ack marks (drain id → prefix → days) recorded: each is kept for retention, then expires. A
+	// counter that is not unacknowledged is a no-op. → how many moved.
+	Ack(ctx context.Context, acks Acks, retention time.Duration) (int, error)
 	// Replay lands a spooled accrual exactly as Accrue would, once per ID: a second replay of the
 	// same ID (a crash mid-pass) moves nothing. → whether it landed now.
 	Replay(ctx context.Context, accrual Accrual) (bool, error)
@@ -113,8 +121,48 @@ type Usage interface {
 	Ping(ctx context.Context) error
 }
 
-// Drains is drain id → bare prefix → counters, as the control plane receives them.
-type Drains map[string]map[string]map[string]string
+// Drains is drain id → key prefix → day → counters, as the control plane receives them. The day
+// is the UTC day the requests were served, "2006-01-02" (the bucket's, UsageBucket); "" is a
+// counter from before this store bucketed by day, which the control plane lands on the day it pulls.
+type Drains map[string]map[string]map[string]map[string]string
+
+// Put files one drained counter under its drain, prefix and day.
+func (d Drains) Put(id, prefix, day string, counters map[string]string) {
+	if d[id] == nil {
+		d[id] = map[string]map[string]map[string]string{}
+	}
+	if d[id][prefix] == nil {
+		d[id][prefix] = map[string]map[string]string{}
+	}
+	d[id][prefix][day] = counters
+}
+
+// Acks is drain id → key prefix → the days the control plane recorded.
+type Acks map[string]map[string][]string
+
+// UsageBucket names the live counter a request lands in: its key's prefix and the UTC day it was
+// served, off the same clock as the key's spend, so the control plane's day and month are the
+// store's own.
+func UsageBucket(prefix string, now time.Time) string { return Bucket(prefix, domain.DayOf(now)) }
+
+// Bucket joins a prefix and a day as the store names a counter. A blank day is the bare prefix: a
+// counter from before buckets carried one.
+func Bucket(prefix, day string) string {
+	if day == "" {
+		return prefix
+	}
+	return prefix + ":" + day
+}
+
+// SplitBucket is Bucket undone: the prefix and the day, "" when the bucket carries none.
+func SplitBucket(bucket string) (prefix, day string) {
+	if i := len(bucket) - len(":2006-01-02"); i > 0 && bucket[i] == ':' {
+		if _, err := time.Parse("2006-01-02", bucket[i+1:]); err == nil {
+			return bucket[:i], bucket[i+1:]
+		}
+	}
+	return bucket, ""
+}
 
 // State is the desired-state push: apply what the payload names, delete what it does not, and
 // store the hashes it carried — all in one transaction, so the hashes never claim state that
@@ -164,6 +212,14 @@ type GroupUpsert struct {
 	Models string // comma list
 }
 
+type TeamUpsert struct {
+	Team        string // Central Team doc name — the record id
+	Limited     bool
+	Prepaid     bool
+	LogPayloads bool
+	Limits      string // comma list of metric:window:value; what its keys run under by default
+}
+
 // Accrual is one metered request. Fields already carry the cost beside the counters; Cost is
 // repeated so the store can move the key's spend for the month without reading the map back.
 type Accrual struct {
@@ -179,13 +235,19 @@ type Accrual struct {
 }
 
 // The state-push shapes (plan_agent_state_sync.md). A nil section is untouched; a present one is
-// authoritative for its namespace, so anything it does not name is deleted. keys arrive in
-// buckets (domain.BucketOf) and each bucket prunes only its own members.
+// authoritative for its namespace, so anything it does not name is deleted. teams and keys arrive
+// in buckets (domain.BucketOf) and each bucket prunes only its own members.
 
 type StatePush struct {
 	Groups *GroupsPush
-	Keys   map[string]KeyBucket // bucket label → contents; empty Records = prune the bucket
+	Teams  map[string]TeamBucket // bucket label → contents; empty Records = prune the bucket
+	Keys   map[string]KeyBucket
 	Routes *RoutesPush
+}
+
+type TeamBucket struct {
+	Hash    string
+	Records []TeamUpsert
 }
 
 type GroupsPush struct {
@@ -206,6 +268,7 @@ type RoutesPush struct {
 // StateCounts is records written per section, informational for the control plane's run log.
 type StateCounts struct {
 	Groups int `json:"groups"`
+	Teams  int `json:"teams"`
 	Keys   int `json:"keys"`
 	Routes int `json:"routes"`
 }
