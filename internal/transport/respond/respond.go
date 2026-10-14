@@ -47,13 +47,14 @@ func TypedErrorFor(w http.ResponseWriter, r *http.Request, status int, errorType
 
 type dialectKey struct{}
 
-// WithDialect records the surface a request arrived on. The /anthropic alias sets it as it strips
-// the prefix, the only point that still knows which surface it was.
+// WithDialect records the surface a request arrived on. Each base (/openai, /anthropic) sets it as
+// it strips its prefix, the only point that still knows which surface it was.
 func WithDialect(ctx context.Context, dialect string) context.Context {
 	return context.WithValue(ctx, dialectKey{}, dialect)
 }
 
-// Dialect is the surface a request arrived on. Root is the OpenAI surface, so unset is OpenAI.
+// Dialect is the surface a request arrived on. Unset is OpenAI: the gateway's own root routes
+// answer in that shape.
 func Dialect(ctx context.Context) string {
 	if d, _ := ctx.Value(dialectKey{}).(string); d != "" {
 		return d

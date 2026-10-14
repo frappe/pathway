@@ -27,7 +27,7 @@ never registered, so no handler on that box could read a key store even if one w
 5. Proxies it, streaming the response through untouched, and reads the usage frame out on the way.
 6. Records the hop's outcome on every request, and the tokens on every one the upstream took — a
    2xx that was then abandoned or cut short included; a refusal, a 5xx or no answer is not a request.
-7. Answers `/v1/models` and `/v1/credits` itself, and `/metrics/node` behind basic auth.
+7. Answers each base's `/v1/models` and the root `/v1/credits` itself, and `/metrics/node` behind basic auth.
 8. Upgrades its own binary and reloads its own configuration without dropping a connection.
 
 Requirements: Redis (loopback, or the Network's shared store), a certificate on disk, and an admin token. It refuses to start
@@ -380,7 +380,7 @@ team, read per request, so turning it takes effect on the next one). One JSON li
 request ends — a client that hung up mid-stream still gets one, with what it had received:
 
 `rid` (joins the access line), `key`, `user`, `model`, `fallback` (the model whose output this is,
-when not the one asked for; else `-`), `path` (after the `/anthropic` strip),
+when not the one asked for; else `-`), `path` (after the base's `/openai` or `/anthropic` strip),
 `status`, `prompt`, `output`, `output_encoding` (only when `base64`), `prompt_bytes`,
 `output_bytes`.
 
@@ -430,7 +430,7 @@ costs its size.
 
 ### A request, layer by layer
 
-What each layer contributes, for one `POST /v1/chat/completions`:
+What each layer contributes, for one `POST /openai/v1/chat/completions`:
 
 | | Layer | |
 |---|---|---|
@@ -478,7 +478,7 @@ document cannot be repaired this way and is still just dropped.
 ### The client interface
 
 Clients speak one of two shapes, and a vendor is only ever reached on one of two paths:
-`/v1/chat/completions` (OpenAI) and `/anthropic/v1/messages` (Anthropic). Nothing converts between
+`/openai/v1/chat/completions` (OpenAI) and `/anthropic/v1/messages` (Anthropic). Nothing converts between
 them. Engines we run take both shapes and their own extras, and are sent what the client sent; what
 follows is about a hop to a vendor.
 
@@ -1418,11 +1418,12 @@ for `openai`, `/v1/messages` for `anthropic`. Anything else is our 404 at `routi
 `vendorPaths` in `domain/dialect.go`, path → dialect: serving another (`/v1/responses` for
 `openai`, say) is a row there.
 
-The surface is not read off the path. The `/anthropic` alias strips its prefix before the chain
-runs, so below it `/anthropic/v1/messages` and a stray root `/v1/messages` look the same; the alias
-records the surface on the request as it strips (`respond.WithDialect`), and everything below —
-`routing.Request.Dialect`, the refusal's shape, the proxy's own errors — reads `respond.Dialect`.
-Unmarked is OpenAI, because root is the OpenAI surface.
+The surface is not read off the path. Each base (`/openai`, `/anthropic`) strips its prefix before
+the chain runs, so below it `/openai/v1/chat/completions` and `/anthropic/v1/messages` are both
+`/v1/…`; the base records the surface on the request as it strips (`respond.WithDialect`), and
+everything below — `routing.Request.Dialect`, the refusal's shape, the proxy's own errors — reads
+`respond.Dialect`. Unmarked is OpenAI, the shape the gateway's own root routes answer in. Root
+serves no dialect: a data path there is a 404 naming the base it belongs under.
 
 ### Backwards compatibility that is still load-bearing
 
@@ -1438,9 +1439,10 @@ Unmarked is OpenAI, because root is the OpenAI surface.
 
 | | |
 |---|---|
-| `POST /v1/*` | the data path for OpenAI clients. `/v1/messages` here is a 404 pointing at `/anthropic` |
+| `POST /openai/v1/*` | the data path for OpenAI clients (`OPENAI_BASE_URL=<gateway>/openai/v1` — that SDK's base carries the `/v1`, Anthropic's does not): everything an engine answers on that shape — chat, completions, embeddings, audio, the realtime upgrade. `/v1/messages` under it is a 404 pointing at `/anthropic` |
 | `POST /anthropic/v1/*` | the data path for Anthropic clients (`ANTHROPIC_BASE_URL=<gateway>/anthropic`): `/v1/messages` only — anything else under it is a 404 in Anthropic's shape — keyed by `x-api-key` or a Bearer |
-| `GET /v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
+| `POST /v1/*` | nothing: a 404 naming the base the path belongs under (`/openai/v1/chat/completions`, `/anthropic/v1/messages`) |
+| `GET /openai/v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
 | `GET /v1/credits` | answered here: what the key has left of its own monthly cap on this store this month, in US dollars to the cent — `{"balance", "spent"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it. A key of a free team reads zeros |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
@@ -1481,7 +1483,7 @@ was unreadable turns one broken dependency into an outage.
 ### Status vocabulary
 
 Every refusal speaks its surface's shape — `{"error":{"message":…,"type":…}}` for OpenAI clients,
-`{"type":"error","error":{…}}` under `/anthropic` — so a client parses them the same way whichever
+`{"type":"error","error":{…}}` under `/anthropic`, `{"error":{…}}` under `/openai` — so a client parses them the same way whichever
 gate produced it. `type` is the error's class, named off the status as the
 Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except `maintenance` and
 `draining`, which a 503 alone does not say.
@@ -1532,7 +1534,7 @@ curl -XPUT localhost:8080/grove-admin/keys -H 'X-Grove-Admin-Token: tok' \
 curl -XPUT localhost:8080/grove-admin/routes -H 'X-Grove-Admin-Token: tok' \
   -d '{"routes":{"qwen3-4b":[{"engine_url":"http://127.0.0.1:8000","internal_key":"k","healthy":true,"deployment":"MD-1","kind":"direct"}]}}'
 
-curl localhost:8080/v1/chat/completions -H 'Authorization: Bearer gr_demo' \
+curl localhost:8080/openai/v1/chat/completions -H 'Authorization: Bearer gr_demo' \
   -d '{"model":"qwen3-4b","messages":[]}'
 redis-cli -p 6399 HGETALL usage:dev
 ```

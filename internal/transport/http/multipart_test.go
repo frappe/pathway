@@ -69,7 +69,7 @@ func TestAMultipartUploadIsRoutedAndForwardedByteForByte(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{"text":"hello"}`))
 	body, contentType := multipartForm(t, "model", "qwen3-4b", "@file", "RIFFfake-wav-payload")
 
-	resp := f.postForm("/v1/audio/transcriptions", body, contentType)
+	resp := f.postForm("/openai/v1/audio/transcriptions", body, contentType)
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
@@ -96,7 +96,7 @@ func TestAMultipartUploadFindsTheModelAfterTheFile(t *testing.T) {
 		"model", "qwen3-4b",
 	)
 
-	resp := f.postForm("/v1/audio/transcriptions", body, contentType)
+	resp := f.postForm("/openai/v1/audio/transcriptions", body, contentType)
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
@@ -116,7 +116,7 @@ func TestAMultipartUploadOverAnIngressCarriesItsModelAsAHeader(t *testing.T) {
 	f.store.Routes["qwen3-4b"][0].Kind = "ingress"
 	body, contentType := multipartForm(t, "@file", "RIFFfake", "model", "qwen3-4b")
 
-	if resp := f.postForm("/v1/audio/transcriptions", body, contentType); resp.Code != http.StatusOK {
+	if resp := f.postForm("/openai/v1/audio/transcriptions", body, contentType); resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
 	if f.seen.groveModel != "qwen3-4b" {
@@ -137,7 +137,7 @@ func TestAnUploadPastTheSpillThresholdStillArrivesIntact(t *testing.T) {
 		"model", "qwen3-4b",
 	)
 
-	resp := f.postForm("/v1/audio/transcriptions", body, contentType)
+	resp := f.postForm("/openai/v1/audio/transcriptions", body, contentType)
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
@@ -153,7 +153,7 @@ func TestAMultipartUploadWithNoModelIsRefused(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{"text":"hello"}`))
 	body, contentType := multipartForm(t, "@file", "RIFFfake")
 
-	resp := f.postForm("/v1/audio/transcriptions", body, contentType)
+	resp := f.postForm("/openai/v1/audio/transcriptions", body, contentType)
 
 	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "names no model") {
 		t.Errorf("status = %d, body = %s, want 400 naming the fault", resp.Code, resp.Body)
@@ -172,7 +172,7 @@ func TestAnOversizedMultipartUploadIsRefused(t *testing.T) {
 	handler := buildHandler(t, store, config.Config{}, 128)
 
 	body, contentType := multipartForm(t, "model", "qwen3-4b", "@file", strings.Repeat("a", 4096))
-	r := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/audio/transcriptions", bytes.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+secret)
 	r.Header.Set("Content-Type", contentType)
 	w := httptest.NewRecorder()
@@ -199,7 +199,7 @@ func TestAnUnmeasurableMultipartUploadStillHitsTheCap(t *testing.T) {
 	handler := buildHandler(t, store, config.Config{}, 256)
 
 	body, contentType := multipartForm(t, "model", "qwen3-4b", "@file", strings.Repeat("a", 8192))
-	r := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", bytes.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/audio/transcriptions", bytes.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+secret)
 	r.Header.Set("Content-Type", contentType)
 	r.ContentLength = -1 // what net/http reports for a chunked body
@@ -235,7 +235,7 @@ func TestAMultipartFormPinsItsSession(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{"text":"hello"}`))
 			body, contentType := multipartForm(t, "user", "caller-7", "model", "qwen3-4b", "@file", "RIFF")
 
-			if resp := f.postForm("/v1/audio/transcriptions", body, contentType, tc.headers...); resp.Code != http.StatusOK {
+			if resp := f.postForm("/openai/v1/audio/transcriptions", body, contentType, tc.headers...); resp.Code != http.StatusOK {
 				t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 			}
 			if _, pinned := f.store.Sticky[tc.want]; !pinned {
@@ -265,7 +265,7 @@ func TestARealChunkedMultipartUploadStreamsThrough(t *testing.T) {
 		_ = pipe.Close()
 	}()
 
-	request, err := http.NewRequest(http.MethodPost, front.URL+"/v1/audio/transcriptions", reader)
+	request, err := http.NewRequest(http.MethodPost, front.URL+"/openai/v1/audio/transcriptions", reader)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestAnEnormousModelFieldIsBounded(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{"text":"hello"}`))
 	body, contentType := multipartForm(t, "model", strings.Repeat("x", 64<<10))
 
-	resp := f.postForm("/v1/audio/transcriptions", body, contentType)
+	resp := f.postForm("/openai/v1/audio/transcriptions", body, contentType)
 
 	if resp.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 for an unknown model", resp.Code)
@@ -309,7 +309,7 @@ func TestAnEnormousModelFieldIsBounded(t *testing.T) {
 func TestJSONBodiesAreUnaffectedByTheMultipartBranch(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)

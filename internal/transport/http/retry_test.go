@@ -63,7 +63,7 @@ const chatBody = `{"model":"deepseek/chat","messages":[{"role":"user","content":
 // chat posts one request and hands back the vendor's view of it.
 func (v *keyedVendor) chat(f *fixture) *httptest.ResponseRecorder {
 	v.keys = nil
-	return f.post("/v1/chat/completions", chatBody)
+	return f.post("/openai/v1/chat/completions", chatBody)
 }
 
 // rotated posts one request on a fresh fixture: the turn starts at the first key, the refused one,
@@ -219,7 +219,7 @@ func TestASingleKeyIsNotRetried(t *testing.T) {
 // has no id.
 func TestAnEngineRefusalIsNotAKeyFailure(t *testing.T) {
 	f := newFixture(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTooManyRequests) })
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 
 	if resp.Code != http.StatusTooManyRequests {
 		t.Errorf("status = %d", resp.Code)
@@ -234,7 +234,7 @@ func TestAGoneClientIsNotRetried(t *testing.T) {
 	f, vendor := keyedFixture(t, map[string]int{"A": 429, "B": 429}, "A", "B")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatBody)).WithContext(ctx)
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(chatBody)).WithContext(ctx)
 	r.Header.Set("Authorization", "Bearer "+secret)
 	r.Header.Set("Content-Type", "application/json")
 	f.handler.ServeHTTP(httptest.NewRecorder(), r)
@@ -324,7 +324,7 @@ func TestAnEngineRefusingItsKeyIsTheGatewaysAnswer(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"bad api key"}`))
 	})
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 
 	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "upstream credential rejected") {
 		t.Errorf("status = %d, body = %s", resp.Code, resp.Body)

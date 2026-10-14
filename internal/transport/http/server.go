@@ -128,49 +128,55 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Exact match, so it wins over the /v1/ proxy and is never forwarded to an engine — an engine
-	// only knows its own model. Outside the data chain: it needs no route and claims no slot.
-	mux.Handle("GET /v1/models", drain(http.HandlerFunc(s.handleModels)))
-	// Any other method. Left to the proxy it reads a model out of the body and answers that the
-	// MODEL does not serve the path, which sends the caller looking at the wrong thing.
-	mux.Handle("/v1/models", drain(http.HandlerFunc(modelListIsGetOnly)))
-	// The gateway's own answer too: the holder's credit as this store counts it.
-	mux.Handle("GET /v1/credits", drain(http.HandlerFunc(s.handleCredits)))
-	mux.Handle("/v1/", openaiRoot(&s.chain))
-	// Anthropic clients live under the provider convention they arrive with,
-	// ANTHROPIC_BASE_URL=<base>/anthropic, their SDK appending /v1/*. Root is the OpenAI surface.
+	// Each dialect lives under the provider convention its clients arrive with:
+	// OPENAI_BASE_URL=<base>/openai/v1 (that SDK's base carries the /v1) and
+	// ANTHROPIC_BASE_URL=<base>/anthropic (that one appends /v1/messages itself).
+	// The model list is an exact match, so it wins over the proxy and is never forwarded to
+	// an engine, which only knows its own model. Outside the data chain: no route, no slot. Any
+	// other method on it is refused by name: left to the proxy it would read a model out of the
+	// body and answer that the MODEL does not serve the path.
+	mux.Handle("GET /openai/v1/models", drain(http.HandlerFunc(s.handleModels)))
+	mux.Handle("/openai/v1/models", drain(http.HandlerFunc(modelListIsGetOnly)))
+	mux.Handle("/openai/", s.surface("/openai", domain.DialectOpenAI, servesOpenAI, &s.chain))
 	mux.Handle("GET /anthropic/v1/models", drain(http.HandlerFunc(s.handleAnthropicModels)))
 	mux.Handle("/anthropic/v1/models", drain(http.HandlerFunc(modelListIsGetOnly)))
-	mux.Handle("/anthropic/", s.anthropicAlias(&s.chain))
+	mux.Handle("/anthropic/", s.surface("/anthropic", domain.DialectAnthropic, servesAnthropic, &s.chain))
+	// Root holds only the gateway's own answers: the holder's credit as this store counts it, and
+	// the banner. A vendor path at root is sent to its base.
+	mux.Handle("GET /v1/credits", drain(http.HandlerFunc(s.handleCredits)))
+	mux.Handle("/v1/", http.HandlerFunc(rootRefusal))
 	mux.Handle("GET /{$}", drain(http.HandlerFunc(root)))
 	// The whole surface behind recover+accesslog, so the routes the mux answers itself — the model
 	// lists, the root banner, alias refusals, plain 404s — leave a line like everything else.
 	return s.logged(mux), nil
 }
 
-// openaiRoot refuses the Anthropic surfaces at root, before any stage runs: root is the OpenAI
-// surface, and an Anthropic client belongs under /anthropic.
-func openaiRoot(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if domain.PathDialect(r.URL.Path) == domain.DialectAnthropic {
-			respond.Error(w, http.StatusNotFound, "no such path at root; Anthropic clients use /anthropic"+r.URL.Path)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// rootRefusal answers a data path at root: nothing is served there, so the caller is sent to the
+// base its path belongs under.
+func rootRefusal(w http.ResponseWriter, r *http.Request) {
+	base, client := "/openai", "OpenAI"
+	if domain.PathDialect(r.URL.Path) == domain.DialectAnthropic {
+		base, client = "/anthropic", "Anthropic"
+	}
+	respond.Error(w, http.StatusNotFound, "no such path at root; "+client+" clients use "+base+r.URL.Path)
 }
 
-// anthropicAlias strips the prefix and refuses everything that is not an Anthropic surface —
-// serving an OpenAI path under an Anthropic-declared base would answer in the wrong shape. The
-// caller is identified before that refusal, as /v1/ does in the chain: a keyless hit on the bare
-// base is told its key is missing, not that the base does not exist.
-func (s *Server) anthropicAlias(next http.Handler) http.Handler {
-	stripped := http.StripPrefix("/anthropic", next)
+// The OpenAI surface is open — engines of ours answer embeddings, audio and realtime on that
+// shape — and refuses only the other dialect's own path. The Anthropic surface is closed to its
+// own: serving an OpenAI path under an Anthropic-declared base would answer in the wrong shape.
+func servesOpenAI(path string) bool    { return domain.PathDialect(path) != domain.DialectAnthropic }
+func servesAnthropic(path string) bool { return domain.PathDialect(path) == domain.DialectAnthropic }
+
+// surface strips the base a client declared, marks the dialect it speaks, and refuses what that
+// surface does not serve. The caller is identified before the refusal, as the chain does: a
+// keyless hit on the bare base is told its key is missing, not that the base does not exist.
+func (s *Server) surface(prefix, dialect string, serves func(string) bool, next http.Handler) http.Handler {
+	stripped := http.StripPrefix(prefix, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(respond.WithDialect(r.Context(), domain.DialectAnthropic))
-		if domain.PathDialect(strings.TrimPrefix(r.URL.Path, "/anthropic")) != domain.DialectAnthropic {
+		r = r.WithContext(respond.WithDialect(r.Context(), dialect))
+		if !serves(strings.TrimPrefix(r.URL.Path, prefix)) {
 			if _, ok := s.identifyCaller(w, r); ok {
-				respond.ErrorFor(w, r, http.StatusNotFound, "no such path under /anthropic; Anthropic clients use /anthropic/v1/messages")
+				respond.ErrorFor(w, r, http.StatusNotFound, "no such path under "+prefix+"; Anthropic clients use /anthropic/v1/messages")
 			}
 			return
 		}

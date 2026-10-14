@@ -40,7 +40,7 @@ func TestThePrepaidGate(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
 			f.withKey(tc.edit)
 
-			resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+			resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 			if resp.Code != tc.status {
 				t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 			}
@@ -108,7 +108,7 @@ func TestAServedRequestSpendsTheCap(t *testing.T) {
 		Counters: counters(t),
 	}
 
-	if resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
 	cost := int64(20*3000 + 80*300 + 20*15000)
@@ -125,10 +125,10 @@ func TestAServedRequestSpendsTheCap(t *testing.T) {
 		t.Errorf("spent = %d, want %d", spent, cost)
 	}
 	// 384,000 spent of 400,000: one more request of the same size crosses the ceiling.
-	if resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusOK {
 		t.Fatalf("second status = %d", resp.Code)
 	}
-	if resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusPaymentRequired {
+	if resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`); resp.Code != http.StatusPaymentRequired {
 		t.Fatalf("third status = %d, want 402 once the cap is spent", resp.Code)
 	}
 }
@@ -211,7 +211,7 @@ func TestTheTeamRecordGatesItsKeys(t *testing.T) {
 			f.withKey(tc.key)
 			f.store.Teams["test-team"] = tc.team
 
-			resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+			resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 			if resp.Code != tc.status {
 				t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 			}

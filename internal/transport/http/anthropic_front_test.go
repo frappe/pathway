@@ -166,21 +166,42 @@ func TestTheAliasServesADialectFilteredAnthropicModelList(t *testing.T) {
 	}
 }
 
-// Root is the OpenAI surface: an Anthropic path there is refused before any stage runs, pointing
-// the client at /anthropic, and nothing is dialled.
-func TestRootRefusesTheAnthropicSurface(t *testing.T) {
-	for _, path := range []string{"/v1/messages", "/v1/messages/"} {
+// Root serves no dialect: a data path there is refused before any stage runs, pointing the
+// client at the base its path belongs under, and nothing is dialled.
+func TestRootSendsEachDialectToItsBase(t *testing.T) {
+	for path, base := range map[string]string{
+		"/v1/messages":         "/anthropic",
+		"/v1/messages/":        "/anthropic",
+		"/v1/chat/completions": "/openai",
+		"/v1/embeddings":       "/openai",
+	} {
 		f := providerFixtureAnswering(t, jsonEngine(anthropicMessage))
 		resp := f.post(path, `{"model":"anthropic/claude-4-5","max_tokens":16,"messages":[]}`)
 		if resp.Code != http.StatusNotFound {
 			t.Errorf("%s: status = %d, want 404", path, resp.Code)
 		}
-		if !strings.Contains(resp.Body.String(), "/anthropic"+path) {
+		if !strings.Contains(resp.Body.String(), base+path) {
 			t.Errorf("%s: the refusal must name where the client belongs: %s", path, resp.Body)
 		}
 		if f.seen.path != "" {
 			t.Errorf("%s was dialled upstream", path)
 		}
+	}
+}
+
+// The OpenAI base is open to everything an engine answers on that shape, and closed to the other
+// dialect's own path: /v1/messages under it would answer in the wrong shape, so it does not exist.
+func TestTheOpenAIBaseRefusesTheAnthropicSurface(t *testing.T) {
+	f := providerFixtureAnswering(t, jsonEngine(anthropicMessage))
+	resp := f.post("/openai/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16,"messages":[]}`)
+	if resp.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.Code)
+	}
+	if !strings.Contains(resp.Body.String(), "/anthropic/v1/messages") || strings.Contains(resp.Body.String(), `"type":"error"`) {
+		t.Errorf("the refusal must name the path to use, in the OpenAI shape: %s", resp.Body)
+	}
+	if f.seen.path != "" {
+		t.Error("/openai/v1/messages was dialled upstream")
 	}
 }
 
@@ -212,18 +233,18 @@ func TestAGatewayDenialSpeaksTheSurfacesDialect(t *testing.T) {
 		t.Errorf("anthropic surface got the OpenAI envelope: %s", resp.Body)
 	}
 
-	resp = f.post("/v1/chat/completions", `{"model":"nobody/nothing","messages":[]}`)
+	resp = f.post("/openai/v1/chat/completions", `{"model":"nobody/nothing","messages":[]}`)
 	if strings.Contains(resp.Body.String(), `"type":"error"`) ||
 		!strings.Contains(resp.Body.String(), `"error":{`) {
 		t.Errorf("openai surface must keep its own envelope: %s", resp.Body)
 	}
 }
 
-// The root list is the OpenAI surface's: an anthropic-only vendor model would 404 there, so it is
+// The OpenAI base's list is that surface's: an anthropic-only vendor model would 404 there, so it is
 // left off, while engines (both dialects) and openai vendors list.
 func TestTheRootModelListOmitsAnthropicOnlyModels(t *testing.T) {
 	f := openaiVendorFixture(t)
-	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
 	r.Header.Set("Authorization", "Bearer "+secret)
 	w := httptest.NewRecorder()
 	f.handler.ServeHTTP(w, r)
@@ -258,7 +279,7 @@ func TestAPostToTheModelListIsAMethodError(t *testing.T) {
 	f := openaiVendorFixture(t)
 	body := `{"model":"deepseek/chat","messages":[]}`
 	for path, envelope := range map[string]string{
-		"/v1/models":           `{"error":{`,
+		"/openai/v1/models":    `{"error":{`,
 		"/anthropic/v1/models": `{"error":{"message":"POST /anthropic/v1/models is not allowed: the model list is GET only","type":"invalid_request_error"},"type":"error"}`,
 	} {
 		w := f.post(path, body)

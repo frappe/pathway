@@ -73,7 +73,7 @@ func TestListingModelsLeavesAnAccessLine(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{}`))
 	access := accessFixture(t, f)
 
-	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
 	r.Header.Set("Authorization", "Bearer "+secret)
 	w := httptest.NewRecorder()
 	f.handler.ServeHTTP(w, r)
@@ -86,7 +86,7 @@ func TestListingModelsLeavesAnAccessLine(t *testing.T) {
 		t.Fatalf("got %d access lines, want exactly 1: %v", len(lines), lines)
 	}
 	line := lines[0]
-	if line["path"] != "/v1/models" || line["status"] != float64(200) {
+	if line["path"] != "/openai/v1/models" || line["status"] != float64(200) {
 		t.Errorf("access line = %v", line)
 	}
 	if line["key"] != "abc123" {
@@ -102,7 +102,7 @@ func TestListingModelsWithoutAKeyIsRefused(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{}`))
 
 	w := httptest.NewRecorder()
-	f.handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	f.handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401; body = %s", w.Code, w.Body)
 	}
@@ -132,7 +132,7 @@ func TestAChainedRequestLogsExactlyOnce(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
 	access := accessFixture(t, f)
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}

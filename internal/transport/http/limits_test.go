@@ -49,14 +49,14 @@ func TestARequestLimitRefusesPastItsCeiling(t *testing.T) {
 	f := limitedFixture(t, "requests:1m:2", &clock)
 
 	for i := 0; i < 2; i++ {
-		if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
 			t.Fatalf("request %d = %d: %s", i+1, resp.Code, resp.Body)
 		}
 	}
 	*f.seen = engineRecord{}
 	metered := f.store.UsageOf("abc123")["request_count"]
 
-	resp := f.post("/v1/chat/completions", limitedBody)
+	resp := f.post("/openai/v1/chat/completions", limitedBody)
 	if resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "30" {
 		t.Fatalf("third = %d, Retry-After %q; want 429, 30", resp.Code, resp.Header().Get("Retry-After"))
 	}
@@ -73,7 +73,7 @@ func TestARequestLimitRefusesPastItsCeiling(t *testing.T) {
 	}
 
 	clock = clock.Add(30 * time.Second)
-	if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
 		t.Fatalf("next minute = %d, want 200", resp.Code)
 	}
 }
@@ -85,11 +85,11 @@ func TestATokenLimitRefusesOnceADebitCrossesIt(t *testing.T) {
 	f := limitedFixture(t, "total_tokens:1h:200", &clock)
 
 	for i := 0; i < 2; i++ {
-		if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
 			t.Fatalf("request %d = %d: %s", i+1, resp.Code, resp.Body)
 		}
 	}
-	resp := f.post("/v1/chat/completions", limitedBody)
+	resp := f.post("/openai/v1/chat/completions", limitedBody)
 	if resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "3570" {
 		t.Fatalf("third = %d, Retry-After %q; want 429, 3570", resp.Code, resp.Header().Get("Retry-After"))
 	}
@@ -108,10 +108,10 @@ func TestTheLimitThatResetsLastIsNamed(t *testing.T) {
 	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	f := limitedFixture(t, "requests:1d:1,requests:1m:1", &clock)
 
-	if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
 		t.Fatalf("first = %d", resp.Code)
 	}
-	resp := f.post("/v1/chat/completions", limitedBody)
+	resp := f.post("/openai/v1/chat/completions", limitedBody)
 	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != "rate limit exceeded: 1 requests per 1d" {
 		t.Fatalf("second = %d, %q", resp.Code, message)
 	}
@@ -125,14 +125,14 @@ func TestTheLimitStoreIsOnlyReadForALimitedHolder(t *testing.T) {
 	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	f := limitedFixture(t, "", &clock)
 	f.store.Fail["limits"] = true
-	if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
 		t.Fatalf("unlimited = %d, want 200 with the limit store down", resp.Code)
 	}
 
 	f.withKey(func(k *domain.KeyRecord) {
 		k.Limits = []domain.Limit{{Metric: domain.LimitRequests, Window: "1m", Value: 5}}
 	})
-	resp := f.post("/v1/chat/completions", limitedBody)
+	resp := f.post("/openai/v1/chat/completions", limitedBody)
 	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusServiceUnavailable || message != "limit store error" {
 		t.Fatalf("limited = %d, %q; want 503 limit store error", resp.Code, message)
 	}
@@ -175,21 +175,21 @@ func TestTeamLimitsStandInWhereTheKeyNamesNone(t *testing.T) {
 
 	f := limitedFixture(t, "", &clock)
 	f.store.Teams["test-team"] = domain.TeamRecord{Limits: teamLimit}
-	if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
 		t.Fatalf("first = %d: %s", resp.Code, resp.Body)
 	}
-	if resp := f.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests {
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests {
 		t.Fatalf("second under the team's limit = %d, want 429: %s", resp.Code, resp.Body)
 	}
 
 	own := limitedFixture(t, "requests:1m:2", &clock)
 	own.store.Teams["test-team"] = domain.TeamRecord{Limits: teamLimit}
 	for i := 0; i < 2; i++ {
-		if resp := own.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		if resp := own.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
 			t.Fatalf("request %d under the key's own limit = %d: %s", i+1, resp.Code, resp.Body)
 		}
 	}
-	if resp := own.post("/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests {
+	if resp := own.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests {
 		t.Fatalf("third = %d, want 429 from the key's own limit: %s", resp.Code, resp.Body)
 	}
 }

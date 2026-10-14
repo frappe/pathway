@@ -97,7 +97,7 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	resp, buf, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	resp, buf, conn := upgrade(t, front, "/openai/v1/realtime?model=nemotron-asr")
 	defer conn.Close()
 
 	if resp.StatusCode != http.StatusSwitchingProtocols {
@@ -145,7 +145,7 @@ func TestARealtimeUpgradeWithNoModelIsRefused(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	resp, _, conn := upgrade(t, front, "/v1/realtime")
+	resp, _, conn := upgrade(t, front, "/openai/v1/realtime")
 	defer conn.Close()
 
 	if resp.StatusCode != http.StatusBadRequest {
@@ -161,7 +161,7 @@ func TestARealtimeUpgradeStillNeedsTheGrant(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	resp, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	resp, _, conn := upgrade(t, front, "/openai/v1/realtime?model=nemotron-asr")
 	defer conn.Close()
 
 	if resp.StatusCode != http.StatusForbidden {
@@ -195,7 +195,7 @@ func TestARealtimeUpgradeCarriesTheUpstreamsOwnModelID(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	resp, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	resp, _, conn := upgrade(t, front, "/openai/v1/realtime?model=nemotron-asr")
 	defer conn.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("status = %d, want 101", resp.StatusCode)
@@ -231,7 +231,7 @@ func TestARealtimeUpgradeWithNoUpstreamModelIsUntouched(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, realtimeStore(t, engine.URL, "transcription"), config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	_, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	_, _, conn := upgrade(t, front, "/openai/v1/realtime?model=nemotron-asr")
 	defer conn.Close()
 
 	select {

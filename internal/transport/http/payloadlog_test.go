@@ -43,7 +43,7 @@ func TestAnOptedInKeysPromptAndOutputAreLogged(t *testing.T) {
 	f, buf := payloadFixture(t, jsonEngine(`{"id":"chatcmpl-1",`+usageObject+`}`), true)
 	prompt := `{"model":"qwen3-4b","messages":[{"role":"user","content":"hi"}]}`
 
-	f.post("/v1/chat/completions", prompt)
+	f.post("/openai/v1/chat/completions", prompt)
 
 	line := jsonLine(t, buf)
 	if line["prompt"] != prompt {
@@ -68,7 +68,7 @@ func TestAnOptedInKeysPromptAndOutputAreLogged(t *testing.T) {
 func TestAKeyNotOptedInLogsNothing(t *testing.T) {
 	f, buf := payloadFixture(t, jsonEngine(`{`+usageObject+`}`), false)
 
-	f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+	f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 
 	if buf.Len() != 0 {
 		t.Errorf("payload was logged without the opt-in: %s", buf)
@@ -85,7 +85,7 @@ func TestAStreamIsCapturedWithoutBeingAltered(t *testing.T) {
 		_, _ = io.WriteString(w, frames)
 	}, true)
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
 
 	if resp.Body.String() != frames {
 		t.Errorf("stream altered:\n got: %q\nwant: %q", resp.Body.String(), frames)
@@ -114,7 +114,7 @@ func TestTheTeamRecordDecidesTheOptIn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f, buf := payloadFixture(t, jsonEngine(`{"id":"chatcmpl-1",`+usageObject+`}`), tc.key)
 			f.store.Teams["test-team"] = domain.TeamRecord{LogPayloads: tc.team}
-			if resp := f.post("/v1/chat/completions", prompt); resp.Code != http.StatusOK {
+			if resp := f.post("/openai/v1/chat/completions", prompt); resp.Code != http.StatusOK {
 				t.Fatalf("status = %d: %s", resp.Code, resp.Body)
 			}
 			if logged := strings.Contains(buf.String(), `"prompt"`); logged != tc.wantLogged {

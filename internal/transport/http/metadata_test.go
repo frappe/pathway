@@ -17,7 +17,7 @@ func TestRequestMetadataIsLoggedAndNotRelayed(t *testing.T) {
 	f.handler = buildHandler(t, f.store, config.Config{}, 0,
 		func(s *Services) { s.Access = slog.New(slog.NewJSONHandler(access, nil)) })
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`, "Authorization", "Bearer "+secret,
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`, "Authorization", "Bearer "+secret,
 		"X-Grove-Metadata", "app=hrms, trace=7f3a-91", "X-Grove-Session", "acme-bot")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d %s", resp.Code, resp.Body)
@@ -40,7 +40,7 @@ func TestMalformedRequestMetadataIsRefused(t *testing.T) {
 	f.handler = buildHandler(t, f.store, config.Config{}, 0,
 		func(s *Services) { s.Access = slog.New(slog.NewJSONHandler(access, nil)) })
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`, "Authorization", "Bearer "+secret,
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`, "Authorization", "Bearer "+secret,
 		"X-Grove-Metadata", "App=hrms")
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.Code)

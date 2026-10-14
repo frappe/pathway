@@ -27,14 +27,14 @@ func ridHeaders(t *testing.T, h http.Header) string {
 func TestEveryResponseCarriesARequestID(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
 
-	denied := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`, "Authorization", "Bearer wrong")
+	denied := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`, "Authorization", "Bearer wrong")
 	if denied.Code != http.StatusUnauthorized {
 		t.Fatalf("bad key = %d, want 401", denied.Code)
 	}
 	ridHeaders(t, denied.Header())
 
 	models := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
 	r.Header.Set("Authorization", "Bearer "+secret)
 	f.handler.ServeHTTP(models, r)
 	if models.Code != http.StatusOK {
@@ -65,7 +65,7 @@ func TestAnIngressAdoptsTheGatewaysRequestID(t *testing.T) {
 	f.handler = buildHandler(t, f.store, config.Config{IngressID: "ing-test", IngressToken: "ing-token"}, 0,
 		func(s *Services) { s.Access = slog.New(slog.NewJSONHandler(access, nil)) })
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`,
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`,
 		"Authorization", "Bearer ing-token", "X-Grove-Model", "qwen3-4b", "X-Request-Id", "01999999-0000-7000-8000-000000000001")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("ingress = %d %s", resp.Code, resp.Body)
