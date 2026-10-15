@@ -187,6 +187,20 @@ func (r Route) IsIngress() bool { return r.Kind == "ingress" }
 // kind from an engine's.
 func (r Route) IsProvider() bool { return r.Kind == "provider" }
 
+// MixedKinds reports whether a table holds both a vendor's rows and ours. A model is one kind: its
+// whole table goes to the vendor router or the engine router, and a mix has no router to go to.
+func MixedKinds(table []Route) bool {
+	var vendor, ours bool
+	for _, r := range table {
+		if r.IsProvider() {
+			vendor = true
+		} else {
+			ours = true
+		}
+	}
+	return vendor && ours
+}
+
 // HasRoom reports whether this engine can take another request. A placement with no
 // --max-num-seqs set has no number to hold it to, so it is never held back.
 func (r Route) HasRoom() bool { return r.Capacity <= 0 || r.InFlight < r.Capacity }

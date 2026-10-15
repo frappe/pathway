@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/frappe/pathway/internal/domain"
@@ -38,6 +40,9 @@ func (s *Service) UpsertGroups(ctx context.Context, records []repository.GroupUp
 // makes it 503 rather than keep a stale placement. `prune` says the payload is the COMPLETE table,
 // so anything unnamed is deleted — otherwise retiring one model means naming all of them.
 func (s *Service) ReplaceRoutes(ctx context.Context, table map[string][]domain.Route, prune bool) (models, pruned int, err error) {
+	if err := s.oneKindEach(table); err != nil {
+		return 0, 0, err
+	}
 	var retired []string
 	for model, routes := range table {
 		if len(routes) == 0 {
@@ -124,5 +129,25 @@ func (s *Service) StateHashes(ctx context.Context) (map[string]string, error) {
 // section names, delete what it does not, store the carried hashes — one transaction. An error
 // means none of it landed, and the control plane retries on its next tick.
 func (s *Service) ApplyState(ctx context.Context, push repository.StatePush) (repository.StateCounts, error) {
+	if push.Routes != nil {
+		if err := s.oneKindEach(push.Routes.Table); err != nil {
+			return repository.StateCounts{}, err
+		}
+	}
 	return s.store.State.Apply(ctx, push)
+}
+
+// oneKindEach refuses a push before any of it lands when a model's rows are both a vendor's and
+// ours (domain.MixedKinds): routing hands a whole table to one router. The whole push, not the one
+// model: a push is one transaction, and the control plane retries it each tick until the row is
+// fixed — so the model is named here too, where an operator with no control-plane access looks.
+// Models are walked in order so the one named is the same on every push.
+func (s *Service) oneKindEach(table map[string][]domain.Route) error {
+	for _, model := range slices.Sorted(maps.Keys(table)) {
+		if domain.MixedKinds(table[model]) {
+			s.log.Warn("routes push refused: model mixes vendor and self-hosted rows", "model", model)
+			return domain.Deny(400, model+" mixes vendor and self-hosted rows")
+		}
+	}
+	return nil
 }

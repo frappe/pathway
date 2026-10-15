@@ -275,6 +275,8 @@ It is not architecture for its own sake — it bought three specific things:
 | Question | File |
 |---|---|
 | Which engine gets this request? | `domain/route.go` — `PickRoute` |
+| Engine vs vendor routing | `service/routing/engine.go`, `service/routing/vendor.go`; their auth and key ring in `transport/http/middleware/engine.go`, `vendor.go` |
+| What a vendor reads differently | `service/vendor/vendor.go` — `known`, one `Vendor` per third party: its `Headers` and `Quirks` |
 | May this caller use this model? | `domain/access.go` — `CanUse`, `Evaluate` |
 | How many tokens did that cost? | `domain/usage.go` — `ParseUsage` |
 | Is this target broken? | `domain/health.go` |
@@ -313,7 +315,7 @@ proxy ──► engine (or ingress ──► engine)
 | `fallback` | runs the stages below again on the next model in the body's `fallbacks` when the one serving cannot (5xx, or a key failure `retry` could not rotate away). See [Fallback models](#fallback-models) |
 | `retry` | runs the stages below again with another credential when a vendor refuses the one dialled (429, 401/402/403); counts every attempt against its key |
 | `transform` | the registered body rewrites; re-encodes only if one changed something |
-| `upstreamauth` | swaps in the engine's internal key, sets the forwarding and ingress headers |
+| `upstreamauth` | sets the forwarding headers, then the target's own auth: an engine's internal key and the ingress headers (`engineAuth`), or a vendor's key in its scheme (`vendorAuth`) |
 
 Order is load-bearing in two places. `drain` sits above `auth`, so a restarting gateway answers the
 same way whether or not the caller's key is any good. `meter` sits directly below `route`, because
@@ -519,14 +521,15 @@ What a vendor is sent in place of what the client sent:
 - **A listed field a vendor cannot take is sent anyway**; dropping it would change what the caller
   asked for. On a fallback, that vendor's refusal moves the request on (see
   [Fallback models](#fallback-models)).
-- **Where an upstream differs is one table**, `vendors` in `internal/service/transform/vendors.go`,
-  keyed by the vendor's name as the control plane pushes it: the field it reads the output cap from
-  (`outputCap`), whether it is asked for usage on every chunk of a stream (`usagePerChunk`), and
-  four things DeepSeek refuses: a tool typed `"custom"` (`untypedTools`), a `developer` message
-  (`developerAsSystem`), a past tool call with no reasoning (`blankReasoning`) and a forced tool
-  while thinking (`unthinkForcedTool`). One is OpenAI's: a function tool while the model reasons
-  (`unreasonWithTools`) and sampling of the caller's while it reasons (`defaultSampling`). One more is a header, not a field: an Anthropic front that
-  reads the key as a Bearer (`bearerOnAnthropic`, Baseten), read by `upstreamauth`.
+- **Where an upstream differs is one value per vendor**, `known` in `internal/service/vendor/vendor.go`,
+  keyed by the vendor's name as the control plane pushes it. Its `Quirks` are the fields it reads
+  differently: the field it reads the output cap from
+  (`OutputCap`), whether it is asked for usage on every chunk of a stream (`UsagePerChunk`), and
+  four things DeepSeek refuses: a tool typed `"custom"` (`UntypedTools`), a `developer` message
+  (`DeveloperAsSystem`), a past tool call with no reasoning (`BlankReasoning`) and a forced tool
+  while thinking (`UnthinkForcedTool`). One is OpenAI's: a function tool while the model reasons
+  (`UnreasonWithTools`) and sampling of the caller's while it reasons (`DefaultSampling`). One more is a header, not a field, so it is Baseten's own
+  `Headers`: an Anthropic front that reads the key as a Bearer, set by `upstreamauth`.
   [vendor_quirks.md](vendor_quirks.md) shows each with what the caller sent and what the vendor
   gets. It names OpenAI,
   DeepSeek and Baseten; an engine of ours and a vendor it does not name each have an entry of their
@@ -544,20 +547,20 @@ one list of it: add a row or a column when a new difference shows up, with the d
 
 | | Engines we run (vLLM) | OpenAI | DeepSeek | Baseten | Handled by |
 |---|---|---|---|---|---|
-| Output cap field (OpenAI shape) | either name | `max_completion_tokens` only; 400 on `max_tokens` | `max_tokens` (2026-10-04: capped at 16) | `max_tokens` (2026-10-05: capped at 16) | `vendorfields`, from `vendors` |
-| `stream_options.continuous_usage_stats` | taken | 400 (2026-10-05) | ignored (2026-10-05) | taken (2026-10-05) | `streamusage`, from `vendors`: sent to our engines and Baseten |
+| Output cap field (OpenAI shape) | either name | `max_completion_tokens` only; 400 on `max_tokens` | `max_tokens` (2026-10-04: capped at 16) | `max_tokens` (2026-10-05: capped at 16) | `vendorfields`, from `vendor` |
+| `stream_options.continuous_usage_stats` | taken | 400 (2026-10-05) | ignored (2026-10-05) | taken (2026-10-05) | `streamusage`, from `vendor`: sent to our engines and Baseten |
 | Usage on every chunk of a stream | yes, when asked | no, the last chunk only | no, the last chunk only | yes, asked or not | asked all the same |
 | A stream that is cut is metered | yes, by the last whole chunk | no; OpenAI bills nothing for it either (2026-09-30) | no | yes, by the last chunk received (2026-10-05: 44 + 33 tokens billed) | the usage tee |
 | `model` in the answer | the id it was started under | the id it was asked by | may differ: `deepseek-v4-flash` answers as `deepseek-flash` (2026-10-04) | not checked | the response swap writes the client's id whatever came back |
-| Anthropic shape | yes | no | yes, its own front | yes; it reads the key as a Bearer, and answers 401 `please check the api-key you provided` to `x-api-key` (2026-10-05) | the route's `dialect`; `upstreamauth` sends Baseten a Bearer, from `vendors` |
-| A tool typed `"custom"` (Anthropic shape; Anthropic's API reference takes it, and litellm always sends it) | not checked | no such shape | 422 ``unknown variant `custom`, expected `web_search_20250305` or `web_search_20260209` ``; the same tool with no type is a 200 with a `tool_use` (2026-10-05) | taken (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets the tool without the type |
+| Anthropic shape | yes | no | yes, its own front | yes; it reads the key as a Bearer, and answers 401 `please check the api-key you provided` to `x-api-key` (2026-10-05) | the route's `dialect`; `upstreamauth` sends Baseten a Bearer, from `vendor` |
+| A tool typed `"custom"` (Anthropic shape; Anthropic's API reference takes it, and litellm always sends it) | not checked | no such shape | 422 ``unknown variant `custom`, expected `web_search_20250305` or `web_search_20260209` ``; the same tool with no type is a 200 with a `tool_use` (2026-10-05) | taken (2026-10-05) | `vendorfields`, from `vendor`: DeepSeek gets the tool without the type |
 | A server tool other than web search (Anthropic shape) | not checked | no such shape | 422 `unknown variant` for bash, text editor, web fetch and code execution (2026-10-05) | taken and not run: the answer is prose (2026-10-05) | the route's `denied_tools`, at `route`: a tool the control plane lists for the vendor is a 400 before the dial; the rest the vendor refuses |
-| A forced tool: `tool_choice` `"required"` or a named function, `tool` on the Anthropic shape | not checked | not checked | 400 `Thinking mode does not support this tool_choice` while thinking is on, its default; taken with `thinking` disabled, and `any` on the Anthropic shape is taken (2026-10-05) | taken on both shapes (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets `thinking` disabled, unless the caller spoke of thinking |
-| A past tool-call turn sent back without its reasoning | not checked | not checked | 400 ``The `reasoning_content` in the thinking mode must be passed back to the API``, and ``The `content[].thinking` …`` on the Anthropic shape; taken with it, with it empty, or with `thinking` disabled (2026-10-05) | taken on both shapes; a thinking block with no `signature` is a 400 (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets an empty one |
-| A function tool while the model reasons (chat) | not checked | 400 `Function tools with reasoning_effort are not supported … use /v1/responses or set reasoning_effort to 'none'` on luna and sol; taken with `reasoning_effort: "none"` (2026-10-05) | taken (2026-10-05) | taken (2026-10-05) | `vendorfields`, from `vendors`: OpenAI gets `reasoning_effort: "none"` when the caller set none |
-| A `temperature` or `top_p` other than 1, or `logprobs` (chat) | not checked | while the model reasons, its default: 400 `'temperature' does not support 0.7 with this model. Only the default (1) value is supported.`, 400 `'top_p' is not supported with this model` and the same for `logprobs`, on luna and sol; 1 is taken for the first two, and all of them with `reasoning_effort: "none"` (2026-10-06) | not checked | not checked | `vendorfields`, from `vendors`: OpenAI gets none of them unless reasoning is off |
+| A forced tool: `tool_choice` `"required"` or a named function, `tool` on the Anthropic shape | not checked | not checked | 400 `Thinking mode does not support this tool_choice` while thinking is on, its default; taken with `thinking` disabled, and `any` on the Anthropic shape is taken (2026-10-05) | taken on both shapes (2026-10-05) | `vendorfields`, from `vendor`: DeepSeek gets `thinking` disabled, unless the caller spoke of thinking |
+| A past tool-call turn sent back without its reasoning | not checked | not checked | 400 ``The `reasoning_content` in the thinking mode must be passed back to the API``, and ``The `content[].thinking` …`` on the Anthropic shape; taken with it, with it empty, or with `thinking` disabled (2026-10-05) | taken on both shapes; a thinking block with no `signature` is a 400 (2026-10-05) | `vendorfields`, from `vendor`: DeepSeek gets an empty one |
+| A function tool while the model reasons (chat) | not checked | 400 `Function tools with reasoning_effort are not supported … use /v1/responses or set reasoning_effort to 'none'` on luna and sol; taken with `reasoning_effort: "none"` (2026-10-05) | taken (2026-10-05) | taken (2026-10-05) | `vendorfields`, from `vendor`: OpenAI gets `reasoning_effort: "none"` when the caller set none |
+| A `temperature` or `top_p` other than 1, or `logprobs` (chat) | not checked | while the model reasons, its default: 400 `'temperature' does not support 0.7 with this model. Only the default (1) value is supported.`, 400 `'top_p' is not supported with this model` and the same for `logprobs`, on luna and sol; 1 is taken for the first two, and all of them with `reasoning_effort: "none"` (2026-10-06) | not checked | not checked | `vendorfields`, from `vendor`: OpenAI gets none of them unless reasoning is off |
 | `speed: "fast"` (Anthropic shape) | not checked | no such shape | not checked | not checked | `vendorfields`: dropped for every vendor, the caller told `speed=default`; ours to refuse to pay, not a quirk |
-| A `developer` message | not checked | followed (2026-10-05) | 422 ``unknown variant `developer`, expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder` `` (2026-10-05) | followed (2026-10-05) | `vendorfields`, from `vendors`: DeepSeek gets it as `system` |
+| A `developer` message | not checked | followed (2026-10-05) | 422 ``unknown variant `developer`, expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder` `` (2026-10-05) | followed (2026-10-05) | `vendorfields`, from `vendor`: DeepSeek gets it as `system` |
 | A past tool call with no `type` | not checked | 400 `Missing required parameter` (2026-10-05) | 422 ``missing field `type` `` (2026-10-05) | taken (2026-10-05) | not handled: the vendor refuses |
 | Fields only OpenAI reads: `prediction`, `prompt_cache_key`, `prompt_cache_retention`, `verbosity`, `store`, `web_search_options` | not checked | its own | all six ignored (2026-10-05) | 400 `Extra inputs are not permitted` on `prediction` and `web_search_options`; the other four ignored (2026-10-05) | `web_search_options` is a 400 before the dial where the route's `denied_tools` lists it (OpenAI's does); the rest not handled |
 | The account behind our key is out of credit | n/a | 429 `insufficient_quota` | 402 `Insufficient Balance` | not checked | `retry`, from `domain.ClassifyUpstream`: read as the 402 it is (Anthropic's is a 400 `credit balance`, read the same), the key retires, and the client gets the gateway's 502 `upstream account unpaid`; the vendor's words go to the error log. From the vendors' docs and Bifrost's fixtures (2026-10-12), not yet measured through a gateway |
@@ -605,6 +608,14 @@ Every `X-Grove-*` header, and who it is between:
 
 ## Routing
 
+A model is one kind: every row ours (`direct`/`ingress`) or every row a vendor's (`provider`). A
+push that mixes them is a 400. `routing.Pick` runs the shared admission filters (surface, inputs,
+denied tools), then hands the table to one of two routers. The **engine router** (`engine.go`) runs
+all five steps below, pins the session and claims an in-flight slot. The **vendor router**
+(`vendor.go`) runs the same rule, but only steps 1 and 2 can change its answer — a vendor row is
+never counted, ejected or pinned, so capacity, stickiness and in-flight see nothing — then takes
+the next credential round the row's key ring.
+
 `domain.PickRoute` decides, in this order. Every step narrows the set the next one sees.
 
 1. **Healthy and routable.** A row must be `healthy` (pushed by the control plane, then possibly
@@ -616,8 +627,7 @@ Every `X-Grove-*` header, and who it is between:
 3. **Capacity.** A row is out if `in_flight >= capacity` (the engine's `--max-num-seqs`). Capacity 0
    means uncapped. None left → wait up to `capacity_wait` (default `0s`) for a slot, re-reading the
    counts every 50ms, then **429** — deliberately not 503: the model is up, come back shortly.
-   Counts are per `engine_url` in Redis and shared by every gateway, so a vendor's rows on one
-   base URL share one cap.
+   Counts are per `engine_url` in Redis and shared by every gateway.
 4. **Stickiness.** If the caller's session is pinned to a row still in the set, that row wins.
    Stickiness loses to capacity by construction — a warm prefix cache is not worth queueing behind
    a full engine when a replica is idle.
@@ -1015,9 +1025,9 @@ is not there. The name only, never the value. Top-level fields; a rewritten one 
 | transform | what it does |
 |---|---|
 | `modelmap` | rewrites `model` to the route's `upstream_model` |
-| `streamusage` | forces `stream_options.include_usage` on a streaming completion, and `continuous_usage_stats` beside it for an upstream the `vendors` table says takes it (our engines, Baseten) |
+| `streamusage` | forces `stream_options.include_usage` on a streaming completion, and `continuous_usage_stats` beside it for an upstream the `vendor` package says takes it (our engines, Baseten) |
 | `servicetier` | drops a caller's `service_tier` on every hop: it picks the vendor's price class, which is never the caller's to choose |
-| `vendorfields` | on a vendor hop, sends the output cap under the one name that vendor reads, from the `vendors` table of where an upstream differs from the shape (see [The client interface](#the-client-interface)). Today the output cap: `max_completion_tokens` for OpenAI (400s on the old name), `max_tokens` for every other (they ignore the new one, uncapping output). Logged as a drop of the other name |
+| `vendorfields` | on a vendor hop, sends the output cap under the one name that vendor reads, from the `vendor` package of where an upstream differs from the shape (see [The client interface](#the-client-interface)). Today the output cap: `max_completion_tokens` for OpenAI (400s on the old name), `max_tokens` for every other (they ignore the new one, uncapping output). Logged as a drop of the other name |
 | `cachesalt` | prefixes a caller's `cache_salt` with their tenant, strips it on a vendor hop. Not in the default list |
 
 ### Add a storage backend
@@ -1339,7 +1349,7 @@ that carries one is refused like any unknown field.
 a request costs 0.
 
 A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries its
-own fields:
+own fields. A model's rows are all provider rows or none; a mixed push is a 400:
 
 ```json
 [{
@@ -1364,8 +1374,7 @@ Denied Tool rows list them for that vendor. `route` reads every `tools[].type` a
 field off the client's own bytes and drops a row that denies one of them; when no row of the model
 is left, the request is a 400 `<model> does not run <name>` in the surface's own envelope, before
 any dial and above `meter`, so it bills nothing. A row that denies nothing runs everything, which
-is every row we run ourselves, so a model with an engine of ours beside the vendor row goes to the
-engine. A fallback whose rows deny the tool is passed over like one that lacks an input. Deleting
+is every row we run ourselves. A fallback whose rows deny the tool is passed over like one that lacks an input. Deleting
 a Denied Tool row is how a tool is let through once it is priced. The list is a deny list, so a
 tool a vendor adds tomorrow runs until its row exists.
 
@@ -1376,7 +1385,7 @@ rewrite, so the same substitution is applied to `?model=` in the transform stage
 cannot desync a grant from a route. On a provider hop the client's `Authorization` is deleted
 rather than replaced, the vendor's own key goes in the header its `dialect` expects (`x-api-key`
 plus `anthropic-version` for an Anthropic front, a Bearer for an OpenAI-compatible one and for an
-Anthropic front the `vendors` table says reads one), and the
+Anthropic front whose `vendor.Headers` says it reads one), and the
 certificate is verified whatever `upstream_tls_verify` says — that hop leaves our network carrying
 someone else's key.
 
@@ -1413,7 +1422,7 @@ malformed and the row serves nothing.
 A provider route is also **deny-by-default on the surface check**. `Serves` is generous to an engine
 because an engine answers on more than the OpenAI core (`/tokenize`, `/v1/rerank`), but a vendor is a
 closed set we already know, so `ServesRoute` holds it to its dialect's paths — `/v1/chat/completions`
-for `openai`, `/v1/messages` for `anthropic`. Anything else is our 404 at `routing.go`, above
+for `openai`, `/v1/messages` for `anthropic`. Anything else is our 404 at `routing.Pick`, above
 `meter`, instead of a round trip that comes back as theirs. The paths are one table,
 `vendorPaths` in `domain/dialect.go`, path → dialect: serving another (`/v1/responses` for
 `openai`, say) is a row there.

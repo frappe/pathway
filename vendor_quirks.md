@@ -5,11 +5,12 @@ Where the request can be rewritten without changing what the caller asked for, t
 it for that vendor only. This file is each such rewrite, with what the caller sent and what the
 vendor gets.
 
-- The table that turns a rewrite on is `vendors` in
-  [`internal/service/transform/vendors.go`](internal/service/transform/vendors.go), one flag per
-  quirk, keyed by the vendor's name.
-- The code is the `vendorfields` and `streamusage` transforms in the same folder, and
-  `upstreamauth` in `internal/transport/http/middleware/builtin.go` for the one that is a header.
+- What the gateway knows of each vendor is one value per vendor, `known` in
+  [`internal/service/vendor/vendor.go`](internal/service/vendor/vendor.go), keyed by the vendor's
+  name: its `Quirks`, one flag per field rewrite, and its `Headers`, where the credential goes.
+- The code is the `vendorfields` and `streamusage` transforms in `internal/service/transform/`,
+  which read the flags, and `vendorAuth` in `internal/transport/http/middleware/vendor.go`, which
+  sets the headers.
 - Every quirk here was measured through a gateway on the date given. What was seen and is *not*
   rewritten is in the README, "What each upstream was seen to do".
 - A rewrite runs per attempt on the caller's own body, so a request that falls back to another
@@ -19,15 +20,15 @@ vendor gets.
 
 | Quirk | Vendor | Flag | Shape |
 |---|---|---|---|
-| [The output cap's name](#1-the-output-caps-name) | OpenAI, and every other vendor the other way | `outputCap` | OpenAI |
-| [Usage on every chunk](#2-usage-on-every-chunk-of-a-stream) | OpenAI refuses the option | `usagePerChunk` | OpenAI |
-| [A tool typed `custom`](#3-a-tool-typed-custom) | DeepSeek | `untypedTools` | Anthropic |
-| [A `developer` message](#4-a-developer-message) | DeepSeek | `developerAsSystem` | OpenAI |
-| [A past tool call with no reasoning](#5-a-past-tool-call-with-no-reasoning) | DeepSeek | `blankReasoning` | both |
-| [A forced tool while thinking](#6-a-forced-tool-while-thinking) | DeepSeek | `unthinkForcedTool` | both |
-| [An Anthropic front that reads a Bearer](#7-an-anthropic-front-that-reads-a-bearer) | Baseten | `bearerOnAnthropic` | Anthropic |
-| [A function tool while the model reasons](#8-a-function-tool-while-the-model-reasons) | OpenAI | `unreasonWithTools` | OpenAI |
-| [A temperature while the model reasons](#9-a-temperature-while-the-model-reasons) | OpenAI | `defaultSampling` | OpenAI |
+| [The output cap's name](#1-the-output-caps-name) | OpenAI, and every other vendor the other way | `OutputCap` | OpenAI |
+| [Usage on every chunk](#2-usage-on-every-chunk-of-a-stream) | OpenAI refuses the option | `UsagePerChunk` | OpenAI |
+| [A tool typed `custom`](#3-a-tool-typed-custom) | DeepSeek | `UntypedTools` | Anthropic |
+| [A `developer` message](#4-a-developer-message) | DeepSeek | `DeveloperAsSystem` | OpenAI |
+| [A past tool call with no reasoning](#5-a-past-tool-call-with-no-reasoning) | DeepSeek | `BlankReasoning` | both |
+| [A forced tool while thinking](#6-a-forced-tool-while-thinking) | DeepSeek | `UnthinkForcedTool` | both |
+| [An Anthropic front that reads a Bearer](#7-an-anthropic-front-that-reads-a-bearer) | Baseten | none: Baseten's own `Headers` | Anthropic |
+| [A function tool while the model reasons](#8-a-function-tool-while-the-model-reasons) | OpenAI | `UnreasonWithTools` | OpenAI |
+| [A temperature while the model reasons](#9-a-temperature-while-the-model-reasons) | OpenAI | `DefaultSampling` | OpenAI |
 | [Fast mode](#10-fast-mode) | every vendor | none: ours | Anthropic |
 
 Four of these change what the model does: 6, 8, 9 and 10. The caller is told of each on the
@@ -441,8 +442,9 @@ per-model switch before it is routed.
 1. Measure it through a gateway: the vendor's status and words, and the request that is taken
    instead. A rewrite goes in only if that request means what the caller's did.
 2. Add a row to the README's "What each upstream was seen to do", with the date.
-3. Add a flag to `upstream` in `vendors.go`, written out on every entry, and the rewrite beside the
-   others in `vendorfields.go` with a test.
+3. A field: add a flag to `Quirks` in `vendor.go`, written out on every entry of `known`, and the
+   rewrite beside the others in `vendorfields.go` with a test. A header: a type of that vendor's
+   own in `vendor.go` with its `Headers`, as Baseten has.
 4. Add a section here: what the vendor does, the rewrite, what is sent and what the vendor gets.
 
 ## 10. Fast mode
@@ -452,8 +454,8 @@ per-model switch before it is routed.
 that tier, so a caller who sends it would be billed the standard rate for the fast one.
 
 **The rewrite.** `speed` is removed on the Anthropic shape for every vendor: the request runs at the
-standard speed. Not a vendor's quirk but our own refusal to pay for it, so there is no flag in the
-`vendors` table. OpenAI's tier is `service_tier`, which the `servicetier` transform drops on every
+standard speed. Not a vendor's quirk but our own refusal to pay for it, so there is no flag in
+`Quirks`. OpenAI's tier is `service_tier`, which the `servicetier` transform drops on every
 hop. The answer says so:
 
 ```

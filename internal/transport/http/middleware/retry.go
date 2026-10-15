@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/frappe/pathway/internal/domain"
-	"github.com/frappe/pathway/internal/service/routing"
 	"github.com/frappe/pathway/internal/transport/http/proxy"
 	"github.com/frappe/pathway/internal/transport/respond"
 )
@@ -36,14 +35,13 @@ func newRetry(deps Deps) (Middleware, error) {
 			keyring := state.Decision.Route.Keyring()
 			// An upgrade or a multipart body cannot be replayed; a single key has nowhere to go.
 			replayable := !isUpgrade(r) && state.Raw != nil && len(keyring) > 1
-			// Only a vendor hides a refusal under a 400 or 429; an engine's are its own.
 			provider := state.Decision.Route.IsProvider()
 			ring := newKeyRing(keyring)
 			for {
 				marks := markAttempt(w, r)
 				var winner domain.Credential
 				writer := &attemptWriter{ResponseWriter: w,
-					peek:     func(status int) bool { return provider && (status == 400 || status == 429) },
+					peek:     func(status int) bool { return provider && vendorPeeks(status) },
 					classify: domain.ClassifyUpstream,
 					again: func(status int) bool {
 						if refusal, ok := domain.RefusedCredential(status); ok {
@@ -158,47 +156,6 @@ func (m attemptMarks) restore(w http.ResponseWriter, r *http.Request, state *Sta
 	r.Header, r.URL.RawQuery = m.request, m.query
 	state.Outcome = proxy.Outcome{}
 	state.Denied, state.DeniedReason = 0, ""
-}
-
-// countAttempt lands one attempt on the key it dialled with. A blank id is an engine's one
-// credential, counted nowhere.
-func countAttempt(deps Deps, r *http.Request, key domain.Credential, status int) {
-	if key.ID == "" || deps.ProviderKeys == nil {
-		return
-	}
-	if err := deps.ProviderKeys.Count(withoutCancel(r.Context()), key.ID, status); err != nil {
-		deps.Log.Warn("provider key count failed", "key", key.ID, "err", err)
-	}
-}
-
-// keyRing is one request's walk over a route's credentials: which are spent, which are dead, and
-// whether the rate-limited ones have been opened again.
-type keyRing struct {
-	keys  []domain.Credential
-	spent map[string]bool // rate-limited or dead this request
-	dead  map[string]bool // refused outright: never opened again
-	reset bool
-}
-
-func newKeyRing(keys []domain.Credential) *keyRing {
-	return &keyRing{keys: keys, spent: map[string]bool{}, dead: map[string]bool{}}
-}
-
-// next retires `loser` for `status` and picks the key the next attempt dials with — the one after
-// it round the ring, blank when none is left. The rate-limited keys are opened once when nothing
-// else remains: a vendor's quota window may have slid by then. A second exhaustion is the answer
-// the client gets.
-func (k *keyRing) next(loser domain.Credential, status int) domain.Credential {
-	k.spent[loser.ID] = true
-	if domain.IsKeyRejected(status) {
-		k.dead[loser.ID] = true
-	}
-	if winner := routing.NextKey(k.keys, loser, k.spent); winner.ID != "" || k.reset {
-		return winner
-	}
-	k.reset = true
-	k.spent = maps.Clone(k.dead)
-	return routing.NextKey(k.keys, loser, k.spent)
 }
 
 const (

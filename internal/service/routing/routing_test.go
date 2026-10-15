@@ -379,8 +379,7 @@ func TestTheRightSurfaceStillRoutes(t *testing.T) {
 }
 
 // A vendor row that denies a tool the request names is refused before anything is claimed, with
-// the tool named; an engine of ours beside it takes the request instead; a row that denies nothing
-// runs everything.
+// the tool named; a row that denies nothing runs everything.
 func TestAVendorRowThatDeniesTheToolNamedIsRefused(t *testing.T) {
 	vendor := engine("https://vendor")
 	vendor.Kind, vendor.Dialect, vendor.DeniedTools = "provider", domain.DialectOpenAI, []string{"web_search_options", "web_search_preview"}
@@ -405,11 +404,56 @@ func TestAVendorRowThatDeniesTheToolNamedIsRefused(t *testing.T) {
 	if _, err := svc.Pick(context.Background(), function); err != nil {
 		t.Errorf("a function tool was refused: %v", err)
 	}
+}
 
+// A table an older binary stored may still mix a vendor row with ours: a push that mixes is
+// refused, but a stored one is not re-read until it changes. Ours win, as they always did, and the
+// vendor row is neither picked nor counted.
+func TestAStoredMixedTableRoutesToTheEngine(t *testing.T) {
+	store := memory.New()
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect = "provider", domain.DialectOpenAI
 	store.Routes["qwen3-4b"] = []domain.Route{vendor, engine("https://ours")}
-	decision, err := svc.Pick(context.Background(), search)
-	if err != nil || decision.Route.EngineURL != "https://ours" {
-		t.Errorf("decision = %+v, %v; want the engine of ours", decision.Route, err)
+	svc := serviceOver(store, Options{})
+
+	for range 3 {
+		decision, err := svc.Pick(context.Background(), Request{
+			Model: "qwen3-4b", MeterID: "meter", Dialect: domain.DialectOpenAI, Path: "/v1/chat/completions",
+		})
+		if err != nil || decision.Route.EngineURL != "https://ours" {
+			t.Fatalf("decision = %+v, %v; want the engine of ours", decision.Route, err)
+		}
+	}
+	if len(store.InFlight["https://vendor"]) != 0 {
+		t.Errorf("the vendor row was claimed against: %v", store.InFlight)
+	}
+	if err := svc.CanServe(context.Background()); err != nil {
+		t.Errorf("CanServe = %v", err)
+	}
+}
+
+// A vendor keeps no prefix cache we can aim at, so its pick pins no session, named or synthetic.
+func TestAVendorPickPinsNoSession(t *testing.T) {
+	store := memory.New()
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect = "provider", domain.DialectOpenAI
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	svc := serviceOver(store, Options{SyntheticTTL: fixedTTL(time.Minute)})
+
+	for _, session := range []string{"caller-session", ""} {
+		decision, err := svc.Pick(context.Background(), Request{
+			Model: "qwen3-4b", Session: session, MeterID: "meter", Dialect: domain.DialectOpenAI,
+			Path: "/v1/chat/completions",
+		})
+		if err != nil {
+			t.Fatalf("Pick: %v", err)
+		}
+		if decision.Session != "" {
+			t.Errorf("decision.Session = %q, want none", decision.Session)
+		}
+	}
+	if len(store.Sticky) != 0 {
+		t.Errorf("a vendor pick pinned a session: %v", store.Sticky)
 	}
 }
 

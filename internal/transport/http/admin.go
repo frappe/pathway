@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/frappe/pathway/internal/service/metering"
 	"net/http"
@@ -145,6 +146,9 @@ func (s *Server) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	models, pruned, err := s.provisioning.ReplaceRoutes(r.Context(), body.Routes, body.Prune)
+	if badBody(w, err) {
+		return
+	}
 	if err != nil {
 		respond.Error(w, http.StatusServiceUnavailable, "route store error")
 		return
@@ -244,6 +248,9 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	counts, err := s.provisioning.ApplyState(r.Context(), push)
+	if badBody(w, err) {
+		return
+	}
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "state store error")
 		return
@@ -409,4 +416,16 @@ func (s *Server) spool() *metering.Spool {
 		return nil
 	}
 	return s.metering.Spool
+}
+
+// badBody answers a push provisioning refused for what it said, not for where it was going: a
+// domain.Denial is the payload's fault, as `bad body` is everywhere else here. Reports whether it
+// answered; any other error, or none, is the caller's.
+func badBody(w http.ResponseWriter, err error) bool {
+	var denial domain.Denial
+	if !errors.As(err, &denial) {
+		return false
+	}
+	http.Error(w, "bad body: "+denial.Reason, denial.Status)
+	return true
 }

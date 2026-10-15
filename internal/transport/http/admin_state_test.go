@@ -238,3 +238,26 @@ func TestATeamsSectionLandsAndReadsBack(t *testing.T) {
 		t.Fatalf("an unreadable team limit: status = %d, body = %s", w.Code, w.Body)
 	}
 }
+
+// A model is one kind: a table mixing a vendor row with one of ours has no router to go to, on
+// either push, and nothing of it is written.
+func TestAMixedRouteTableIsRefused(t *testing.T) {
+	store := memory.New()
+	handler := adminFixture(t, store)
+	table := `{"m1": [
+		{"engine_url": "https://box/e/md1", "healthy": true, "kind": "direct"},
+		{"engine_url": "https://api.openai.com", "healthy": true, "vendor": "openai", "kind": "provider", "dialect": "openai"}]}`
+
+	for _, call := range []struct{ method, path, body string }{
+		{http.MethodPut, "/grove-admin/routes", `{"routes": ` + table + `}`},
+		{http.MethodPost, "/grove-admin/state", `{"routes": {"hash": "rh", "table": ` + table + `}}`},
+	} {
+		w := adminCall(t, handler, call.method, call.path, call.body)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "m1 mixes") {
+			t.Errorf("%s %s = %d %s, want a 400 naming the model", call.method, call.path, w.Code, w.Body)
+		}
+	}
+	if len(store.Routes) != 0 {
+		t.Errorf("a refused table was written: %v", store.Routes)
+	}
+}

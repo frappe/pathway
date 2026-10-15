@@ -52,3 +52,18 @@ func TestMalformedRequestMetadataIsRefused(t *testing.T) {
 		t.Error("a refused request reached the engine")
 	}
 }
+
+// The caller's own credential never travels onward, even to an engine with no key of its own: a
+// blank internal key means no Authorization header at all, not the caller's.
+func TestACallersBearerNeverReachesAnEngineWithNoKey(t *testing.T) {
+	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
+	f.store.Routes["qwen3-4b"][0].InternalKey = ""
+
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`, "Authorization", "Bearer "+secret)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", resp.Code, resp.Body)
+	}
+	if got := f.seen.authorization; got != "" {
+		t.Errorf("upstream saw Authorization %q, want none", got)
+	}
+}

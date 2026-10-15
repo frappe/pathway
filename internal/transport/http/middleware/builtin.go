@@ -495,56 +495,25 @@ func newUpstreamAuth(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
-			route, secret := state.Decision.Route, state.Decision.Key.Secret
 			// The caller may have authenticated with either header; neither may travel onward. Nor
 			// may the gateway's own client headers: they are read here, not relayed.
+			r.Header.Del("Authorization")
 			r.Header.Del("x-api-key")
 			r.Header.Del("X-Grove-Metadata")
 			r.Header.Del("X-Grove-Session")
-			switch {
-			case route.IsProvider():
-				// A vendor authenticates its own way, and would read our Bearer as a caller's
-				// credential leaking outward — so it is deleted, not overwritten. The scheme
-				// follows the front's dialect: an Anthropic front takes x-api-key and its version
-				// header, an OpenAI-compatible one takes the Bearer everyone else does — and so
-				// does an Anthropic front the `vendors` table says reads one. Our request id stays
-				// inside our network too: a vendor ignores it and mints its own. The secret is the
-				// decision's, not the row's: a row carries several and the retry stage moves
-				// between them.
-				r.Header.Del("Authorization")
-				r.Header.Del("X-Request-Id")
-				anthropic := route.Dialect == domain.DialectAnthropic
-				if anthropic && route.APIVersion != "" {
-					r.Header.Set("anthropic-version", route.APIVersion)
-				}
-				switch {
-				case secret == "":
-				case anthropic && !transform.HasBearerAnthropicFront(route.Vendor):
-					r.Header.Set("x-api-key", secret)
-				default:
-					r.Header.Set("Authorization", "Bearer "+secret)
-				}
-			case secret != "":
-				r.Header.Set("Authorization", "Bearer "+secret)
-			}
+			// Only an ingress is sent these, by engineAuth; anything else would only ignore a
+			// client-supplied value — vLLM adopts X-Request-Id and nothing else.
+			r.Header.Del("X-Grove-Model")
+			r.Header.Del("X-Grove-Session-Key")
 			// This is the edge, so a client-sent forwarding header is a claim, not a fact.
 			// Overwritten rather than appended: the appending form leaves the caller's entries in
 			// front of ours.
 			r.Header.Set("X-Forwarded-For", clientIP(r))
 			r.Header.Set("X-Real-IP", clientIP(r))
-
-			if route.IsIngress() {
-				// An ingress reads no body, so the model it would otherwise have parsed goes as a
-				// header — and the session key with it, hashed, because it is the one tier that
-				// must not learn whose request this is.
-				r.Header.Set("X-Grove-Model", state.ServingModel())
-				r.Header.Set("X-Grove-Session-Key", state.Decision.SessionKey)
+			if state.Decision.Route.IsProvider() {
+				vendorAuth(r, state)
 			} else {
-				// A direct route reaches vLLM, which adopts X-Request-Id and nothing else.
-				// Clearing these keeps a client-supplied value from reaching an engine that would
-				// only ignore it.
-				r.Header.Del("X-Grove-Model")
-				r.Header.Del("X-Grove-Session-Key")
+				engineAuth(r, state)
 			}
 			next.ServeHTTP(w, r)
 		})
