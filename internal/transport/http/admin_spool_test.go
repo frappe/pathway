@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/observability"
-	"github.com/phot0n/pathway/internal/repository/memory"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/provisioning"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/observability"
+	"github.com/frappe/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/provisioning"
 )
 
 // The pull carries the spool's dead lines and its counters; an ack naming a dead line forgets it.

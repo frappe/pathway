@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/phot0n/pathway/internal/transport/respond"
+	"github.com/frappe/pathway/internal/transport/respond"
 )
 
 const nanoPerCent = 1e7

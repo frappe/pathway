@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/domain"
 	"github.com/redis/go-redis/v9"
 )
 

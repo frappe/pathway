@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/config"
+	"github.com/frappe/pathway/internal/config"
 )
 
 // A caller's tags land on its access line as one `meta` object and stop at the gateway, along with

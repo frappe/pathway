@@ -6,8 +6,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // Identity is everything the rest of the request path needs to know about the caller. Carried in

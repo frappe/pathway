@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // payloadFixture is newFixture with a payload log wired in and the test key's opt-in set as

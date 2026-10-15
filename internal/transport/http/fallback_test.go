@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // backupEngine is a second model's engine: it keeps the bodies it was sent.

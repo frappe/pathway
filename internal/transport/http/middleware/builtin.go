@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/routing"
-	"github.com/phot0n/pathway/internal/service/transform"
-	"github.com/phot0n/pathway/internal/transport/respond"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/routing"
+	"github.com/frappe/pathway/internal/service/transform"
+	"github.com/frappe/pathway/internal/transport/respond"
 )
 
 func init() {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // openaiVendorFixture points deepseek/chat at an OpenAI-only vendor, next to the Anthropic one.

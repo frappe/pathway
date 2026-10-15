@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // StickyTTL is how long a caller that names its own session keeps its engine. Client-declared

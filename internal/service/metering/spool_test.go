@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository/memory"
 )
 
 func spoolFixture(t *testing.T, maxBytes int64) (*memory.Store, *Service, string) {

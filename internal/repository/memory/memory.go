@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // Store is every repository over one set of maps. Fail makes any call return an error, which is

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
-	"github.com/phot0n/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/repository/memory"
 )
 
 // The state push (plan_agent_state_sync.md): a present section is authoritative for its

@@ -4,9 +4,9 @@ package catalog
 import (
 	"context"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
-	"github.com/phot0n/pathway/internal/service/admission"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/service/admission"
 )
 
 type Service struct {

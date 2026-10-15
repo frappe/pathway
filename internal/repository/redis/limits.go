@@ -6,7 +6,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // lim:<key prefix>:<metric>:<window>:<bucket> — one counter per limit per window. Every gateway on this

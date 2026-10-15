@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository/memory"
 )
 
 // keyedVendor answers by the key it was dialled with: the status in `answers` for that

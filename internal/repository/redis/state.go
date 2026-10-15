@@ -7,8 +7,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // grove:state_hash — one hash of section/bucket fields ("groups", "routes", "keys:a0"), written in the same transaction as the records they describe. Losing the store

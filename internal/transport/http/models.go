@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/service/admission"
-	"github.com/phot0n/pathway/internal/transport/http/middleware"
-	"github.com/phot0n/pathway/internal/transport/respond"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/service/admission"
+	"github.com/frappe/pathway/internal/transport/http/middleware"
+	"github.com/frappe/pathway/internal/transport/respond"
 )
 
 // GET /v1/models — the gateway answers directly with the models THIS key may use, instead of

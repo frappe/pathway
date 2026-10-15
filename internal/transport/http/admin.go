@@ -5,13 +5,13 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"github.com/phot0n/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/metering"
 	"net/http"
 	"strings"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
-	"github.com/phot0n/pathway/internal/transport/respond"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/transport/respond"
 )
 
 // The control plane's push/pull surface, token-gated on X-Grove-Admin-Token. Grove is the source of

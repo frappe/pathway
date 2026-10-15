@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // Error writes the shape an OpenAI client expects to parse. type is the error's class, named off

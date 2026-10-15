@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // The ring walks every key once on a 429, opens once more, and never again; a rejected key stays

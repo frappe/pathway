@@ -8,7 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // usage:<key prefix>:<YYYY-MM-DD> — one hash per API key per UTC day it was served

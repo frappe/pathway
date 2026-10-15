@@ -13,17 +13,17 @@ import (
 	"os"
 	"time"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/observability"
-	redisstore "github.com/phot0n/pathway/internal/repository/redis"
-	"github.com/phot0n/pathway/internal/service/admission"
-	"github.com/phot0n/pathway/internal/service/catalog"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/provisioning"
-	"github.com/phot0n/pathway/internal/service/routing"
-	"github.com/phot0n/pathway/internal/service/transform"
-	gatewayhttp "github.com/phot0n/pathway/internal/transport/http"
-	"github.com/phot0n/pathway/internal/transport/http/proxy"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/observability"
+	redisstore "github.com/frappe/pathway/internal/repository/redis"
+	"github.com/frappe/pathway/internal/service/admission"
+	"github.com/frappe/pathway/internal/service/catalog"
+	"github.com/frappe/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/provisioning"
+	"github.com/frappe/pathway/internal/service/routing"
+	"github.com/frappe/pathway/internal/service/transform"
+	gatewayhttp "github.com/frappe/pathway/internal/transport/http"
+	"github.com/frappe/pathway/internal/transport/http/proxy"
 )
 
 // version is stamped by the release build; a local build reports dev.

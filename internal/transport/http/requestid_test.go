@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/phot0n/pathway/internal/config"
+	"github.com/frappe/pathway/internal/config"
 )
 
 // ridHeaders returns the id a response carries, failing unless both names carry the same one.

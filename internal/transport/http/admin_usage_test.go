@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
-	"github.com/phot0n/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/repository/memory"
 )
 
 // The pull as the control plane runs it: every unacknowledged bucket comes back grouped by drain
