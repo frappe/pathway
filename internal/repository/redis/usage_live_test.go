@@ -252,6 +252,31 @@ func TestAPeekMovesNothingOnRealRedis(t *testing.T) {
 	}
 }
 
+// A drain past one pipeline chunk sets every bucket aside and answers each once; a peek then sees
+// them all under the drain's id and nothing live.
+func TestADrainPastOneChunkLandsEveryBucketOnRealRedis(t *testing.T) {
+	client, _ := liveStore(t)
+	ctx := context.Background()
+	usage := client.Store().Usage
+	const n = 2*pipelineChunk + 7
+	for i := 0; i < n; i++ {
+		if err := usage.Accrue(ctx, liveAccrual("k"+strconv.Itoa(i), "", 1)); err != nil {
+			t.Fatalf("Accrue: %v", err)
+		}
+	}
+	drained, err := usage.Drain(ctx, "d1", nil)
+	if err != nil || len(drained["d1"]) != n {
+		t.Fatalf("drained %d keys, %v; want %d", len(drained["d1"]), err, n)
+	}
+	if left := client.rdb.Keys(ctx, "usage:*").Val(); len(left) != 0 {
+		t.Errorf("%d buckets left live after the drain", len(left))
+	}
+	peek, err := usage.Peek(ctx, nil)
+	if err != nil || len(peek["d1"]) != n || len(peek[""]) != 0 {
+		t.Errorf("peek = %d under d1 and %d live, %v; want %d and none", len(peek["d1"]), len(peek[""]), err, n)
+	}
+}
+
 // A spend adjustment applies once per id and never invents a key.
 func TestAdjustSpentOnRealRedis(t *testing.T) {
 	client, _ := liveStore(t)

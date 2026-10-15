@@ -117,6 +117,55 @@ func (p prefixes) has(bucket string) bool {
 	return len(p) == 0 || p[prefix]
 }
 
+// filter keeps the buckets p names, in order.
+func (p prefixes) filter(buckets []string) []string {
+	var kept []string
+	for _, bucket := range buckets {
+		if p.has(bucket) {
+			kept = append(kept, bucket)
+		}
+	}
+	return kept
+}
+
+// pipelineChunk is how many commands one round trip carries: a lakh of buckets neither waits
+// whole in client memory nor piles a lakh of replies in the server's output buffer.
+const pipelineChunk = 1000
+
+// pipelined queues fn(p, i) for every i below n, pipelineChunk per round trip, and stops at the
+// first chunk with a failed command. → every command, in order.
+func (u usage) pipelined(ctx context.Context, n int, fn func(p redis.Pipeliner, i int)) ([]redis.Cmder, error) {
+	var all []redis.Cmder
+	for start := 0; start < n; start += pipelineChunk {
+		end := min(start+pipelineChunk, n)
+		cmds, err := u.rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
+			for i := start; i < end; i++ {
+				fn(p, i)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, cmds...)
+	}
+	return all, nil
+}
+
+// hashes is HGETALL over keyPrefix+name for every name, pipelined: each one's fields, in order,
+// empty for a hash that is gone.
+func (u usage) hashes(ctx context.Context, keyPrefix string, names []string) ([]map[string]string, error) {
+	cmds, err := u.pipelined(ctx, len(names), func(p redis.Pipeliner, i int) { p.HGetAll(ctx, keyPrefix+names[i]) })
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]string, len(cmds))
+	for i, cmd := range cmds {
+		out[i] = cmd.(*redis.MapStringStringCmd).Val()
+	}
+	return out, nil
+}
+
 // setAsideScript moves one live counter into a drain. Redis is single-threaded, so a request
 // metered mid-drain lands wholly before the RENAME or wholly on a fresh usage:<bucket>. It refuses
 // when the bucket is already set aside under this id — SCAN can return a key twice, and the second
@@ -148,7 +197,8 @@ return count
 `)
 
 // Drain sets live counters aside under newID — all of them, or only keys' — and answers every pair
-// still unacknowledged. One SCAN either way: which days a key has live, only the store knows.
+// still unacknowledged. One SCAN either way: which days a key has live, only the store knows. The
+// set-asides go pipelined, a chunk a round trip: a lakh of keys is a lakh of them every hour.
 // Nothing is deleted here: a bucket stays until its Ack, so one the control plane fails to record
 // comes back under its own id while the others move on.
 func (u usage) Drain(ctx context.Context, newID string, keys []string) (repository.Drains, error) {
@@ -157,15 +207,14 @@ func (u usage) Drain(ctx context.Context, newID string, keys []string) (reposito
 		return nil, err
 	}
 	want := prefixesOf(keys)
-	for _, bucket := range live {
-		if !want.has(bucket) {
-			continue
-		}
-		member := newID + ":" + bucket
-		scriptKeys := []string{"usage:" + bucket, "drained:" + member, unackedKey}
-		if err := setAsideScript.Run(ctx, u.rdb, scriptKeys, member).Err(); err != nil {
-			return nil, err
-		}
+	buckets := want.filter(live)
+	// Eval, not Run: inside a pipeline Run cannot see NOSCRIPT and fall back, so the body goes along.
+	_, err = u.pipelined(ctx, len(buckets), func(p redis.Pipeliner, i int) {
+		member := newID + ":" + buckets[i]
+		setAsideScript.Eval(ctx, p, []string{"usage:" + buckets[i], "drained:" + member, unackedKey}, member)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return u.read(ctx, want)
 }
@@ -183,19 +232,17 @@ func (u usage) Peek(ctx context.Context, keys []string) (repository.Drains, erro
 	if err != nil {
 		return nil, err
 	}
-	for _, bucket := range live {
-		if !want.has(bucket) {
-			continue
-		}
-		h, err := u.rdb.HGetAll(ctx, "usage:"+bucket).Result()
-		if err != nil {
-			return nil, err
-		}
-		if len(h) == 0 {
+	buckets := want.filter(live)
+	hashes, err := u.hashes(ctx, "usage:", buckets)
+	if err != nil {
+		return nil, err
+	}
+	for i, bucket := range buckets {
+		if len(hashes[i]) == 0 {
 			continue
 		}
 		prefix, day := repository.SplitBucket(bucket)
-		out.Put("", prefix, day, h)
+		out.Put("", prefix, day, hashes[i])
 	}
 	return out, nil
 }
@@ -204,7 +251,7 @@ func (u usage) scanLive(ctx context.Context) ([]string, error) {
 	var live []string
 	var cursor uint64
 	for {
-		found, next, err := u.rdb.Scan(ctx, cursor, "usage:*", 200).Result()
+		found, next, err := u.rdb.Scan(ctx, cursor, "usage:*", 1000).Result()
 		if err != nil {
 			return nil, err
 		}
@@ -217,27 +264,31 @@ func (u usage) scanLive(ctx context.Context) ([]string, error) {
 	}
 }
 
-// read answers every unacknowledged pair, only the wanted keys' when any are named.
+// read answers every unacknowledged pair, only the wanted keys' when any are named, their
+// counters fetched pipelined.
 func (u usage) read(ctx context.Context, want prefixes) (repository.Drains, error) {
 	members, err := u.rdb.SMembers(ctx, unackedKey).Result()
 	if err != nil {
 		return nil, err
 	}
-	out := repository.Drains{}
+	var wanted []string
 	for _, member := range members {
-		id, bucket, ok := strings.Cut(member, ":")
-		if !ok || !want.has(bucket) {
+		if _, bucket, ok := strings.Cut(member, ":"); ok && want.has(bucket) {
+			wanted = append(wanted, member)
+		}
+	}
+	hashes, err := u.hashes(ctx, "drained:", wanted)
+	if err != nil {
+		return nil, err
+	}
+	out := repository.Drains{}
+	for i, member := range wanted {
+		if len(hashes[i]) == 0 {
 			continue
 		}
-		h, err := u.rdb.HGetAll(ctx, "drained:"+member).Result()
-		if err != nil {
-			return nil, err
-		}
-		if len(h) == 0 {
-			continue
-		}
+		id, bucket, _ := strings.Cut(member, ":")
 		prefix, day := repository.SplitBucket(bucket)
-		out.Put(id, prefix, day, h)
+		out.Put(id, prefix, day, hashes[i])
 	}
 	return out, nil
 }
