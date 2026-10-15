@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -49,9 +50,39 @@ func ringID(keyring []domain.Credential) string {
 	return strings.Join(ids, ",")
 }
 
-// NextKey is the retry stage's walk: the first key after `loser` in ring order that is not in
-// `spent`, round the ring once. Blank when every key is spent.
-func NextKey(keyring []domain.Credential, loser domain.Credential, spent map[string]bool) domain.Credential {
+// KeyRing is one request's walk over a route's credentials, for the retry stage: which are spent,
+// which are dead, and whether the rate-limited ones have been opened again.
+type KeyRing struct {
+	keys  []domain.Credential
+	spent map[string]bool // rate-limited or dead this request
+	dead  map[string]bool // refused outright: never opened again
+	reset bool
+}
+
+func NewKeyRing(keys []domain.Credential) *KeyRing {
+	return &KeyRing{keys: keys, spent: map[string]bool{}, dead: map[string]bool{}}
+}
+
+// Next retires `loser` for `status` and picks the key the next attempt dials with — the one after
+// it round the ring, blank when none is left. The rate-limited keys are opened once when nothing
+// else remains: a vendor's quota window may have slid by then. A second exhaustion is the answer
+// the client gets.
+func (k *KeyRing) Next(loser domain.Credential, status int) domain.Credential {
+	k.spent[loser.ID] = true
+	if domain.IsKeyRejected(status) {
+		k.dead[loser.ID] = true
+	}
+	if winner := nextKey(k.keys, loser, k.spent); winner.ID != "" || k.reset {
+		return winner
+	}
+	k.reset = true
+	k.spent = maps.Clone(k.dead)
+	return nextKey(k.keys, loser, k.spent)
+}
+
+// nextKey is the first key after `loser` in ring order that is not in `spent`, round the ring
+// once. Blank when every key is spent.
+func nextKey(keyring []domain.Credential, loser domain.Credential, spent map[string]bool) domain.Credential {
 	start := slices.IndexFunc(keyring, func(key domain.Credential) bool { return key.ID == loser.ID })
 	for step := 1; step <= len(keyring); step++ {
 		if key := keyring[(start+step)%len(keyring)]; !spent[key.ID] {

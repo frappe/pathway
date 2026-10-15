@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/service/routing"
 	"github.com/frappe/pathway/internal/transport/http/proxy"
 	"github.com/frappe/pathway/internal/transport/respond"
 )
@@ -36,7 +37,7 @@ func newRetry(deps Deps) (Middleware, error) {
 			// An upgrade or a multipart body cannot be replayed; a single key has nowhere to go.
 			replayable := !isUpgrade(r) && state.Raw != nil && len(keyring) > 1
 			provider := state.Decision.Route.IsProvider()
-			ring := newKeyRing(keyring)
+			ring := routing.NewKeyRing(keyring)
 			for {
 				marks := markAttempt(w, r)
 				var winner domain.Credential
@@ -50,7 +51,7 @@ func newRetry(deps Deps) (Middleware, error) {
 						if !replayable || r.Context().Err() != nil || !domain.IsKeyFailure(status) {
 							return false
 						}
-						winner = ring.next(state.Decision.Key, status)
+						winner = ring.Next(state.Decision.Key, status)
 						return winner.ID != ""
 					},
 					replace: func(status int) bool {

@@ -503,14 +503,31 @@ func TestPickKeyTakesTurns(t *testing.T) {
 
 func TestNextKeyWalksTheRingPastTheSpent(t *testing.T) {
 	ring := []domain.Credential{{ID: "a"}, {ID: "b"}, {ID: "c"}}
-	if key := NextKey(ring, ring[0], map[string]bool{"a": true, "b": true}); key.ID != "c" {
+	if key := nextKey(ring, ring[0], map[string]bool{"a": true, "b": true}); key.ID != "c" {
 		t.Errorf("after a with b spent: %q", key.ID)
 	}
-	if key := NextKey(ring, ring[2], map[string]bool{"c": true}); key.ID != "a" {
+	if key := nextKey(ring, ring[2], map[string]bool{"c": true}); key.ID != "a" {
 		t.Errorf("after c did not wrap: %q", key.ID)
 	}
-	if key := NextKey(ring, ring[1], map[string]bool{"a": true, "b": true, "c": true}); key.ID != "" {
+	if key := nextKey(ring, ring[1], map[string]bool{"a": true, "b": true, "c": true}); key.ID != "" {
 		t.Errorf("picked %q from an exhausted ring", key.ID)
+	}
+}
+
+// The ring walks every key once on a 429, opens once more, and never again; a rejected key stays
+// out through the re-opening.
+func TestKeyRingSpendsRetiresAndReopensOnce(t *testing.T) {
+	a, b := domain.Credential{ID: "a"}, domain.Credential{ID: "b"}
+	ring := NewKeyRing([]domain.Credential{a, b})
+
+	if next := ring.Next(a, 429); next.ID != "b" {
+		t.Fatalf("after a's 429 got %q, want b", next.ID)
+	}
+	if next := ring.Next(b, 401); next.ID != "a" {
+		t.Fatalf("after b's 401 got %q, want a once more (the ring re-opened)", next.ID)
+	}
+	if next := ring.Next(a, 429); next.ID != "" {
+		t.Fatalf("after a's second 429 got %q, want nothing: b is dead and the ring opened already", next.ID)
 	}
 }
 
