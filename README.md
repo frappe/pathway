@@ -506,7 +506,7 @@ What a vendor is sent in place of what the client sent:
 | `thinking`, when a tool is forced | at DeepSeek `{"type": "disabled"}` is added when `tool_choice` is `"required"` or names a function (`tool` on the Anthropic shape) and the caller sent no `thinking` or `reasoning_effort`. The caller is told: `X-Grove-Changed: thinking=disabled` (`vendorfields`) |
 | `reasoning_effort`, when the request has tools (OpenAI shape) | at OpenAI `"none"` is added when the caller sent no `reasoning_effort`. The caller is told: `X-Grove-Changed: reasoning_effort=none` (`vendorfields`) |
 | `temperature`, `top_p`, `logprobs`, `top_logprobs` (OpenAI shape) | at OpenAI, unless `reasoning_effort` is `"none"`: dropped, but for a `temperature` or `top_p` of 1. The caller is told: `X-Grove-Changed: temperature=default, top_p=default` (`vendorfields`) |
-| `service_tier` | dropped (`servicetier`) |
+| `service_tier` | dropped: it picks the vendor's price class, which nothing here prices. The caller is told: `X-Grove-Changed: service_tier=default` (`servicetier`) |
 | every other field, listed above or not | as the client sent it |
 
 - **A field not on the list is forwarded**, not dropped and not refused: the list is what the
@@ -578,7 +578,7 @@ What a client sees on an answer:
 |---|---|---|
 | `X-Request-Id`, `Request-Id` | the gateway's | every answer. One id under both names; the second is what Anthropic's SDK reads |
 | `X-Grove-Fallback` | the gateway's | only when a fallback model served: that model's key |
-| `X-Grove-Changed` | the gateway's | only when the gateway changed what the model does for the vendor that answered: `reasoning_effort=none`, `thinking=disabled`, or a dropped field as `temperature=default`, comma-separated (see [vendor_quirks.md](vendor_quirks.md)) |
+| `X-Grove-Changed` | the gateway's | only when the gateway changed what the model does for the vendor that answered: `reasoning_effort=none`, `thinking=disabled`, or a dropped field as `temperature=default` or `service_tier=default`, comma-separated (see [vendor_quirks.md](vendor_quirks.md)) |
 | `Retry-After` | the gateway's on its own 429 and 503, else the upstream's, relayed | when either says when to come back |
 | `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Disposition`, `Cache-Control` | the upstream's, relayed | as it sent them |
 | `Upgrade`, `Connection`, `Sec-WebSocket-*` | the upstream's, relayed | an upgrade's handshake |
@@ -1026,7 +1026,7 @@ is not there. The name only, never the value. Top-level fields; a rewritten one 
 |---|---|
 | `modelmap` | rewrites `model` to the route's `upstream_model` |
 | `streamusage` | forces `stream_options.include_usage` on a streaming completion, and `continuous_usage_stats` beside it for an upstream the `vendor` package says takes it (our engines, Baseten) |
-| `servicetier` | drops a caller's `service_tier` on every hop: it picks the vendor's price class, which is never the caller's to choose |
+| `servicetier` | drops a caller's `service_tier` on every hop, and says so in `X-Grove-Changed`: it picks the vendor's price class, which is never the caller's to choose |
 | `vendorfields` | on a vendor hop, sends the output cap under the one name that vendor reads, from the `vendor` package of where an upstream differs from the shape (see [The client interface](#the-client-interface)). Today the output cap: `max_completion_tokens` for OpenAI (400s on the old name), `max_tokens` for every other (they ignore the new one, uncapping output). Logged as a drop of the other name |
 | `cachesalt` | prefixes a caller's `cache_salt` with their tenant, strips it on a vendor hop. Not in the default list |
 
