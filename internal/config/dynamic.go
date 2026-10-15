@@ -89,7 +89,7 @@ func Defaults() Resolved {
 		DrainTimeout:        630 * time.Second,
 		LameDuck:            5 * time.Second,
 		UpgradeTimeout:      30 * time.Second,
-		UsageRetention:      7 * 24 * time.Hour,
+		UsageRetention:      3 * 24 * time.Hour,
 		UsageSpool:          "/var/lib/pathway/usage-spool.jsonl",
 		UsageSpoolMaxBytes:  1 << 30,
 	}

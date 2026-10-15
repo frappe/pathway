@@ -1082,7 +1082,7 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
   "drain_timeout": "630s",
   "lame_duck": "5s",
   "upgrade_timeout": "30s",
-  "usage_retention": "168h",
+  "usage_retention": "72h",
   "usage_spool": "/var/lib/pathway/usage-spool.jsonl",
   "usage_spool_max_bytes": 1073741824,
   "maintenance": false
@@ -1236,7 +1236,7 @@ lands wholly in the drain or wholly on a fresh counter. The answer is every pair
 A day of `""` is a counter from before this build bucketed by day, which the control plane lands on
 the day it pulls. `POST /grove-admin/usage/ack {"acks": {"<drain id>": {"<prefix>": ["<day>", ...]}}}`
 takes the counters the control plane recorded out of `drain:unacked` and keeps them for
-`usage_retention` (default a week), answering `{"ok": true, "count": n}`; one not waiting is a
+`usage_retention` (default three days), answering `{"ok": true, "count": n}`; one not waiting is a
 no-op. A bucket it never acks
 is answered again, under its own id, on every pull, while the rest move on: a control plane that
 failed to record one user loses nothing and holds nobody else back, and one that recorded it but

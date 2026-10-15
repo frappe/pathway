@@ -50,8 +50,8 @@ func TestTheDrainAckCycle(t *testing.T) {
 	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &ack) != nil || !ack.OK || ack.Count != 1 {
 		t.Fatalf("ack = %d: %s", w.Code, w.Body)
 	}
-	if store.Retained[id+":"+k1] != 7*24*time.Hour {
-		t.Errorf("retained %v, want the default week", store.Retained[id+":"+k1])
+	if store.Retained[id+":"+k1] != 3*24*time.Hour {
+		t.Errorf("retained %v, want the default three days", store.Retained[id+":"+k1])
 	}
 	if after := get("/grove-admin/usage"); len(after) != 1 || after[id]["K-2"] == nil || after[id]["K-1"] != nil {
 		t.Errorf("after ack = %+v, want only the unacked K-2 again", after)

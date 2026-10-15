@@ -97,8 +97,8 @@ func TestOmittedFieldsKeepTheirDefault(t *testing.T) {
 	if got.DrainTimeout != Defaults().DrainTimeout {
 		t.Errorf("drain_timeout moved to %v without being named", got.DrainTimeout)
 	}
-	if got.UsageRetention != 7*24*time.Hour {
-		t.Errorf("usage_retention = %v, want the default week", got.UsageRetention)
+	if got.UsageRetention != 3*24*time.Hour {
+		t.Errorf("usage_retention = %v, want the default three days", got.UsageRetention)
 	}
 	if got.MaxBodyBytes != Defaults().MaxBodyBytes {
 		t.Errorf("max_body_bytes moved to %d without being named", got.MaxBodyBytes)

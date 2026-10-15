@@ -52,10 +52,10 @@ type Server struct {
 	retention  func() time.Duration
 }
 
-// usageRetention is the configured window, or a week on a server built without one (tests).
+// usageRetention is the configured window, or three days on a server built without one (tests).
 func (s *Server) usageRetention() time.Duration {
 	if s.retention == nil {
-		return 7 * 24 * time.Hour
+		return 3 * 24 * time.Hour
 	}
 	return s.retention()
 }
