@@ -117,7 +117,8 @@ func TestRepositoriesDependOnlyOnDomain(t *testing.T) {
 			}
 			switch {
 			case path == "github.com/frappe/pathway/internal/domain",
-				path == "github.com/frappe/pathway/internal/repository":
+				path == "github.com/frappe/pathway/internal/repository",
+				path == "github.com/frappe/pathway/internal/repository/storetest":
 			default:
 				t.Errorf("%s imports %s — a repository knows domain types and nothing else", file, path)
 			}
