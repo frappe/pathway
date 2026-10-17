@@ -21,8 +21,8 @@ type Context struct {
 	// UpstreamModel is what the chosen route says this upstream answers to, pushed by the control
 	// plane. Blank means send the caller's `model` unchanged, which is every route we run ourselves.
 	UpstreamModel string
-	// User is the Grove user this request is billed to — the tenant boundary cachesalt keys on.
-	User string
+	// Team is the Central Team this request is billed to — the tenant boundary cachesalt keys on.
+	Team string
 	// Provider is true when the hop leaves our network for a vendor.
 	Provider bool
 	// Vendor is the provider's name on a vendor hop ("openai"), blank on anything we run.
@@ -85,7 +85,7 @@ var Default = []string{"modelmap", "streamusage", "cachesalt", "servicetier", "v
 type Chain struct {
 	mu         sync.RWMutex
 	transforms []Request
-	// warned is each user and field already logged as dropped: an SDK that sends one on every
+	// warned is each team and field already logged as dropped: an SDK that sends one on every
 	// request is a line, not a flood.
 	warned sync.Map
 }
@@ -152,25 +152,25 @@ func (c *Chain) Apply(ctx Context, body Body) (bool, error) {
 			return changed, fmt.Errorf("transform %s: %w", t.Name(), err)
 		}
 		if did {
-			c.warnDropped(ctx.User, t.Name(), sent, body)
+			c.warnDropped(ctx.Team, t.Name(), sent, body)
 		}
 		changed = changed || did
 	}
 	return changed, nil
 }
 
-// warnDropped logs each field sent and no longer there, once per user and field: nothing upstream
+// warnDropped logs each field sent and no longer there, once per team and field: nothing upstream
 // errors on a missing field, so this line is the only sign the caller asked for it. The name
 // only, never the value — that is the caller's, and a cache salt is a secret.
 // ponytail: top-level fields only, and the seen set is bounded because transforms name what they
 // drop; one that strips whatever it does not know needs a cap here and a diff that recurses.
-func (c *Chain) warnDropped(user, transform string, sent []string, body Body) {
+func (c *Chain) warnDropped(team, transform string, sent []string, body Body) {
 	for _, field := range sent {
 		if _, kept := body[field]; kept {
 			continue
 		}
-		if _, seen := c.warned.LoadOrStore(user+"\x00"+field, true); !seen {
-			slog.Warn("request field dropped", "user", user, "field", field, "transform", transform)
+		if _, seen := c.warned.LoadOrStore(team+"\x00"+field, true); !seen {
+			slog.Warn("request field dropped", "team", team, "field", field, "transform", transform)
 		}
 	}
 }

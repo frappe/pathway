@@ -9,17 +9,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/config"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/domain"
 )
 
-// payloadFixture is newFixture with a payload log wired in and the test user's opt-in set as
+// payloadFixture is newFixture with a payload log wired in and the test key's opt-in set as
 // asked. The buffer is the payload file.
 func payloadFixture(t *testing.T, engineHandler http.HandlerFunc, optIn bool) (*fixture, *bytes.Buffer) {
 	t.Helper()
 	f := newFixture(t, engineHandler)
-	user := f.store.Users["test-user"]
-	user.LogPayloads = optIn
-	f.store.Users["test-user"] = user
+	f.withKey(func(k *domain.KeyRecord) { k.LogPayloads = optIn })
 
 	buf := &bytes.Buffer{}
 	f.handler = buildHandler(t, f.store, config.Config{}, 0, func(s *Services) {
@@ -40,11 +39,11 @@ func jsonLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 
 // The row a support query needs: the prompt as the customer wrote it, the output as they received
 // it, and the join keys to the access line.
-func TestAnOptedInUsersPromptAndOutputAreLogged(t *testing.T) {
+func TestAnOptedInKeysPromptAndOutputAreLogged(t *testing.T) {
 	f, buf := payloadFixture(t, jsonEngine(`{"id":"chatcmpl-1",`+usageObject+`}`), true)
 	prompt := `{"model":"qwen3-4b","messages":[{"role":"user","content":"hi"}]}`
 
-	f.post("/v1/chat/completions", prompt)
+	f.post("/openai/v1/chat/completions", prompt)
 
 	line := jsonLine(t, buf)
 	if line["prompt"] != prompt {
@@ -53,7 +52,7 @@ func TestAnOptedInUsersPromptAndOutputAreLogged(t *testing.T) {
 	if output, ok := line["output"].(string); !ok || !strings.Contains(output, "chatcmpl-1") {
 		t.Errorf("output = %q, want what the client received", line["output"])
 	}
-	if line["model"] != "qwen3-4b" || line["user"] != "test-user" || line["key"] != "abc123" {
+	if line["model"] != "qwen3-4b" || line["team"] != "test-team" || line["key"] != "abc123" {
 		t.Errorf("join fields off: %v", line)
 	}
 	if rid, ok := line["rid"].(string); !ok || rid == "" || rid == "-" {
@@ -64,12 +63,12 @@ func TestAnOptedInUsersPromptAndOutputAreLogged(t *testing.T) {
 	}
 }
 
-// Default off, and never silent: a user the control plane has not flagged leaves no trace even on
+// Default off, and never silent: a key the control plane has not flagged leaves no trace even on
 // a box with the payload log configured.
-func TestAUserNotOptedInLogsNothing(t *testing.T) {
+func TestAKeyNotOptedInLogsNothing(t *testing.T) {
 	f, buf := payloadFixture(t, jsonEngine(`{`+usageObject+`}`), false)
 
-	f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+	f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 
 	if buf.Len() != 0 {
 		t.Errorf("payload was logged without the opt-in: %s", buf)
@@ -86,7 +85,7 @@ func TestAStreamIsCapturedWithoutBeingAltered(t *testing.T) {
 		_, _ = io.WriteString(w, frames)
 	}, true)
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
 
 	if resp.Body.String() != frames {
 		t.Errorf("stream altered:\n got: %q\nwant: %q", resp.Body.String(), frames)
@@ -95,7 +94,32 @@ func TestAStreamIsCapturedWithoutBeingAltered(t *testing.T) {
 	if line["output"] != frames {
 		t.Errorf("captured output = %q", line["output"])
 	}
-	if f.store.Usage["abc123"]["total_tokens"] != 120 {
-		t.Errorf("metering lost under the capture: %v", f.store.Usage["abc123"])
+	if f.store.UsageOf("abc123")["total_tokens"] != 120 {
+		t.Errorf("metering lost under the capture: %v", f.store.UsageOf("abc123"))
+	}
+}
+
+// The opt-in is the team's once its record is there: a key flagged off logs when its team is on,
+// and a key flagged on logs nothing when its team is off.
+func TestTheTeamRecordDecidesTheOptIn(t *testing.T) {
+	prompt := `{"model":"qwen3-4b","messages":[{"role":"user","content":"hi"}]}`
+	for _, tc := range []struct {
+		name       string
+		key, team  bool
+		wantLogged bool
+	}{
+		{"team on, key off", false, true, true},
+		{"team off, key on", true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, buf := payloadFixture(t, jsonEngine(`{"id":"chatcmpl-1",`+usageObject+`}`), tc.key)
+			f.store.Teams["test-team"] = domain.TeamRecord{LogPayloads: tc.team}
+			if resp := f.post("/openai/v1/chat/completions", prompt); resp.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", resp.Code, resp.Body)
+			}
+			if logged := strings.Contains(buf.String(), `"prompt"`); logged != tc.wantLogged {
+				t.Errorf("logged = %v, want %v: %s", logged, tc.wantLogged, buf)
+			}
+		})
 	}
 }

@@ -102,3 +102,39 @@ func Takes(inputs, sent []string) bool {
 	}
 	return true
 }
+
+// SentTools is every name a body asks a tool by, each once: the `type` of each entry of `tools`,
+// and each top-level field, since `web_search_options` or `mcp_servers` is how a shape asks for
+// a vendor-run tool with no `tools` entry. Read by exact key off the object, not a struct: a
+// struct decode matches `Type` for `type`, and a vendor does not. A `tools` that is not a list,
+// or an entry that is not an object or has no string type, names nothing: the upstream's to refuse.
+func SentTools(body []byte) []string {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(body, &fields)
+	var sent []string
+	for field := range fields {
+		sent = append(sent, field)
+	}
+	slices.Sort(sent)
+
+	var tools []map[string]json.RawMessage
+	_ = json.Unmarshal(fields["tools"], &tools)
+	for _, tool := range tools {
+		var kind string
+		if json.Unmarshal(tool["type"], &kind) == nil && kind != "" && !slices.Contains(sent, kind) {
+			sent = append(sent, kind)
+		}
+	}
+	return sent
+}
+
+// Refuses is the first name in `sent` that a route denying `denied` would not run, "" when none.
+// A route that denies nothing runs everything, which is every row we run ourselves.
+func Refuses(denied, sent []string) string {
+	for _, name := range sent {
+		if slices.Contains(denied, name) {
+			return name
+		}
+	}
+	return ""
+}

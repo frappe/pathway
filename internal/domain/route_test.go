@@ -284,14 +284,54 @@ func TestIsModelFailure(t *testing.T) {
 func TestKeyStatusClass(t *testing.T) {
 	for status, want := range map[int]string{
 		200: "ok", 400: "ok", 404: "ok", 429: "rate_limited",
-		401: "rejected", 402: "rejected", 403: "rejected",
+		401: "unauthorized", 402: "unpaid", 403: "forbidden",
 		500: "failed", 502: "failed", 0: "failed",
 	} {
 		if got := KeyStatusClass(status); got != want {
 			t.Errorf("KeyStatusClass(%d) = %q, want %q", status, got, want)
 		}
-		if IsKeyFailure(status) != (want == "rate_limited" || want == "rejected") {
+		if IsKeyFailure(status) != (want == "rate_limited" || IsKeyRejected(status)) {
 			t.Errorf("IsKeyFailure(%d) disagrees with its class %q", status, want)
+		}
+	}
+}
+
+// A refusal of the gateway's credential has a name per status and a message that blames nobody
+// on the caller's side; anything else is no refusal.
+func TestRefusedCredential(t *testing.T) {
+	for status, class := range map[int]string{401: "unauthorized", 402: "unpaid", 403: "forbidden"} {
+		refusal, ok := RefusedCredential(status)
+		if !ok || refusal.Class != class || refusal.Message == "" {
+			t.Errorf("RefusedCredential(%d) = %+v, %v", status, refusal, ok)
+		}
+	}
+	for _, status := range []int{200, 400, 404, 429, 500} {
+		if _, ok := RefusedCredential(status); ok {
+			t.Errorf("RefusedCredential(%d) is a refusal", status)
+		}
+	}
+}
+
+// An exhausted account reads as a 402 whatever status the vendor put on it: OpenAI's 429
+// insufficient_quota and Anthropic's 400 credit balance. The words alone do not: a 5xx that
+// mentions them is still the upstream's failure, and a 429 or 400 without them is its own.
+func TestClassifyUpstream(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+		want   int
+	}{
+		{429, `{"error":{"code":"insufficient_quota"}}`, 402},
+		{429, `{"error":{"type":"INSUFFICIENT_QUOTA"}}`, 402},
+		{400, `{"error":{"message":"Your credit balance is too low to access the Anthropic API."}}`, 402},
+		{429, `{"error":{"message":"Rate limit reached"}}`, 429},
+		{400, `{"error":{"message":"messages[0].content is invalid"}}`, 400},
+		{503, `credit balance service unavailable`, 503},
+		{402, ``, 402},
+		{200, `{"choices":[]}`, 200},
+	} {
+		if got := ClassifyUpstream(tc.status, []byte(tc.body)); got != tc.want {
+			t.Errorf("ClassifyUpstream(%d, %q) = %d, want %d", tc.status, tc.body, got, tc.want)
 		}
 	}
 }

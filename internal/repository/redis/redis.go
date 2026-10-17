@@ -7,7 +7,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // Client owns the connection. The repositories are thin values over it — separate types because
@@ -31,7 +31,6 @@ func (c *Client) Close() error { return c.rdb.Close() }
 func (c *Client) Store() repository.Store {
 	return repository.Store{
 		Keys:     keys{c.rdb},
-		Users:    users{c.rdb},
 		Groups:   groups{c.rdb},
 		Routes:   routes{c.rdb},
 		Sessions: sessions{c.rdb},

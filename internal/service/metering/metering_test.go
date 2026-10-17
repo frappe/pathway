@@ -8,8 +8,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository/memory"
 )
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -270,20 +270,20 @@ func TestCacheBucketsBeyondThePromptBillAsPlain(t *testing.T) {
 // them with the same table.
 func TestRecordAccruesCostAndSpend(t *testing.T) {
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Prepaid: true, Budget: 10_000_000}
+	store.Keys["k1"] = domain.KeyRecord{Prepaid: true, Budget: 10_000_000}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 
 	svc.Record(context.Background(), Report{
-		Prefix: "abc", Model: "qwen3-4b", Usage: openAIUsage, User: "GU-1", Prepaid: true, Budget: 10_000_000,
+		Prefix: "abc", Model: "qwen3-4b", Usage: openAIUsage, MeterID: "k1", Prepaid: true, Budget: 10_000_000, UpstreamStatus: "200",
 		// $3/Mtok plain, $0.30/Mtok cached, $15/Mtok completion, in nano-USD per Mtok.
 		Pricing: priced(t, "mp1", map[string]int64{"prompt_tokens": 3e9, "cached_tokens": 3e8, "completion_tokens": 15e9}),
 	})
-	usage := store.Usage["abc"]
+	usage := store.UsageOf("abc")
 	want := int64(20*3000 + 80*300 + 20*15000)
 	for field, n := range map[string]int64{
 		"cost": want, "p:mp1:cost": want, "prompt_tokens": 100, "p:mp1:prompt_tokens": 100,
 		"p:mp1:cached_tokens": 80, "p:mp1:completion_tokens": 20, "p:mp1:request_count": 1,
-		"user_spent": want, "user_balance": 10_000_000 - want,
+		"key_spent": want, "key_balance": 10_000_000 - want,
 	} {
 		if usage[field] != n {
 			t.Errorf("usage[%s] = %d, want %d", field, usage[field], n)
@@ -295,8 +295,8 @@ func TestRecordAccruesCostAndSpend(t *testing.T) {
 	if _, present := usage["p:mp1:total_tokens"]; present {
 		t.Error("only the priced counters are tagged")
 	}
-	if store.Users["GU-1"].Spent != want {
-		t.Errorf("spent = %d, want %d", store.Users["GU-1"].Spent, want)
+	if store.Keys["k1"].Spent != want {
+		t.Errorf("spent = %d, want %d", store.Keys["k1"].Spent, want)
 	}
 }
 
@@ -304,15 +304,15 @@ func TestRecordAccruesCostAndSpend(t *testing.T) {
 // spend is still reported — a request on an unpriced model is not an invisible one.
 func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Prepaid: true}
+	store.Keys["k1"] = domain.KeyRecord{Prepaid: true}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
-	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: openAIUsage, User: "GU-1", Prepaid: true})
+	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: openAIUsage, MeterID: "k1", Prepaid: true, UpstreamStatus: "200"})
 
-	usage := store.Usage["abc"]
+	usage := store.UsageOf("abc")
 	if _, present := usage["cost"]; present {
 		t.Error("a cost was written without rates")
 	}
-	spent, reported := usage["user_spent"]
+	spent, reported := usage["key_spent"]
 	if usage["total_tokens"] != 120 || !reported || spent != 0 {
 		t.Errorf("usage = %v", usage)
 	}
@@ -322,27 +322,27 @@ func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 // never moves and the drain carries no balance for them: there is nothing to gate and nothing owed.
 func TestAFreeHoldersSpendNeverMoves(t *testing.T) {
 	store := memory.New()
-	store.Users["GU-1"] = domain.UserRecord{Spent: 40}
+	store.Keys["k1"] = domain.KeyRecord{Spent: 40}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 	svc.Record(context.Background(), Report{
-		Prefix: "abc", Model: "m", Usage: openAIUsage, User: "GU-1",
+		Prefix: "abc", Model: "m", Usage: openAIUsage, MeterID: "k1", UpstreamStatus: "200",
 		Pricing: priced(t, "mp1", map[string]int64{"completion_tokens": 15e9}),
 	})
 
-	usage := store.Usage["abc"]
+	usage := store.UsageOf("abc")
 	if usage["f:mp1:cost"] != 20*15000 || usage["f:mp1:completion_tokens"] != 20 {
 		t.Errorf("a free holder's usage is still priced: usage = %v", usage)
 	}
 	if _, present := usage["p:mp1:cost"]; present {
 		t.Error("a free holder's usage is tagged as charged")
 	}
-	for _, field := range []string{"user_spent", "user_balance"} {
+	for _, field := range []string{"key_spent", "key_balance"} {
 		if _, present := usage[field]; present {
 			t.Errorf("%s reported for a free holder", field)
 		}
 	}
-	if store.Users["GU-1"].Spent != 40 {
-		t.Errorf("spent = %d, want it left at 40", store.Users["GU-1"].Spent)
+	if store.Keys["k1"].Spent != 40 {
+		t.Errorf("spent = %d, want it left at 40", store.Keys["k1"].Spent)
 	}
 }
 
@@ -383,8 +383,8 @@ func TestOneSuccessClearsTheFailureStreak(t *testing.T) {
 	}
 }
 
-// Three impatient clients in a row must not retire an upstream that did nothing wrong. Each is
-// still a request.
+// Three impatient clients in a row must not retire an upstream that did nothing wrong. None was
+// served anything, so none is a request.
 func TestAClientThatLeftDoesNotCountAgainstTheTarget(t *testing.T) {
 	store := memory.New()
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
@@ -394,8 +394,30 @@ func TestAClientThatLeftDoesNotCountAgainstTheTarget(t *testing.T) {
 	if store.Failures["https://a"] != 0 {
 		t.Errorf("failures = %d, want 0 — the clients left, the upstream did not fail", store.Failures["https://a"])
 	}
-	if store.Usage["abc"]["request_count"] != domain.EjectAfter {
-		t.Errorf("request_count = %d, want %d", store.Usage["abc"]["request_count"], domain.EjectAfter)
+	if got := store.UsageOf("abc")["request_count"]; got != 0 {
+		t.Errorf("request_count = %d, want 0: nobody was served", got)
+	}
+}
+
+// Only a request the upstream took is the caller's: a refusal, a 5xx or no answer at all accrues
+// nothing, while an answer that broke off is still a request, with whatever usage it reported.
+func TestOnlyAServedRequestAccrues(t *testing.T) {
+	for _, tc := range []struct {
+		status, cut string
+		want        int64
+	}{
+		{"", "", 0}, {"401", "", 0}, {"429", "", 0}, {"502", "", 0},
+		{"200", "", 1}, {"200", domain.CutUpstream, 1}, {"200", domain.CutClientLeft, 1}, {"101", "", 1},
+	} {
+		store := memory.New()
+		svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
+		svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", UpstreamStatus: tc.status, Cut: tc.cut, Usage: openAIUsage})
+		if got := store.UsageOf("abc")["request_count"]; got != tc.want {
+			t.Errorf("status %q cut %q: request_count = %d, want %d", tc.status, tc.cut, got, tc.want)
+		}
+		if got := store.UsageOf("abc")["prompt_tokens"]; (got != 0) != (tc.want == 1) {
+			t.Errorf("status %q cut %q: prompt_tokens = %d", tc.status, tc.cut, got)
+		}
 	}
 }
 

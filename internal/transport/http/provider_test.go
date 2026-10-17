@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // providerFixture points one model at a third-party route. The fake engine stands in for the
@@ -81,7 +81,7 @@ func TestTheCallerIsToldWhatTheGatewayChanged(t *testing.T) {
 		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
 		Vendor: "openai", Kind: "provider", Dialect: "openai", UpstreamModel: "luna",
 	}}
-	resp := f.post("/v1/chat/completions", `{"model":"openai/luna","tools":[{"type":"function","function":{"name":"a"}}]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"openai/luna","tools":[{"type":"function","function":{"name":"a"}}]}`)
 
 	if got := resp.Header().Get("X-Grove-Changed"); got != "reasoning_effort=none" {
 		t.Errorf("X-Grove-Changed = %q", got)
@@ -90,7 +90,7 @@ func TestTheCallerIsToldWhatTheGatewayChanged(t *testing.T) {
 		t.Errorf("upstream body = %s", f.seen.body)
 	}
 
-	resp = f.post("/v1/chat/completions", `{"model":"openai/luna"}`)
+	resp = f.post("/openai/v1/chat/completions", `{"model":"openai/luna"}`)
 	if got := resp.Header().Get("X-Grove-Changed"); got != "" {
 		t.Errorf("X-Grove-Changed = %q on a request nothing was changed in", got)
 	}
@@ -120,7 +120,7 @@ func TestProviderUsageIsRecordedAgainstTheGroveID(t *testing.T) {
 	f := providerFixture(t)
 	f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5"}`)
 
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	if usage["m:total_tokens:anthropic/claude-4-5"] == 0 {
 		t.Errorf("no usage against the Grove id; usage = %v", usage)
 	}
@@ -163,15 +163,15 @@ func TestAProviderStreamSpeaksTheGroveModelIDInEveryFrame(t *testing.T) {
 	if resp.Body.String() != want {
 		t.Errorf("stream altered beyond the model swap.\n got: %q\nwant: %q", resp.Body.String(), want)
 	}
-	if f.store.Usage["abc123"]["m:total_tokens:anthropic/claude-4-5"] == 0 {
-		t.Errorf("usage lost under the swap: %v", f.store.Usage["abc123"])
+	if f.store.UsageOf("abc123")["m:total_tokens:anthropic/claude-4-5"] == 0 {
+		t.Errorf("usage lost under the swap: %v", f.store.UsageOf("abc123"))
 	}
 }
 
 // The point of gating locally: a vendor's surfaces are a closed set, so dialling anything
 // outside its dialect buys a 404 we could have given ourselves, plus a round trip on a paid link.
 func TestAPathTheVendorDoesNotServeNeverLeavesTheGateway(t *testing.T) {
-	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/rerank", "/v1/completions"} {
+	for _, path := range []string{"/openai/v1/chat/completions", "/openai/v1/embeddings", "/openai/v1/rerank", "/openai/v1/completions"} {
 		t.Run(path, func(t *testing.T) {
 			f := providerFixture(t)
 			resp := f.post(path, `{"model":"anthropic/claude-4-5"}`)
@@ -181,6 +181,50 @@ func TestAPathTheVendorDoesNotServeNeverLeavesTheGateway(t *testing.T) {
 			}
 			if f.seen.path != "" {
 				t.Errorf("the vendor was dialled anyway: %s", f.seen.path)
+			}
+		})
+	}
+}
+
+// A tool the vendor would run on its own side is billed outside the tokens, and nothing here
+// meters it: a request that names one the route denies is refused in the surface's own envelope
+// before the dial. The caller's own tools go through.
+func TestAToolTheVendorRunsIsRefusedBeforeTheDial(t *testing.T) {
+	for _, c := range []struct {
+		name, path, body, envelope string
+		want                       int
+	}{
+		{"a server tool on the Anthropic shape", "/anthropic/v1/messages",
+			`{"model":"anthropic/claude-4-5","max_tokens":16,"tools":[{"type":"web_search_20250305","name":"web_search"}]}`,
+			`"type":"error"`, http.StatusBadRequest},
+		{"a field that asks for one on the OpenAI shape", "/openai/v1/chat/completions",
+			`{"model":"openai/luna","web_search_options":{}}`, `"error":{`, http.StatusBadRequest},
+		{"the caller's own tool", "/anthropic/v1/messages",
+			`{"model":"anthropic/claude-4-5","max_tokens":16,"tools":[{"type":"custom","name":"a","input_schema":{}},{"type":"bash_20250124","name":"bash"}]}`,
+			"", http.StatusOK},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := providerFixture(t)
+			f.store.Routes["anthropic/claude-4-5"][0].DeniedTools = []string{"web_search_20250305", "mcp_servers"}
+			f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("anthropic/claude-4-5,openai/luna")}
+			f.store.Routes["openai/luna"] = []domain.Route{{
+				EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
+				Vendor: "openai", Kind: "provider", Dialect: "openai", DeniedTools: []string{"web_search_options"},
+			}}
+			resp := f.post(c.path, c.body)
+
+			if resp.Code != c.want {
+				t.Fatalf("status = %d, want %d: %s", resp.Code, c.want, resp.Body)
+			}
+			if c.want != http.StatusOK {
+				if !strings.Contains(resp.Body.String(), c.envelope) || !strings.Contains(resp.Body.String(), "does not run") {
+					t.Errorf("refusal = %s, want the surface's envelope naming the tool", resp.Body)
+				}
+				if f.seen.path != "" {
+					t.Errorf("the vendor was dialled anyway: %s", f.seen.path)
+				}
+			} else if f.seen.path == "" {
+				t.Error("the caller's own tool never reached the vendor")
 			}
 		})
 	}
@@ -205,7 +249,7 @@ func TestADualFrontVendorRoutesEachSurfaceToItsOwnFront(t *testing.T) {
 		t.Errorf("anthropic surface dialled %q, want the anthropic front", f.seen.path)
 	}
 
-	if resp := f.post("/v1/chat/completions", `{"model":"kimi/k2"}`); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/chat/completions", `{"model":"kimi/k2"}`); resp.Code != http.StatusOK {
 		t.Fatalf("openai surface: status = %d, body = %s", resp.Code, resp.Body)
 	}
 	if f.seen.path != "/root/v1/chat/completions" {
@@ -213,7 +257,7 @@ func TestADualFrontVendorRoutesEachSurfaceToItsOwnFront(t *testing.T) {
 	}
 
 	*f.seen = engineRecord{}
-	if resp := f.post("/v1/embeddings", `{"model":"kimi/k2"}`); resp.Code != http.StatusNotFound {
+	if resp := f.post("/openai/v1/embeddings", `{"model":"kimi/k2"}`); resp.Code != http.StatusNotFound {
 		t.Errorf("embeddings: status = %d, want 404", resp.Code)
 	}
 	if f.seen.path != "" {
@@ -225,7 +269,7 @@ func TestADualFrontVendorRoutesEachSurfaceToItsOwnFront(t *testing.T) {
 // must not have taken those away.
 func TestAnEngineStillServesItsOwnExtraEndpoints(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
-	if resp := f.post("/v1/rerank", `{"model":"qwen3-4b"}`); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/rerank", `{"model":"qwen3-4b"}`); resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.Code)
 	}
 	if f.seen.path != "/e/md1/v1/rerank" {

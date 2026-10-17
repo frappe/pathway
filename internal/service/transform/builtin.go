@@ -41,7 +41,7 @@ func (streamUsage) Apply(ctx Context, body Body) (bool, error) {
 		}
 	}
 	forced := []string{"include_usage"}
-	if upstreamOf(ctx).usagePerChunk {
+	if upstreamOf(ctx).UsagePerChunk {
 		forced = append(forced, "continuous_usage_stats")
 	}
 	changed := false

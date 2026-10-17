@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // backupEngine is a second model's engine: it keeps the bodies it was sent.
@@ -93,7 +93,7 @@ func TestAFailedModelFallsBackToTheNext(t *testing.T) {
 	f, backup := fallbackFixture(t, failing(http.StatusBadGateway))
 	access := captureAccess(t, f)
 
-	resp := f.post("/v1/chat/completions", fallbackBody)
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
 	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"model":"backup"`) {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
@@ -108,7 +108,7 @@ func TestAFailedModelFallsBackToTheNext(t *testing.T) {
 		t.Errorf("backup's body = %v, want the client's, naming backup, without fallbacks", sent)
 	}
 
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	for field, want := range map[string]int64{
 		"request_count": 1, "m:request_count:backup": 1, "m:request_count:qwen3-4b": 0, "m:total_tokens:backup": 120,
 	} {
@@ -145,7 +145,7 @@ func TestAFailedModelFallsBackToTheNext(t *testing.T) {
 // A request that was wrong is wrong for every model: relayed, and the fallback never dialled.
 func TestARequestsOwnFaultIsNotMoved(t *testing.T) {
 	f, backup := fallbackFixture(t, failing(http.StatusBadRequest))
-	resp := f.post("/v1/chat/completions", fallbackBody)
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
 
 	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "primary said no") {
 		t.Errorf("status = %d, body = %s", resp.Code, resp.Body)
@@ -160,7 +160,7 @@ func TestARequestsOwnFaultIsNotMoved(t *testing.T) {
 func TestFallbacksNeverReachAnUpstream(t *testing.T) {
 	f, backup := fallbackFixture(t, jsonEngine(`{`+usageObject+`}`))
 	access := captureAccess(t, f)
-	resp := f.post("/v1/chat/completions", fallbackBody)
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
 	if resp.Code != http.StatusOK || resp.Header().Get("X-Grove-Fallback") != "" {
 		t.Fatalf("status = %d, headers = %v, body = %s", resp.Code, resp.Header(), resp.Body)
 	}
@@ -175,7 +175,7 @@ func TestFallbacksNeverReachAnUpstream(t *testing.T) {
 	}
 
 	plain := `{"model":"qwen3-4b",  "messages":[]}`
-	f.post("/v1/chat/completions", plain)
+	f.post("/openai/v1/chat/completions", plain)
 	if string(f.seen.body) != plain {
 		t.Errorf("body = %s, want the client's bytes", f.seen.body)
 	}
@@ -185,7 +185,7 @@ func TestFallbacksNeverReachAnUpstream(t *testing.T) {
 func TestAModelsKeysAreWalkedBeforeTheFallback(t *testing.T) {
 	f, vendor := keyedFixture(t, map[string]int{"A": 429, "B": 429}, "A", "B")
 	backup := addBackup(t, f, jsonEngine(`{`+usageObject+`}`))
-	resp := f.post("/v1/chat/completions", `{"model":"deepseek/chat","messages":[],"fallbacks":["backup"]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"deepseek/chat","messages":[],"fallbacks":["backup"]}`)
 
 	if resp.Code != http.StatusOK || len(backup.bodies) != 1 {
 		t.Fatalf("status = %d, body = %s, backup dials = %d", resp.Code, resp.Body, len(backup.bodies))
@@ -193,7 +193,7 @@ func TestAModelsKeysAreWalkedBeforeTheFallback(t *testing.T) {
 	if len(vendor.keys) != 4 {
 		t.Errorf("keys dialled = %v, want each twice before the fallback", vendor.keys)
 	}
-	if got := f.store.Usage["abc123"]["request_count"]; got != 1 {
+	if got := f.store.UsageOf("abc123")["request_count"]; got != 1 {
 		t.Errorf("request_count = %d", got)
 	}
 }
@@ -203,7 +203,7 @@ func TestAModelWithNowhereToGoFallsBackBeforeAnyDial(t *testing.T) {
 	f, backup := fallbackFixture(t, failing(http.StatusBadGateway))
 	f.store.Routes["qwen3-4b"][0].Healthy = false
 	access := captureAccess(t, f)
-	resp := f.post("/v1/chat/completions", fallbackBody)
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
 
 	if resp.Code != http.StatusOK || len(backup.bodies) != 1 || f.seen.path != "" {
 		t.Fatalf("status = %d, backup dials = %d, primary saw %q", resp.Code, len(backup.bodies), f.seen.path)
@@ -229,10 +229,10 @@ func TestAModelWithNowhereToGoFallsBackBeforeAnyDial(t *testing.T) {
 func TestAFallbackTheCallerMayNotUseIsSkipped(t *testing.T) {
 	f, backup := fallbackFixture(t, failing(http.StatusBadGateway))
 	f.store.Routes["ungranted"] = f.store.Routes["backup"]
-	resp := f.post("/v1/chat/completions",
+	resp := f.post("/openai/v1/chat/completions",
 		`{"model":"qwen3-4b","messages":[],"fallbacks":["ungranted","unknown","backup"]}`)
 
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	if resp.Code != http.StatusOK || usage["m:request_count:backup"] != 1 || usage["m:request_count:ungranted"] != 0 {
 		t.Fatalf("status = %d, usage = %v", resp.Code, usage)
 	}
@@ -241,12 +241,13 @@ func TestAFallbackTheCallerMayNotUseIsSkipped(t *testing.T) {
 	}
 
 	delete(f.store.Groups["acme"].Models, "backup")
-	if resp := f.post("/v1/chat/completions", fallbackBody); resp.Code != http.StatusBadGateway {
+	if resp := f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want the primary's 502 when no fallback is the caller's", resp.Code)
 	}
 }
 
-// Every model failing leaves the last one's answer as the client's, body and headers, billed once.
+// Every model failing leaves the last one's answer as the client's, body and headers, and no request
+// billed: nobody served them.
 func TestEveryModelFailingRelaysTheLastAnswer(t *testing.T) {
 	f := newFixture(t, failing(http.StatusBadGateway))
 	addBackup(t, f, func(w http.ResponseWriter, _ *http.Request) {
@@ -254,7 +255,7 @@ func TestEveryModelFailingRelaysTheLastAnswer(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"error":{"message":"backup said no"}}`)
 	})
-	resp := f.post("/v1/chat/completions", fallbackBody)
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
 
 	if resp.Code != http.StatusServiceUnavailable || !strings.Contains(resp.Body.String(), "backup said no") {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
@@ -262,8 +263,8 @@ func TestEveryModelFailingRelaysTheLastAnswer(t *testing.T) {
 	if got := resp.Header().Values("Retry-After"); len(got) != 1 || got[0] != "2" {
 		t.Errorf("headers = %v, want the backup's only", resp.Header())
 	}
-	if got := f.store.Usage["abc123"]["request_count"]; got != 1 {
-		t.Errorf("request_count = %d", got)
+	if got := f.store.UsageOf("abc123")["request_count"]; got != 0 {
+		t.Errorf("request_count = %d, want 0", got)
 	}
 }
 
@@ -282,7 +283,7 @@ func TestAVendorFallbackAnswersUnderItsOwnName(t *testing.T) {
 		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true, Vendor: "deepseek",
 		Kind: "provider", Dialect: "openai", UpstreamModel: "deepseek-chat",
 	}}
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["deepseek/chat"]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["deepseek/chat"]}`)
 
 	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"model":"deepseek/chat"`) {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
@@ -290,8 +291,8 @@ func TestAVendorFallbackAnswersUnderItsOwnName(t *testing.T) {
 	if !bytes.Contains(f.seen.body, []byte(`"model":"deepseek-chat"`)) {
 		t.Errorf("vendor's body = %s, want its own id", f.seen.body)
 	}
-	if got := f.store.Usage["abc123"]["m:request_count:deepseek/chat"]; got != 1 {
-		t.Errorf("usage = %v", f.store.Usage["abc123"])
+	if got := f.store.UsageOf("abc123")["m:request_count:deepseek/chat"]; got != 1 {
+		t.Errorf("usage = %v", f.store.UsageOf("abc123"))
 	}
 }
 
@@ -303,7 +304,7 @@ func TestABegunStreamIsNotMoved(t *testing.T) {
 		_ = http.NewResponseController(w).Flush()
 		panic(http.ErrAbortHandler)
 	})
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","stream":true,"messages":[],"fallbacks":["backup"]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","stream":true,"messages":[],"fallbacks":["backup"]}`)
 
 	if resp.Code != http.StatusOK || len(backup.bodies) != 0 {
 		t.Errorf("status = %d, backup dials = %d", resp.Code, len(backup.bodies))
@@ -314,7 +315,7 @@ func TestABegunStreamIsNotMoved(t *testing.T) {
 func TestAMalformedFallbackListIsRefused(t *testing.T) {
 	f, backup := fallbackFixture(t, jsonEngine(`{}`))
 	for _, fallbacks := range []string{`"backup"`, `["a","b","c","d"]`, `[""]`, `[1]`} {
-		resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","fallbacks":`+fallbacks+`}`)
+		resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","fallbacks":`+fallbacks+`}`)
 		if resp.Code != http.StatusBadRequest {
 			t.Errorf("fallbacks %s: status = %d, want 400", fallbacks, resp.Code)
 		}
@@ -329,7 +330,7 @@ func TestAGoneClientIsNotMoved(t *testing.T) {
 	f, backup := fallbackFixture(t, failing(http.StatusBadGateway))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(fallbackBody)).WithContext(ctx)
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(fallbackBody)).WithContext(ctx)
 	r.Header.Set("Authorization", "Bearer "+secret)
 	r.Header.Set("Content-Type", "application/json")
 	f.handler.ServeHTTP(httptest.NewRecorder(), r)
@@ -352,7 +353,7 @@ func (f *fixture) serve(body string) *http.Response {
 	f.t.Helper()
 	gateway := httptest.NewServer(f.handler)
 	defer gateway.Close()
-	r, _ := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(body))
+	r, _ := http.NewRequest(http.MethodPost, gateway.URL+"/openai/v1/chat/completions", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+secret)
 	r.Header.Set("Content-Type", "application/json")
 	resp, err := gateway.Client().Do(r)
@@ -414,7 +415,7 @@ func TestAFallbackBehindAnIngressIsAskedForByName(t *testing.T) {
 		EngineURL: f.engine.URL + "/ingress", InternalKey: "ingress-key", Healthy: true,
 		Deployment: "ING-1", Server: "ING-1", Kind: "ingress",
 	}}
-	resp := f.post("/v1/chat/completions", fallbackBody)
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
 
 	if resp.Code != http.StatusOK || f.seen.groveModel != "backup" {
 		t.Errorf("status = %d, ingress was asked for %q", resp.Code, f.seen.groveModel)
@@ -425,7 +426,7 @@ func TestAFallbackBehindAnIngressIsAskedForByName(t *testing.T) {
 func TestThePayloadLineNamesTheFallback(t *testing.T) {
 	f, buf := payloadFixture(t, failing(http.StatusBadGateway), true)
 	addBackup(t, f, jsonEngine(`{`+usageObject+`}`))
-	f.post("/v1/chat/completions", fallbackBody)
+	f.post("/openai/v1/chat/completions", fallbackBody)
 
 	if line := jsonLine(t, buf); line["model"] != "qwen3-4b" || line["fallback"] != "backup" {
 		t.Errorf("payload line model=%v fallback=%v", line["model"], line["fallback"])
@@ -454,7 +455,7 @@ func TestAFallbacksRefusalMovesOn(t *testing.T) {
 	f, backup := fallbackFixture(t, failing(http.StatusBadGateway))
 	picky := addModel(t, f, "picky", failing(http.StatusBadRequest))
 	access := captureAccess(t, f)
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["picky","backup"]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["picky","backup"]}`)
 
 	if resp.Code != http.StatusOK || resp.Header().Get("X-Grove-Fallback") != "backup" {
 		t.Fatalf("status = %d, headers = %v, body = %s", resp.Code, resp.Header(), resp.Body)
@@ -470,7 +471,7 @@ func TestAFallbacksRefusalMovesOn(t *testing.T) {
 
 	// With nothing after it, the refusal is the client's answer, named as the fallback's.
 	f.handler = buildHandler(t, f.store, config.Config{}, 0)
-	last := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["picky"]}`)
+	last := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["picky"]}`)
 	if last.Code != http.StatusBadRequest || last.Header().Get("X-Grove-Fallback") != "picky" {
 		t.Errorf("status = %d, headers = %v", last.Code, last.Header())
 	}
@@ -491,7 +492,7 @@ func TestAFallbackIsSentTheFieldsItsVendorTakes(t *testing.T) {
 	luna := addModel(t, f, "openai/luna", jsonEngine(`{`+usageObject+`}`))
 	f.store.Routes["openai/luna"] = vendorRoute("openai", luna.url)
 
-	resp := f.post("/v1/chat/completions",
+	resp := f.post("/openai/v1/chat/completions",
 		`{"model":"deepseek/chat","messages":[],"max_tokens":16,"fallbacks":["openai/luna"]}`)
 	if resp.Code != http.StatusOK || len(luna.bodies) != 1 {
 		t.Fatalf("status = %d, body = %s, luna dials = %d", resp.Code, resp.Body, len(luna.bodies))
@@ -517,7 +518,7 @@ func TestAFallbackThatCannotServeIsPassedOver(t *testing.T) {
 		EngineURL: backup.url, InternalKey: "k", Healthy: true, Vendor: "anthropic",
 		Kind: "provider", Dialect: "anthropic",
 	}}
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["claude","backup"]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[],"fallbacks":["claude","backup"]}`)
 	if resp.Code != http.StatusOK || resp.Header().Get("X-Grove-Fallback") != "backup" {
 		t.Fatalf("other shape: status = %d, fallback = %q, body = %s",
 			resp.Code, resp.Header().Get("X-Grove-Fallback"), resp.Body)
@@ -530,7 +531,7 @@ func TestAFallbackThatCannotServeIsPassedOver(t *testing.T) {
 	f, backup = fallbackFixture(t, jsonEngine(`{`+usageObject+`}`))
 	f.store.Routes["qwen3-4b"][0].InputModalities = []string{"text", "image"}
 	f.store.Routes["backup"][0].InputModalities = []string{"text"}
-	if resp = f.post("/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK || len(backup.bodies) != 0 {
+	if resp = f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK || len(backup.bodies) != 0 {
 		t.Errorf("takes less: status = %d, backup dials = %d, body = %s", resp.Code, len(backup.bodies), resp.Body)
 	}
 }
@@ -545,12 +546,12 @@ func TestAFallbackThatTakesLessThanTheRequestCarriesIsNotDialled(t *testing.T) {
 		takes            []string
 		answer           string
 	}{
-		{"an OpenAI image", "/v1/chat/completions",
+		{"an OpenAI image", "/openai/v1/chat/completions",
 			`{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}`, []string{"text"}, openaiAnswer},
 		{"an Anthropic image", "/anthropic/v1/messages",
 			`{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}`, []string{"text"}, anthropicMessage},
 		// Held to each word, not to "text only or not": this one takes images and is still passed over.
-		{"an OpenAI file", "/v1/chat/completions",
+		{"an OpenAI file", "/openai/v1/chat/completions",
 			`{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0="}}`, []string{"text", "image"}, openaiAnswer},
 	} {
 		body := `{"model":"qwen3-4b","max_tokens":16,"fallbacks":["limited","backup"],` +
@@ -585,12 +586,27 @@ func TestADeadDialLeavesItsReasonOnTheAttemptLine(t *testing.T) {
 	dead.Close()
 	f.store.Routes["qwen3-4b"][0].EngineURL = dead.URL
 	access := captureAccess(t, f)
-	if resp := f.post("/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK {
+	if resp := f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
 
 	held := accessLines(t, access)[0]
 	if held["msg"] != "attempt" || held["upstream_status"] != float64(0) || held["reason"] != "upstream unavailable" {
 		t.Errorf("attempt line = %v", held)
+	}
+}
+
+// A vendor refusing our credential cannot serve the model: the caller's fallback answers, and
+// the refusal is a held attempt, never the client's.
+func TestARefusedCredentialFallsBackToTheNext(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 402}, "A")
+	addBackup(t, f, jsonEngine(`{"id":"chatcmpl-2","model":"backup",`+usageObject+`}`))
+
+	resp := f.post("/openai/v1/chat/completions", `{"model":"deepseek/chat","messages":[],"fallbacks":["backup"]}`)
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"model":"backup"`) {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
+	}
+	if len(vendor.keys) != 1 || resp.Header().Get("X-Grove-Fallback") != "backup" {
+		t.Errorf("keys dialled = %v, headers = %v", vendor.keys, resp.Header())
 	}
 }

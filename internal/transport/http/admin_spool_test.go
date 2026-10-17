@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/observability"
-	"github.com/phot0n/pathway/internal/repository/memory"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/provisioning"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/observability"
+	"github.com/frappe/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/provisioning"
 )
 
 // The pull carries the spool's dead lines and its counters; an ack naming a dead line forgets it.
@@ -22,7 +22,7 @@ func TestThePullHandsOverDeadLinesAndAnAckForgetsThem(t *testing.T) {
 	meter := metering.New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, logs.Process)
 	meter.Spool = metering.NewSpool(store.Repositories().Usage, logs.Process, func() string { return path }, func() int64 { return 1 << 20 })
 	store.Fail["usage"] = true
-	meter.Record(context.Background(), metering.Report{RequestID: "rid-1", Prefix: "K-1", Model: "m"})
+	meter.Record(context.Background(), metering.Report{RequestID: "rid-1", Prefix: "K-1", Model: "m", UpstreamStatus: "200"})
 	for range 5 {
 		meter.Spool.Replay(context.Background())
 	}

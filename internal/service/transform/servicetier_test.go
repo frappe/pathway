@@ -2,12 +2,15 @@ package transform
 
 import "testing"
 
-// The tier is dropped on every hop and surface, and the rest of the body is left as it was sent.
+// The tier is dropped on every hop and surface, the caller is told, and the rest of the body is
+// left as it was sent.
 func TestAServiceTierNeverReachesAnUpstream(t *testing.T) {
 	for _, ctx := range []Context{
 		{Path: "/v1/chat/completions"},
 		{Path: "/v1/messages", Provider: true},
 	} {
+		var told []string
+		ctx.Changed = &told
 		body := saltBody(t, `{"model":"m","service_tier":"priority"}`)
 		changed, err := serviceTier{}.Apply(ctx, body)
 		if err != nil || !changed {
@@ -15,6 +18,9 @@ func TestAServiceTierNeverReachesAnUpstream(t *testing.T) {
 		}
 		if _, present := body["service_tier"]; present {
 			t.Errorf("%s: service_tier reached the upstream", ctx.Path)
+		}
+		if len(told) != 1 || told[0] != "service_tier=default" {
+			t.Errorf("%s: told %v, want [service_tier=default]", ctx.Path, told)
 		}
 		if string(body["model"]) != `"m"` {
 			t.Errorf("%s: model = %s", ctx.Path, body["model"])
@@ -24,9 +30,10 @@ func TestAServiceTierNeverReachesAnUpstream(t *testing.T) {
 
 // A body that sent none is forwarded byte-for-byte.
 func TestABodyWithNoServiceTierIsUntouched(t *testing.T) {
-	changed, _ := serviceTier{}.Apply(Context{}, saltBody(t, `{"model":"m"}`))
-	if changed {
-		t.Error("a body with no service_tier was reported changed")
+	var told []string
+	changed, _ := serviceTier{}.Apply(Context{Changed: &told}, saltBody(t, `{"model":"m"}`))
+	if changed || len(told) != 0 {
+		t.Errorf("a body with no service_tier: changed=%v told=%v", changed, told)
 	}
 }
 

@@ -10,9 +10,10 @@ import (
 	goflag "flag"
 	"fmt"
 	"testing"
+	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // sibling finds a distinct id in the same bucket as `id` — a bucket push only ever carries and
@@ -68,7 +69,7 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 		},
 		Keys: map[string]repository.KeyBucket{
 			pushed: {Hash: "kh", Records: []repository.KeyUpsert{
-				{MeterID: kept, Prefix: "K-kept", User: "GU-1", Status: "active", CanReadBalance: true},
+				{MeterID: kept, Prefix: "K-kept", Team: "T-1", Status: "active", Geography: "eu"},
 			}},
 		},
 		Routes: &repository.RoutesPush{
@@ -84,8 +85,8 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	if counts.Groups != 1 || counts.Keys != 1 || counts.Routes != 1 {
 		t.Errorf("counts = %+v", counts)
 	}
-	if rec, _, err := client.Store().Keys.Resolve(ctx, kept); err != nil || !rec.Key.CanReadBalance {
-		t.Errorf("pushed key = %+v, %v; want it allowed to read the balance", rec, err)
+	if rec, _, err := client.Store().Keys.Resolve(ctx, kept); err != nil || rec.Key.Geography != "eu" || rec.Key.Team != "T-1" {
+		t.Errorf("pushed key = %+v, %v; want its team and pin", rec, err)
 	}
 
 	for key, want := range map[string]bool{
@@ -132,50 +133,125 @@ func TestStateApplyAgainstRealRedis(t *testing.T) {
 	}
 }
 
-func TestAUserRecordRoundTripsItsGeography(t *testing.T) {
+// A push lands the whole policy on the key and strips what older control planes wrote there.
+func TestAKeyRecordRoundTripsItsPolicy(t *testing.T) {
 	client, state := liveStore(t)
 	ctx := context.Background()
-	bucket := domain.BucketOf("GU-1")
-	if _, err := state.Apply(ctx, repository.StatePush{Users: map[string]repository.UserBucket{
-		bucket: {Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Geography: "eu"}}},
+	client.rdb.HSet(ctx, "key:aa", "user", "GU-1", "can_read_balance", "1", spentField(time.Now()), "40")
+	bucket := domain.BucketOf("aa")
+	if _, err := state.Apply(ctx, repository.StatePush{Keys: map[string]repository.KeyBucket{
+		bucket: {Hash: "kh", Records: []repository.KeyUpsert{{
+			MeterID: "aa", Prefix: "abc", Team: "T-1", Status: "active", Groups: "acme", Allow: "m9",
+			Deny: "m2", Limited: true, LogPayloads: true, Geography: "eu", Prepaid: true, Budget: 1_000,
+			Limits: "requests:1m:5",
+		}}},
 	}}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	usr, found, err := client.Store().Users.Get(ctx, "GU-1")
-	if err != nil || !found || usr.Geography != "eu" {
-		t.Errorf("Get = %+v, %v, %v; want geography eu", usr, found, err)
+	holder, found, err := client.Store().Keys.Resolve(ctx, "aa")
+	rec := holder.Key
+	if err != nil || !found || rec.Team != "T-1" || !rec.Groups["acme"] || !rec.Allow["m9"] || !rec.Deny["m2"] ||
+		!rec.Limited || !rec.LogPayloads || rec.Geography != "eu" || !rec.Prepaid || rec.Budget != 1_000 ||
+		rec.Spent != 40 || len(rec.Limits) != 1 {
+		t.Errorf("Resolve = %+v, %v, %v; want every pushed field and spent left alone", rec, found, err)
+	}
+	for _, stale := range []string{"user", "can_read_balance"} {
+		if client.rdb.HExists(ctx, "key:aa", stale).Val() {
+			t.Errorf("stale field %q survived the push", stale)
+		}
 	}
 }
 
 // The push is hash-gated: a pushed record that expired would stay missing until its section
 // changed. So nothing the control plane pushes may carry a TTL, including after the two gateway
-// writes that touch a pushed record — an accrual and a spend adjustment on the holder.
+// writes that touch a pushed record — an accrual and a spend adjustment on the key.
 func TestPushedStateNeverExpires(t *testing.T) {
 	client, state := liveStore(t)
 	ctx := context.Background()
 	push := repository.StatePush{
 		Groups: &repository.GroupsPush{Hash: "gh", Records: []repository.GroupUpsert{{Name: "acme", Models: "m"}}},
-		Users: map[string]repository.UserBucket{domain.BucketOf("GU-1"): {
-			Hash: "uh", Records: []repository.UserUpsert{{Name: "GU-1", Prepaid: true, Budget: 1_000, Limits: "requests:1m:5"}},
-		}},
 		Keys: map[string]repository.KeyBucket{domain.BucketOf("aa"): {
-			Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", User: "GU-1", Status: "active"}},
+			Hash: "kh", Records: []repository.KeyUpsert{{
+				MeterID: "aa", Prefix: "abc", Team: "T-1", Status: "active", Prepaid: true, Budget: 1_000, Limits: "requests:1m:5",
+			}},
 		}},
 		Routes: &repository.RoutesPush{Hash: "rh", Table: map[string][]domain.Route{"m": {{EngineURL: "http://e", Healthy: true}}}},
 	}
 	if _, err := state.Apply(ctx, push); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if err := client.Store().Usage.Accrue(ctx, liveAccrual("abc", "GU-1", 250)); err != nil {
+	if err := client.Store().Usage.Accrue(ctx, liveAccrual("abc", "aa", 250)); err != nil {
 		t.Fatalf("Accrue: %v", err)
 	}
-	if _, _, _, err := client.Store().Users.AdjustSpent(ctx, "GU-1", "adj-1", -50); err != nil {
+	if _, _, _, err := client.Store().Keys.AdjustSpent(ctx, "aa", "adj-1", -50); err != nil {
 		t.Fatalf("AdjustSpent: %v", err)
 	}
-	for _, key := range []string{"model_group:acme", "user:GU-1", "key:aa", "deploy:m", stateHashKey} {
+	for _, key := range []string{"model_group:acme", "key:aa", "deploy:m", stateHashKey} {
 		// -1 is "exists, no expiry"; -2 would be a record the push never wrote.
 		if ttl := client.rdb.TTL(ctx, key).Val(); ttl != -1 {
 			t.Errorf("%s: ttl = %d, want -1 (no expiry)", key, ttl)
 		}
+	}
+}
+
+// Take answers what was counted and leaves nothing behind: the next read is zeros.
+func TestProviderKeysTakeClears(t *testing.T) {
+	client, _ := liveStore(t)
+	ctx, keys := context.Background(), client.Store().ProviderKeys
+	for _, status := range []int{200, 429, 401} {
+		if err := keys.Count(ctx, "k1", status); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+	}
+	stats, err := keys.Take(ctx, []string{"k1", "k2"})
+	if err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	if got := stats["k1"]; got.Requests != 3 || got.OK != 1 || got.RateLimited != 1 || got.Rejected != 1 || got.LastUsed == 0 {
+		t.Errorf("first take = %+v", got)
+	}
+	if stats["k2"] != (domain.KeyStats{}) {
+		t.Errorf("never dialled = %+v, want zeros", stats["k2"])
+	}
+	if n := client.rdb.Exists(ctx, providerKeyKey("k1")).Val(); n != 0 {
+		t.Errorf("pk:k1 still exists after take")
+	}
+	if again, _ := keys.Take(ctx, []string{"k1"}); again["k1"] != (domain.KeyStats{}) {
+		t.Errorf("second take = %+v, want zeros", again["k1"])
+	}
+}
+
+// A team record lands in its bucket and comes back with the key that names it, in the one call;
+// a key naming a team the store does not hold comes back without one.
+func TestATeamRecordResolvesWithItsKey(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	bucket := domain.BucketOf("T-1")
+	key := sibling(t, "aa")
+
+	counts, err := state.Apply(ctx, repository.StatePush{
+		Teams: map[string]repository.TeamBucket{bucket: {Hash: "th", Records: []repository.TeamUpsert{
+			{Team: "T-1", Limited: true, Prepaid: true, Limits: "requests:1m:5"},
+		}}},
+		Keys: map[string]repository.KeyBucket{domain.BucketOf(key): {Hash: "kh", Records: []repository.KeyUpsert{
+			{MeterID: key, Prefix: "K-1", Team: "T-1", Status: "active"},
+			{MeterID: "aa", Prefix: "K-2", Team: "T-none", Status: "active"},
+		}}},
+	})
+	if err != nil || counts.Teams != 1 || counts.Keys != 2 {
+		t.Fatalf("Apply: %v, counts %+v", err, counts)
+	}
+	holder, found, err := client.Store().Keys.Resolve(ctx, key)
+	if err != nil || !found || holder.Team == nil {
+		t.Fatalf("resolve = %+v, %v, %v; want the team record", holder, found, err)
+	}
+	if !holder.Team.Limited || !holder.Team.Prepaid || len(holder.Team.Limits) != 1 || holder.Team.Limits[0].Value != 5 {
+		t.Errorf("team = %+v", *holder.Team)
+	}
+	if holder, _, _ := client.Store().Keys.Resolve(ctx, "aa"); holder.Team != nil {
+		t.Errorf("a key naming an unpushed team carries %+v", holder.Team)
+	}
+	if hashes, _ := state.Hashes(ctx); hashes["teams:"+bucket] != "th" {
+		t.Errorf("hashes = %v", hashes)
 	}
 }

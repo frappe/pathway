@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // Store is every repository over one set of maps. Fail makes any call return an error, which is
@@ -21,22 +21,27 @@ import (
 type Store struct {
 	mu sync.Mutex
 
-	Keys     map[string]domain.KeyRecord
-	Users    map[string]domain.UserRecord
-	Groups   map[string]domain.GroupRecord
-	Routes   map[string][]domain.Route
-	Sticky   map[string]string
-	InFlight map[string]map[string]bool // engine → request ids
-	Failures map[string]int
+	Keys map[string]domain.KeyRecord
+	// SpentMonth is the month each key's Spent counts (domain.MonthOf), the memory twin of the
+	// real store's spent:<month> field. A key not listed counts the current one.
+	SpentMonth map[string]string
+	Groups     map[string]domain.GroupRecord
+	Teams      map[string]domain.TeamRecord
+	Routes     map[string][]domain.Route
+	Sticky     map[string]string
+	InFlight   map[string]map[string]bool // engine → request ids
+	Failures   map[string]int
 	// KeyStats is what each vendor credential answered, the memory twin of pk:<id>.
 	KeyStats map[string]domain.KeyStats
-	Usage    map[string]map[string]int64
-	// Limits is every limit counter, "<user>:<metric>:<window>:<bucket>" → count: the memory twin
-	// of lim:….
+	// Usage is every live counter, bucket ("<key prefix>:<YYYY-MM-DD>", repository.UsageBucket) →
+	// counters: the memory twin of usage:<bucket>.
+	Usage map[string]map[string]int64
+	// Limits is every limit counter, "<key prefix>:<metric>:<window>:<bucket>" → count: the memory
+	// twin of lim:….
 	Limits map[string]int64
 	Hashes map[string]string // grove:state_hash — section/bucket → hash
 
-	// Drained is every counter set aside, drain id → prefix → counters; Unacked the "<id>:<prefix>"
+	// Drained is every counter set aside, drain id → bucket → counters; Unacked the "<id>:<bucket>"
 	// pairs not yet acknowledged; Retained how long each acknowledged pair is kept. Adjusted is
 	// every spend adjustment id already applied.
 	Drained map[string]map[string]map[string]int64
@@ -47,7 +52,7 @@ type Store struct {
 	Adjusted map[string]bool
 
 	// Fail names the repositories that should error, by interface name ("routes", "inflight",
-	// "health", "sessions", "keys", "users", "groups", "usage", "limits", "state", "providerkeys").
+	// "health", "sessions", "keys", "groups", "usage", "limits", "state", "providerkeys").
 	Fail map[string]bool
 }
 
@@ -55,8 +60,8 @@ var errStore = errors.New("store unavailable")
 
 func New() *Store {
 	return &Store{
-		Keys: map[string]domain.KeyRecord{}, Users: map[string]domain.UserRecord{},
-		Groups: map[string]domain.GroupRecord{}, Routes: map[string][]domain.Route{},
+		Keys: map[string]domain.KeyRecord{}, SpentMonth: map[string]string{}, Groups: map[string]domain.GroupRecord{},
+		Teams: map[string]domain.TeamRecord{}, Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
 		Limits: map[string]int64{}, Hashes: map[string]string{}, Fail: map[string]bool{},
@@ -68,7 +73,7 @@ func New() *Store {
 // Repositories hands this store out behind the interfaces.
 func (s *Store) Repositories() repository.Store {
 	return repository.Store{
-		Keys: keys{s}, Users: users{s}, Groups: groups{s}, Routes: routes{s},
+		Keys: keys{s}, Groups: groups{s}, Routes: routes{s},
 		Sessions: sessions{s}, InFlight: inFlight{s}, Health: health{s},
 		Usage: usage{s}, Limits: limits{s}, State: state{s}, ProviderKeys: providerKeys{s},
 	}
@@ -81,48 +86,62 @@ func (s *Store) failed(name string) error {
 	return nil
 }
 
-// putUser matches the real store's HSET-merge: a push writes its fields and leaves Spent alone.
-func (s *Store) putUser(rec repository.UserUpsert) {
+// putKey matches the real store's HSET-merge: a push writes its fields and leaves Spent alone.
+func (s *Store) putKey(rec repository.KeyUpsert) {
 	limits, _ := domain.ParseLimits(rec.Limits) // the push handler already refused one that does not read
-	s.Users[rec.Name] = domain.UserRecord{
-		Email: rec.Email, Groups: domain.ModelSet(rec.Groups),
+	s.Keys[rec.MeterID] = domain.KeyRecord{
+		Status: rec.Status, Team: rec.Team, KeyPrefix: rec.Prefix, Groups: domain.ModelSet(rec.Groups),
 		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
-		Prepaid: rec.Prepaid, Budget: rec.Budget, Spent: s.Users[rec.Name].Spent,
+		Prepaid: rec.Prepaid, Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent,
 		Limits: limits,
 	}
 }
 
+func (s *Store) putTeam(rec repository.TeamUpsert) {
+	limits, _ := domain.ParseLimits(rec.Limits) // the push handler already refused one that does not read
+	s.Teams[rec.Team] = domain.TeamRecord{
+		Limited: rec.Limited, Prepaid: rec.Prepaid, LogPayloads: rec.LogPayloads, Limits: limits,
+	}
+}
+
+// rollMonth matches the real store reading this month's field: a key last touched in an earlier
+// month starts this one at 0. Called with the lock held, on a key the store knows.
+func (s *Store) rollMonth(id string) {
+	month := domain.MonthOf(time.Now())
+	if was, ok := s.SpentMonth[id]; ok && was != month {
+		rec := s.Keys[id]
+		rec.Spent = 0
+		s.Keys[id] = rec
+	}
+	s.SpentMonth[id] = month
+}
+
 type keys struct{ s *Store }
 
-// Resolve matches the real script: a record is asked for only when it is read, so a failing users
-// or groups store is felt only by a key that reaches it.
+// Resolve matches the real script: a group is asked for only when the key lists one, so a failing
+// groups store is felt only by a key that reaches it.
 func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, bool, error) {
 	k.s.mu.Lock()
 	defer k.s.mu.Unlock()
 	if err := k.s.failed("keys"); err != nil {
 		return repository.Holder{}, false, err
 	}
-	rec, ok := k.s.Keys[meterID]
-	if !ok {
+	if _, ok := k.s.Keys[meterID]; !ok {
 		return repository.Holder{}, false, nil
 	}
+	k.s.rollMonth(meterID)
+	rec := k.s.Keys[meterID]
 	holder := repository.Holder{Key: rec, Groups: map[string]domain.GroupRecord{}}
-	names := domain.ModelSet(rec.Legacy.Group)
-	if rec.User != "" {
-		if err := k.s.failed("users"); err != nil {
-			return repository.Holder{}, false, err
-		}
-		if holder.User, holder.HasUser = k.s.Users[rec.User]; holder.HasUser {
-			names = holder.User.Groups
-		}
+	if team, ok := k.s.Teams[rec.Team]; ok && rec.Team != "" {
+		holder.Team = &team
 	}
-	if len(names) > 0 {
+	if len(rec.Groups) > 0 {
 		if err := k.s.failed("groups"); err != nil {
 			return repository.Holder{}, false, err
 		}
 	}
-	for name := range names {
+	for name := range rec.Groups {
 		holder.Groups[name] = k.s.Groups[name]
 	}
 	return holder, true, nil
@@ -138,9 +157,7 @@ func (k keys) Upsert(_ context.Context, records []repository.KeyUpsert) error {
 		if rec.MeterID == "" {
 			continue
 		}
-		k.s.Keys[rec.MeterID] = domain.KeyRecord{
-			Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix, CanReadBalance: rec.CanReadBalance,
-		}
+		k.s.putKey(rec)
 	}
 	return nil
 }
@@ -151,54 +168,25 @@ func (k keys) Delete(_ context.Context, ids []string) (int, error) {
 	return deleteFrom(ids, func(id string) { delete(k.s.Keys, id) }), k.s.failed("keys")
 }
 
-type users struct{ s *Store }
-
-func (u users) Get(_ context.Context, name string) (domain.UserRecord, bool, error) {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	if err := u.s.failed("users"); err != nil {
-		return domain.UserRecord{}, false, err
-	}
-	rec, ok := u.s.Users[name]
-	return rec, ok, nil
-}
-
-func (u users) Upsert(_ context.Context, records []repository.UserUpsert) error {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	if err := u.s.failed("users"); err != nil {
-		return err
-	}
-	for _, rec := range records {
-		if rec.Name == "" {
-			continue
-		}
-		u.s.putUser(rec)
-	}
-	return nil
-}
-
-func (u users) Delete(_ context.Context, ids []string) (int, error) {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	return deleteFrom(ids, func(id string) { delete(u.s.Users, id) }), u.s.failed("users")
-}
-
-// AdjustSpent matches the real one: once per id, and only on a holder the store knows.
-func (u users) AdjustSpent(_ context.Context, name, id string, delta int64) (int64, bool, bool, error) {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	if err := u.s.failed("users"); err != nil {
+// AdjustSpent matches the real one: once per id, and only on a key the store knows.
+func (k keys) AdjustSpent(_ context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
+	k.s.mu.Lock()
+	defer k.s.mu.Unlock()
+	if err := k.s.failed("keys"); err != nil {
 		return 0, false, false, err
 	}
-	holder, found := u.s.Users[name]
-	if !found || u.s.Adjusted[id] {
-		return holder.Spent, false, found, nil
+	if _, found := k.s.Keys[meterID]; !found {
+		return 0, false, false, nil
 	}
-	holder.Spent += delta
-	u.s.Users[name] = holder
-	u.s.Adjusted[id] = true
-	return holder.Spent, true, true, nil
+	k.s.rollMonth(meterID)
+	rec := k.s.Keys[meterID]
+	if k.s.Adjusted[id] {
+		return rec.Spent, false, true, nil
+	}
+	rec.Spent += delta
+	k.s.Keys[meterID] = rec
+	k.s.Adjusted[id] = true
+	return rec.Spent, true, true, nil
 }
 
 type groups struct{ s *Store }
@@ -387,8 +375,12 @@ func (p providerKeys) Count(_ context.Context, id string, status int) error {
 	case "rate_limited":
 		stats.RateLimited++
 		stats.LastRateLimited = now
-	case "rejected":
-		stats.Rejected++
+	case "unauthorized":
+		stats.Unauthorized, stats.Rejected = stats.Unauthorized+1, stats.Rejected+1
+	case "unpaid":
+		stats.Unpaid, stats.Rejected = stats.Unpaid+1, stats.Rejected+1
+	case "forbidden":
+		stats.Forbidden, stats.Rejected = stats.Forbidden+1, stats.Rejected+1
 	case "ok":
 		stats.OK++
 	default:
@@ -398,7 +390,7 @@ func (p providerKeys) Count(_ context.Context, id string, status int) error {
 	return nil
 }
 
-func (p providerKeys) Stats(_ context.Context, ids []string) (map[string]domain.KeyStats, error) {
+func (p providerKeys) Take(_ context.Context, ids []string) (map[string]domain.KeyStats, error) {
 	p.s.mu.Lock()
 	defer p.s.mu.Unlock()
 	if err := p.s.failed("providerkeys"); err != nil {
@@ -407,19 +399,20 @@ func (p providerKeys) Stats(_ context.Context, ids []string) (map[string]domain.
 	stats := make(map[string]domain.KeyStats, len(ids))
 	for _, id := range ids {
 		stats[id] = p.s.KeyStats[id]
+		delete(p.s.KeyStats, id)
 	}
 	return stats, nil
 }
 
 type limits struct{ s *Store }
 
-func limitKey(user string, limit domain.Limit, now time.Time) string {
+func limitKey(key string, limit domain.Limit, now time.Time) string {
 	label, _, _ := limit.Bucket(now)
-	return user + ":" + limit.Metric + ":" + limit.Window + ":" + label
+	return key + ":" + limit.Metric + ":" + limit.Window + ":" + label
 }
 
 // Admit matches the real script: every limit is checked before any is counted, under one lock.
-func (l limits) Admit(_ context.Context, user string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
+func (l limits) Admit(_ context.Context, key string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
 	l.s.mu.Lock()
 	defer l.s.mu.Unlock()
 	if err := l.s.failed("limits"); err != nil {
@@ -427,7 +420,7 @@ func (l limits) Admit(_ context.Context, user string, lims []domain.Limit, now t
 	}
 	var exceeded []domain.Limit
 	for _, limit := range lims {
-		if l.s.Limits[limitKey(user, limit, now)] >= limit.Value {
+		if l.s.Limits[limitKey(key, limit, now)] >= limit.Value {
 			exceeded = append(exceeded, limit)
 		}
 	}
@@ -436,28 +429,33 @@ func (l limits) Admit(_ context.Context, user string, lims []domain.Limit, now t
 	}
 	for _, limit := range lims {
 		if limit.Metric == domain.LimitRequests {
-			l.s.Limits[limitKey(user, limit, now)]++
+			l.s.Limits[limitKey(key, limit, now)]++
 		}
 	}
 	return nil, nil
 }
 
-func (l limits) Debit(_ context.Context, user string, lims []domain.Limit, tokens int64, now time.Time) error {
+func (l limits) Debit(_ context.Context, key string, lims []domain.Limit, tokens int64, now time.Time) error {
 	l.s.mu.Lock()
 	defer l.s.mu.Unlock()
 	if err := l.s.failed("limits"); err != nil {
 		return err
 	}
 	for _, limit := range lims {
-		l.s.Limits[limitKey(user, limit, now)] += tokens
+		l.s.Limits[limitKey(key, limit, now)] += tokens
 	}
 	return nil
 }
 
+// UsageOf is the live counters prefix has today: what a test reads back after an Accrue.
+func (s *Store) UsageOf(prefix string) map[string]int64 {
+	return s.Usage[repository.UsageBucket(prefix, time.Now())]
+}
+
 type usage struct{ s *Store }
 
-// Accrue matches the real one: counters, cost and the holder's spend land under one lock, and the
-// spend moves only on a holder the store knows.
+// Accrue matches the real one: counters, cost and the key's spend land under one lock, and the
+// spend moves only on a key the store knows.
 func (u usage) Accrue(_ context.Context, a repository.Accrual) error {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
@@ -490,77 +488,116 @@ func (u usage) Ping(_ context.Context) error {
 }
 
 func (u usage) accrue(a repository.Accrual) {
-	if u.s.Usage[a.Prefix] == nil {
-		u.s.Usage[a.Prefix] = map[string]int64{}
+	bucket := repository.UsageBucket(a.Prefix, time.Now())
+	if u.s.Usage[bucket] == nil {
+		u.s.Usage[bucket] = map[string]int64{}
 	}
 	for field, n := range a.Fields {
-		u.s.Usage[a.Prefix][field] += n
+		u.s.Usage[bucket][field] += n
 	}
-	holder, known := u.s.Users[a.User]
-	if a.User == "" || !known {
+	if _, known := u.s.Keys[a.Key]; a.Key == "" || !known {
 		return
 	}
-	holder.Spent += a.Cost
-	u.s.Users[a.User] = holder
-	u.s.Usage[a.Prefix]["user_spent"] = holder.Spent
-	u.s.Usage[a.Prefix]["user_balance"] = a.Budget - holder.Spent
+	u.s.rollMonth(a.Key)
+	rec := u.s.Keys[a.Key]
+	rec.Spent += a.Cost
+	u.s.Keys[a.Key] = rec
+	u.s.Usage[bucket]["key_spent"] = rec.Spent
+	u.s.Usage[bucket]["key_balance"] = a.Budget - rec.Spent
 }
 
-// Drain matches the real one: live counters (all, or only keys) are set aside under newID, and
-// every unacknowledged pair is answered. Nothing is deleted until Ack.
+// Drain matches the real one: live counters (all, or only keys' buckets) are set aside under
+// newID, and every unacknowledged pair is answered. Nothing is deleted until Ack.
 func (u usage) Drain(_ context.Context, newID string, keys []string) (repository.Drains, error) {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
 	if err := u.s.failed("usage"); err != nil {
 		return nil, err
 	}
-	wanted := map[string]bool{}
-	for _, key := range keys {
-		wanted[key] = true
-	}
-	for prefix, fields := range u.s.Usage {
-		if len(wanted) > 0 && !wanted[prefix] {
+	want := wantedBuckets(keys)
+	for bucket, fields := range u.s.Usage {
+		if !want(bucket) {
 			continue
 		}
 		if u.s.Drained[newID] == nil {
 			u.s.Drained[newID] = map[string]map[string]int64{}
 		}
-		u.s.Drained[newID][prefix] = fields
-		u.s.Unacked[newID+":"+prefix] = true
-		delete(u.s.Usage, prefix)
+		u.s.Drained[newID][bucket] = fields
+		u.s.Unacked[newID+":"+bucket] = true
+		delete(u.s.Usage, bucket)
 	}
-	out := repository.Drains{}
-	for member := range u.s.Unacked {
-		id, prefix, _ := strings.Cut(member, ":")
-		if len(wanted) > 0 && !wanted[prefix] {
-			continue
+	return u.unacked(want), nil
+}
+
+// Peek matches the real one: every unacknowledged pair, and every live counter under the id "",
+// nothing moved.
+func (u usage) Peek(_ context.Context, keys []string) (repository.Drains, error) {
+	u.s.mu.Lock()
+	defer u.s.mu.Unlock()
+	if err := u.s.failed("usage"); err != nil {
+		return nil, err
+	}
+	want := wantedBuckets(keys)
+	out := u.unacked(want)
+	for bucket, fields := range u.s.Usage {
+		if want(bucket) {
+			prefix, day := repository.SplitBucket(bucket)
+			out.Put("", prefix, day, counters(fields))
 		}
-		snapshot := map[string]string{}
-		for field, n := range u.s.Drained[id][prefix] {
-			snapshot[field] = strconv.FormatInt(n, 10)
-		}
-		if out[id] == nil {
-			out[id] = map[string]map[string]string{}
-		}
-		out[id][prefix] = snapshot
 	}
 	return out, nil
 }
 
+// unacked is every set-aside pair not yet acknowledged, as the wire carries it. Caller holds mu.
+func (u usage) unacked(want func(string) bool) repository.Drains {
+	out := repository.Drains{}
+	for member := range u.s.Unacked {
+		id, bucket, _ := strings.Cut(member, ":")
+		if !want(bucket) {
+			continue
+		}
+		prefix, day := repository.SplitBucket(bucket)
+		out.Put(id, prefix, day, counters(u.s.Drained[id][bucket]))
+	}
+	return out
+}
+
+// wantedBuckets says whether a bucket is one of keys' — every bucket when none are named.
+func wantedBuckets(keys []string) func(bucket string) bool {
+	wanted := map[string]bool{}
+	for _, key := range keys {
+		wanted[key] = true
+	}
+	return func(bucket string) bool {
+		prefix, _ := repository.SplitBucket(bucket)
+		return len(wanted) == 0 || wanted[prefix]
+	}
+}
+
+func counters(fields map[string]int64) map[string]string {
+	snapshot := map[string]string{}
+	for field, n := range fields {
+		snapshot[field] = strconv.FormatInt(n, 10)
+	}
+	return snapshot
+}
+
 // Ack matches the real one: only unacknowledged pairs move anything.
-func (u usage) Ack(_ context.Context, acks map[string][]string, retention time.Duration) (int, error) {
+func (u usage) Ack(_ context.Context, acks repository.Acks, retention time.Duration) (int, error) {
 	u.s.mu.Lock()
 	defer u.s.mu.Unlock()
 	if err := u.s.failed("usage"); err != nil {
 		return 0, err
 	}
 	count := 0
-	for id, prefixes := range acks {
-		for _, prefix := range prefixes {
-			if member := id + ":" + prefix; u.s.Unacked[member] {
-				delete(u.s.Unacked, member)
-				u.s.Retained[member] = retention
-				count++
+	for id, keys := range acks {
+		for prefix, days := range keys {
+			for _, day := range days {
+				if member := id + ":" + repository.Bucket(prefix, day); u.s.Unacked[member] {
+					delete(u.s.Unacked, member)
+					u.s.Retained[member] = retention
+					count++
+				}
 			}
 		}
 	}
@@ -608,22 +645,22 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 		st.s.Hashes["groups"] = push.Groups.Hash
 		counts.Groups = len(named)
 	}
-	if push.Users != nil {
+	if push.Teams != nil {
 		named := map[string]bool{}
-		for label, bucket := range push.Users {
+		for label, bucket := range push.Teams {
 			for _, rec := range bucket.Records {
-				if rec.Name == "" {
+				if rec.Team == "" {
 					continue
 				}
-				named[rec.Name] = true
-				counts.Users++
-				st.s.putUser(rec)
+				named[rec.Team] = true
+				counts.Teams++
+				st.s.putTeam(rec)
 			}
-			st.setBucketHash("users:"+label, bucket.Hash, len(bucket.Records))
+			st.setBucketHash("teams:"+label, bucket.Hash, len(bucket.Records))
 		}
-		for name := range st.s.Users {
-			if _, pushed := push.Users[domain.BucketOf(name)]; pushed && !named[name] {
-				delete(st.s.Users, name)
+		for id := range st.s.Teams {
+			if _, pushed := push.Teams[domain.BucketOf(id)]; pushed && !named[id] {
+				delete(st.s.Teams, id)
 			}
 		}
 	}
@@ -636,9 +673,7 @@ func (st state) Apply(_ context.Context, push repository.StatePush) (repository.
 				}
 				named[rec.MeterID] = true
 				counts.Keys++
-				st.s.Keys[rec.MeterID] = domain.KeyRecord{
-					Status: rec.Status, User: rec.User, KeyPrefix: rec.Prefix, CanReadBalance: rec.CanReadBalance,
-				}
+				st.s.putKey(rec)
 			}
 			st.setBucketHash("keys:"+label, bucket.Hash, len(bucket.Records))
 		}

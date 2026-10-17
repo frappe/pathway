@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/repository/memory"
 )
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -95,13 +96,13 @@ func TestUsageDrainsUntilAcked(t *testing.T) {
 	var id string
 	for id = range first {
 	}
-	if first[id]["key-1"]["total_tokens"] != "42" {
+	if first[id]["key-1"][""]["total_tokens"] != "42" {
 		t.Fatalf("first drain = %+v", first)
 	}
-	if again, _ := svc.DrainUsage(ctx, nil); again[id]["key-1"]["total_tokens"] != "42" || len(again) != 1 {
+	if again, _ := svc.DrainUsage(ctx, nil); again[id]["key-1"][""]["total_tokens"] != "42" || len(again) != 1 {
 		t.Fatalf("unacked drain = %+v, want %s again", again, id)
 	}
-	if n, err := svc.AckUsage(ctx, map[string][]string{id: {"key-1"}}, time.Hour); err != nil || n != 1 {
+	if n, err := svc.AckUsage(ctx, repository.Acks{id: {"key-1": {""}}}, time.Hour); err != nil || n != 1 {
 		t.Fatalf("AckUsage = %d, %v", n, err)
 	}
 	if after, _ := svc.DrainUsage(ctx, nil); len(after) != 0 {

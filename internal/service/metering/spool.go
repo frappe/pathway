@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // maxTries is how many replays a line gets while the store answers before it is set aside as dead.

@@ -56,6 +56,15 @@ func IsHopSuccess(upstreamStatus string) bool {
 	return status > 0 && status < 500
 }
 
+// IsServed reports whether the upstream took the request: a 2xx, or the 101 that hands a realtime
+// session over. What it did with it afterwards — finished, broke off, went silent, lost the client —
+// is the Cut's business, and whatever usage it reported by then is still owed. A refusal (401, 429),
+// a 5xx or no answer at all cost the caller nothing and are not a request of theirs.
+func IsServed(upstreamStatus string) bool {
+	status := firstStatus(upstreamStatus)
+	return status == 101 || (status >= 200 && status < 300)
+}
+
 // firstStatus reads an upstream status. nginx wrote a comma-separated list when a request touched
 // several upstreams; the Go proxy reports one, so the split is vestigial and costs one IndexAny.
 // ponytail: the list form dies with the last OpenResty box; drop the split then.

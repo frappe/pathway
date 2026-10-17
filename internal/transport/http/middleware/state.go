@@ -5,11 +5,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/service/admission"
-	"github.com/phot0n/pathway/internal/service/routing"
-	"github.com/phot0n/pathway/internal/service/transform"
-	"github.com/phot0n/pathway/internal/transport/http/proxy"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/service/admission"
+	"github.com/frappe/pathway/internal/service/routing"
+	"github.com/frappe/pathway/internal/service/transform"
+	"github.com/frappe/pathway/internal/transport/http/proxy"
 )
 
 // State is what one request accumulates down the chain — one struct in the context rather than a
@@ -24,7 +24,9 @@ type State struct {
 	Identity admission.Identity
 	Model    string
 	Session  string
-	Body     transform.Body
+	// Meta is the caller's own tags from X-Grove-Metadata, logged on the access line only.
+	Meta map[string]string
+	Body transform.Body
 	// Raw is the request body exactly as the client sent it, kept for the payload log — Body above
 	// is decoded and later mutated by transforms, so it cannot testify to what the customer wrote.
 	// Nil on the bodyless paths (upgrade, multipart).

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository/memory"
 )
 
 // A realtime session is a WebSocket upgrade: a GET with no body, so the model cannot come from
@@ -53,9 +53,8 @@ func realtimeStore(t *testing.T, engineURL, output string) *memory.Store {
 	t.Helper()
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-		Status: "active", User: "test-user", KeyPrefix: "abc123",
+		Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"),
 	}
-	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("nemotron-asr")}
 	store.Routes["nemotron-asr"] = []domain.Route{{
 		EngineURL: engineURL, Healthy: true, Deployment: "pod-1",
@@ -98,7 +97,7 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	resp, buf, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	resp, buf, conn := upgrade(t, front, "/openai/v1/realtime?model=nemotron-asr")
 	defer conn.Close()
 
 	if resp.StatusCode != http.StatusSwitchingProtocols {
@@ -122,7 +121,7 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 	// lands at DISCONNECT — an open session is unbilled while it stays open. Nothing waits on such a
 	// handler (httptest.Close included), so poll through Drain, which locks and cannot race.
 	conn.Close()
-	var drained map[string]map[string]string
+	var drained map[string]map[string]map[string]string
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
 		snapshot, err := store.Repositories().Usage.Drain(context.Background(), "d", nil)
 		if err != nil {
@@ -134,7 +133,7 @@ func TestARealtimeUpgradeReachesTheEngineAndCarriesBytes(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := drained["abc123"]["request_count"]; got != "1" {
+	if got := drained["abc123"][domain.DayOf(time.Now())]["request_count"]; got != "1" {
 		t.Errorf("request_count = %q, want 1 once the session closed", got)
 	}
 }
@@ -146,7 +145,7 @@ func TestARealtimeUpgradeWithNoModelIsRefused(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	resp, _, conn := upgrade(t, front, "/v1/realtime")
+	resp, _, conn := upgrade(t, front, "/openai/v1/realtime")
 	defer conn.Close()
 
 	if resp.StatusCode != http.StatusBadRequest {
@@ -162,7 +161,7 @@ func TestARealtimeUpgradeStillNeedsTheGrant(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	resp, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	resp, _, conn := upgrade(t, front, "/openai/v1/realtime?model=nemotron-asr")
 	defer conn.Close()
 
 	if resp.StatusCode != http.StatusForbidden {
@@ -196,7 +195,7 @@ func TestARealtimeUpgradeCarriesTheUpstreamsOwnModelID(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, store, config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	resp, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	resp, _, conn := upgrade(t, front, "/openai/v1/realtime?model=nemotron-asr")
 	defer conn.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("status = %d, want 101", resp.StatusCode)
@@ -232,7 +231,7 @@ func TestARealtimeUpgradeWithNoUpstreamModelIsUntouched(t *testing.T) {
 	front := httptest.NewServer(buildHandler(t, realtimeStore(t, engine.URL, "transcription"), config.Config{}, 0))
 	t.Cleanup(front.Close)
 
-	_, _, conn := upgrade(t, front, "/v1/realtime?model=nemotron-asr")
+	_, _, conn := upgrade(t, front, "/openai/v1/realtime?model=nemotron-asr")
 	defer conn.Close()
 
 	select {

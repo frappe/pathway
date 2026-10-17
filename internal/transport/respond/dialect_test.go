@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // Root is the OpenAI surface: a request nobody marked is OpenAI.
