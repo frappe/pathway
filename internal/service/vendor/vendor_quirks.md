@@ -6,13 +6,13 @@ it for that vendor only. This file is each such rewrite, with what the caller se
 vendor gets.
 
 - What the gateway knows of each vendor is one value per vendor, `known` in
-  [`internal/service/vendor/vendor.go`](internal/service/vendor/vendor.go), keyed by the vendor's
+  [`vendor.go`](vendor.go), keyed by the vendor's
   name: its `Quirks`, one flag per field rewrite, and its `Headers`, where the credential goes.
 - The code is the `vendorfields` and `streamusage` transforms in `internal/service/transform/`,
   which read the flags, and `vendorAuth` in `internal/transport/http/middleware/vendor.go`, which
   sets the headers.
 - Every quirk here was measured through a gateway on the date given. What was seen and is *not*
-  rewritten is in the README, "What each upstream was seen to do".
+  rewritten is in [README.md](README.md), "What each upstream was seen to do".
 - A rewrite runs per attempt on the caller's own body, so a request that falls back to another
   vendor is written afresh for that one.
 - A rewritten list (`tools`, `messages`) has its objects' keys in alphabetical order. Nothing inside
@@ -441,7 +441,7 @@ per-model switch before it is routed.
 
 1. Measure it through a gateway: the vendor's status and words, and the request that is taken
    instead. A rewrite goes in only if that request means what the caller's did.
-2. Add a row to the README's "What each upstream was seen to do", with the date.
+2. Add a row to README.md's "What each upstream was seen to do", with the date.
 3. A field: add a flag to `Quirks` in `vendor.go`, written out on every entry of `known`, and the
    rewrite beside the others in `vendorfields.go` with a test. A header: a type of that vendor's
    own in `vendor.go` with its `Headers`, as Baseten has.

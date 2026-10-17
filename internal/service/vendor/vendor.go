@@ -23,7 +23,7 @@ const (
 )
 
 // Quirks is what a vendor reads differently. Each value was measured through a gateway: the
-// README's "What each upstream was seen to do" says when, and vendor_quirks.md shows each rewrite.
+// README.md here, "What each upstream was seen to do", says when, and vendor_quirks.md shows each rewrite.
 type Quirks struct {
 	// OutputCap is the field the upstream reads the output cap from, on the OpenAI shape.
 	OutputCap string
