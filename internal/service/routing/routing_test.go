@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository/memory"
 )
 
 // The pick rule itself is domain.PickRoute and is covered there. What is only true at this layer is
@@ -151,6 +151,25 @@ func TestAnEjectedTargetIsNotChosen(t *testing.T) {
 		if got := pick(t, svc, "").EngineURL(); got != "https://b" {
 			t.Fatalf("picked the ejected target %s", got)
 		}
+	}
+}
+
+// A vendor row has no sibling to steer to, so a failure count never takes it out.
+func TestAVendorRowIsNeverEjected(t *testing.T) {
+	store := memory.New()
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect = "provider", domain.DialectOpenAI
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	store.Failures["https://vendor"] = domain.EjectAfter
+
+	decision, err := serviceOver(store, Options{}).Pick(context.Background(), Request{
+		Model: "qwen3-4b", RequestID: "rid", Dialect: domain.DialectOpenAI, Path: "/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("Pick: %v — a vendor row was ejected", err)
+	}
+	if got := decision.HealthTarget(); got != "" {
+		t.Errorf("HealthTarget = %q, want blank so no failure is counted", got)
 	}
 }
 
@@ -359,6 +378,85 @@ func TestTheRightSurfaceStillRoutes(t *testing.T) {
 	}
 }
 
+// A vendor row that denies a tool the request names is refused before anything is claimed, with
+// the tool named; a row that denies nothing runs everything.
+func TestAVendorRowThatDeniesTheToolNamedIsRefused(t *testing.T) {
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect, vendor.DeniedTools = "provider", domain.DialectOpenAI, []string{"web_search_options", "web_search_preview"}
+	search := Request{
+		Model: "qwen3-4b", MeterID: "meter", KeyPrefix: "abc123", Dialect: domain.DialectOpenAI,
+		Path: "/v1/chat/completions", Tools: []string{"messages", "model", "web_search_options"},
+	}
+	function := search
+	function.Tools = []string{"messages", "model", "tools", "function"}
+
+	store := memory.New()
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	svc := serviceOver(store, Options{})
+	_, err := svc.Pick(context.Background(), search)
+	var denial domain.Denial
+	if !errors.As(err, &denial) || denial.Status != 400 || denial.Reason != "qwen3-4b does not run web_search_options" {
+		t.Fatalf("err = %v, want a 400 naming the tool", err)
+	}
+	if len(store.InFlight) != 0 {
+		t.Errorf("a refused request claimed a slot: %v", store.InFlight)
+	}
+	if _, err := svc.Pick(context.Background(), function); err != nil {
+		t.Errorf("a function tool was refused: %v", err)
+	}
+}
+
+// A table an older binary stored may still mix a vendor row with ours: a push that mixes is
+// refused, but a stored one is not re-read until it changes. Ours win, as they always did, and the
+// vendor row is neither picked nor counted.
+func TestAStoredMixedTableRoutesToTheEngine(t *testing.T) {
+	store := memory.New()
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect = "provider", domain.DialectOpenAI
+	store.Routes["qwen3-4b"] = []domain.Route{vendor, engine("https://ours")}
+	svc := serviceOver(store, Options{})
+
+	for range 3 {
+		decision, err := svc.Pick(context.Background(), Request{
+			Model: "qwen3-4b", MeterID: "meter", Dialect: domain.DialectOpenAI, Path: "/v1/chat/completions",
+		})
+		if err != nil || decision.Route.EngineURL != "https://ours" {
+			t.Fatalf("decision = %+v, %v; want the engine of ours", decision.Route, err)
+		}
+	}
+	if len(store.InFlight["https://vendor"]) != 0 {
+		t.Errorf("the vendor row was claimed against: %v", store.InFlight)
+	}
+	if err := svc.CanServe(context.Background()); err != nil {
+		t.Errorf("CanServe = %v", err)
+	}
+}
+
+// A vendor keeps no prefix cache we can aim at, so its pick pins no session, named or synthetic.
+func TestAVendorPickPinsNoSession(t *testing.T) {
+	store := memory.New()
+	vendor := engine("https://vendor")
+	vendor.Kind, vendor.Dialect = "provider", domain.DialectOpenAI
+	store.Routes["qwen3-4b"] = []domain.Route{vendor}
+	svc := serviceOver(store, Options{SyntheticTTL: fixedTTL(time.Minute)})
+
+	for _, session := range []string{"caller-session", ""} {
+		decision, err := svc.Pick(context.Background(), Request{
+			Model: "qwen3-4b", Session: session, MeterID: "meter", Dialect: domain.DialectOpenAI,
+			Path: "/v1/chat/completions",
+		})
+		if err != nil {
+			t.Fatalf("Pick: %v", err)
+		}
+		if decision.Session != "" {
+			t.Errorf("decision.Session = %q, want none", decision.Session)
+		}
+	}
+	if len(store.Sticky) != 0 {
+		t.Errorf("a vendor pick pinned a session: %v", store.Sticky)
+	}
+}
+
 // A route pushed before the control plane said what a model gives carries nothing, and must keep
 // serving what it always did.
 func TestARouteThatDeclaresNothingIsUnrestricted(t *testing.T) {
@@ -405,14 +503,31 @@ func TestPickKeyTakesTurns(t *testing.T) {
 
 func TestNextKeyWalksTheRingPastTheSpent(t *testing.T) {
 	ring := []domain.Credential{{ID: "a"}, {ID: "b"}, {ID: "c"}}
-	if key := NextKey(ring, ring[0], map[string]bool{"a": true, "b": true}); key.ID != "c" {
+	if key := nextKey(ring, ring[0], map[string]bool{"a": true, "b": true}); key.ID != "c" {
 		t.Errorf("after a with b spent: %q", key.ID)
 	}
-	if key := NextKey(ring, ring[2], map[string]bool{"c": true}); key.ID != "a" {
+	if key := nextKey(ring, ring[2], map[string]bool{"c": true}); key.ID != "a" {
 		t.Errorf("after c did not wrap: %q", key.ID)
 	}
-	if key := NextKey(ring, ring[1], map[string]bool{"a": true, "b": true, "c": true}); key.ID != "" {
+	if key := nextKey(ring, ring[1], map[string]bool{"a": true, "b": true, "c": true}); key.ID != "" {
 		t.Errorf("picked %q from an exhausted ring", key.ID)
+	}
+}
+
+// The ring walks every key once on a 429, opens once more, and never again; a rejected key stays
+// out through the re-opening.
+func TestKeyRingSpendsRetiresAndReopensOnce(t *testing.T) {
+	a, b := domain.Credential{ID: "a"}, domain.Credential{ID: "b"}
+	ring := NewKeyRing([]domain.Credential{a, b})
+
+	if next := ring.Next(a, 429); next.ID != "b" {
+		t.Fatalf("after a's 429 got %q, want b", next.ID)
+	}
+	if next := ring.Next(b, 401); next.ID != "a" {
+		t.Fatalf("after b's 401 got %q, want a once more (the ring re-opened)", next.ID)
+	}
+	if next := ring.Next(a, 429); next.ID != "" {
+		t.Fatalf("after a's second 429 got %q, want nothing: b is dead and the ring opened already", next.ID)
 	}
 }
 

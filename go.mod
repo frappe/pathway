@@ -1,4 +1,4 @@
-module github.com/phot0n/pathway
+module github.com/frappe/pathway
 
 go 1.24
 

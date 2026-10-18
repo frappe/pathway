@@ -11,11 +11,11 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/phot0n/pathway/internal/repository"
-	"github.com/phot0n/pathway/internal/service/admission"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/routing"
-	"github.com/phot0n/pathway/internal/service/transform"
+	"github.com/frappe/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/service/admission"
+	"github.com/frappe/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/routing"
+	"github.com/frappe/pathway/internal/service/transform"
 )
 
 // Middleware is the only shape a component must satisfy — plain net/http, so anything written

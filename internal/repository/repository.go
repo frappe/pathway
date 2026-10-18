@@ -7,37 +7,31 @@ import (
 	"context"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/domain"
 )
 
-// Keys holds credentials. A key's only fact of its own is whether it has been revoked.
+// Keys holds credentials and the policy behind each: what it may call, where, how fast, and the
+// cap it spends against.
 type Keys interface {
-	// Resolve reads a credential and what stands behind it in one step: the key, the user it names
-	// and each group that user is in. found=false for a key that was never pushed.
+	// Resolve reads a credential and what stands behind it in one step: the key, its team's
+	// record when the store holds one, and each group it is in. found=false for a key that was
+	// never pushed.
 	Resolve(ctx context.Context, meterID string) (holder Holder, found bool, err error)
 	Upsert(ctx context.Context, records []KeyUpsert) error
 	Delete(ctx context.Context, ids []string) (int, error)
+	// AdjustSpent moves a key's spend for the current month by delta nano-USD, once per id: a
+	// repeated id answers the current spend with applied=false. found=false when the key is not here.
+	AdjustSpent(ctx context.Context, meterID, id string, delta int64) (spent int64, applied, found bool, err error)
 }
 
 // Holder is a credential and what stands behind it, as the store read them.
 type Holder struct {
-	Key  domain.KeyRecord
-	User domain.UserRecord
-	// HasUser is false when the key names no user, or one that was never pushed.
-	HasUser bool
-	// Groups is each group read, by name: those the user record lists or, without one, the key's
-	// own. One never pushed is here as the zero value.
+	Key domain.KeyRecord
+	// Team is the record of the team the key names; nil when the store holds none, which is a
+	// key pushed with its team's fields on it, from before teams were pushed.
+	Team *domain.TeamRecord
+	// Groups is each group the key lists, by name. One never pushed is here as the zero value.
 	Groups map[string]domain.GroupRecord
-}
-
-// Users holds the access and budget state behind a person — one record however many keys.
-type Users interface {
-	Get(ctx context.Context, name string) (domain.UserRecord, bool, error)
-	Upsert(ctx context.Context, records []UserUpsert) error
-	Delete(ctx context.Context, ids []string) (int, error)
-	// AdjustSpent moves a holder's lifetime spend by delta nano-USD, once per id: a repeated id
-	// answers the current spend with applied=false. found=false when the holder is not here.
-	AdjustSpent(ctx context.Context, name, id string, delta int64) (spent int64, applied, found bool, err error)
 }
 
 // Groups holds what a Model Group grants everyone in it.
@@ -82,39 +76,44 @@ type Health interface {
 	RecordSuccess(ctx context.Context, target string) error
 }
 
-// ProviderKeys counts what each vendor credential answered — lifetime, by the id the control
-// plane pushed it under. Read live by the control plane; never drained.
+// ProviderKeys counts what each vendor credential answered, by the id the control plane pushed it
+// under, since the control plane last took the counts.
 type ProviderKeys interface {
 	// Count lands one attempt on one key: the upstream's status, or 0 when the hop produced none.
 	Count(ctx context.Context, id string, status int) error
-	// Stats answers one record per id, zero for a key that never answered.
-	Stats(ctx context.Context, ids []string) (map[string]domain.KeyStats, error)
+	// Take answers one record per id, zero for a key that never answered, and clears each in the
+	// same step: the next Take starts from zero, and no attempt lands between the read and the clear.
+	Take(ctx context.Context, ids []string) (map[string]domain.KeyStats, error)
 }
 
-// Limits counts what a holder has used inside each limit's current window. now picks the window:
+// Limits counts what a key has used inside each limit's current window. now picks the window:
 // the caller's clock decides it, so a test can move it.
 type Limits interface {
 	// Admit checks every limit and, only when all have room, counts the request on the request
 	// limits — one atomic step, so two requests cannot both take the last slot. → the limits
 	// already spent; none when admitted.
-	Admit(ctx context.Context, user string, limits []domain.Limit, now time.Time) ([]domain.Limit, error)
+	Admit(ctx context.Context, key string, limits []domain.Limit, now time.Time) ([]domain.Limit, error)
 	// Debit adds tokens to the current window of each of these limits.
-	Debit(ctx context.Context, user string, limits []domain.Limit, tokens int64, now time.Time) error
+	Debit(ctx context.Context, key string, limits []domain.Limit, tokens int64, now time.Time) error
 }
 
 // Usage accrues token counters per API key prefix. The field names are the service's business —
 // this only adds numbers to them.
 type Usage interface {
-	// Accrue lands one request in one atomic step — its counters, its cost, and the holder's
+	// Accrue lands one request in one atomic step — its counters, its cost, and the key's
 	// spend — so a drain never sees half a request, and never a counter without its cost.
 	Accrue(ctx context.Context, accrual Accrual) error
-	// Drain sets live counters aside under newID — every one, or only these prefixes when keys is
+	// Drain sets live counters aside under newID — every one, or only these prefixes' when keys is
 	// non-empty — and answers every counter not yet acknowledged, old drains included, so one the
 	// control plane failed to record comes back under its own id. Nothing is deleted here.
 	Drain(ctx context.Context, newID string, keys []string) (Drains, error)
-	// Ack marks (drain id → prefixes) recorded: each is kept for retention, then expires. A pair
-	// that is not unacknowledged is a no-op. → how many pairs moved.
-	Ack(ctx context.Context, acks map[string][]string, retention time.Duration) (int, error)
+	// Peek answers what Drain would without setting anything aside: every live counter under the
+	// id "" beside every counter not yet acknowledged, only these prefixes' when keys is non-empty.
+	// For a control plane that needs this box's figure now and will land it on its next drain.
+	Peek(ctx context.Context, keys []string) (Drains, error)
+	// Ack marks (drain id → prefix → days) recorded: each is kept for retention, then expires. A
+	// counter that is not unacknowledged is a no-op. → how many moved.
+	Ack(ctx context.Context, acks Acks, retention time.Duration) (int, error)
 	// Replay lands a spooled accrual exactly as Accrue would, once per ID: a second replay of the
 	// same ID (a crash mid-pass) moves nothing. → whether it landed now.
 	Replay(ctx context.Context, accrual Accrual) (bool, error)
@@ -122,8 +121,48 @@ type Usage interface {
 	Ping(ctx context.Context) error
 }
 
-// Drains is drain id → bare prefix → counters, as the control plane receives them.
-type Drains map[string]map[string]map[string]string
+// Drains is drain id → key prefix → day → counters, as the control plane receives them. The day
+// is the UTC day the requests were served, "2006-01-02" (the bucket's, UsageBucket); "" is a
+// counter from before this store bucketed by day, which the control plane lands on the day it pulls.
+type Drains map[string]map[string]map[string]map[string]string
+
+// Put files one drained counter under its drain, prefix and day.
+func (d Drains) Put(id, prefix, day string, counters map[string]string) {
+	if d[id] == nil {
+		d[id] = map[string]map[string]map[string]string{}
+	}
+	if d[id][prefix] == nil {
+		d[id][prefix] = map[string]map[string]string{}
+	}
+	d[id][prefix][day] = counters
+}
+
+// Acks is drain id → key prefix → the days the control plane recorded.
+type Acks map[string]map[string][]string
+
+// UsageBucket names the live counter a request lands in: its key's prefix and the UTC day it was
+// served, off the same clock as the key's spend, so the control plane's day and month are the
+// store's own.
+func UsageBucket(prefix string, now time.Time) string { return Bucket(prefix, domain.DayOf(now)) }
+
+// Bucket joins a prefix and a day as the store names a counter. A blank day is the bare prefix: a
+// counter from before buckets carried one.
+func Bucket(prefix, day string) string {
+	if day == "" {
+		return prefix
+	}
+	return prefix + ":" + day
+}
+
+// SplitBucket is Bucket undone: the prefix and the day, "" when the bucket carries none.
+func SplitBucket(bucket string) (prefix, day string) {
+	if i := len(bucket) - len(":2006-01-02"); i > 0 && bucket[i] == ':' {
+		if _, err := time.Parse("2006-01-02", bucket[i+1:]); err == nil {
+			return bucket[:i], bucket[i+1:]
+		}
+	}
+	return bucket, ""
+}
 
 // State is the desired-state push: apply what the payload names, delete what it does not, and
 // store the hashes it carried — all in one transaction, so the hashes never claim state that
@@ -136,7 +175,6 @@ type State interface {
 // Store is every repository at once, for wiring. Services take only the interfaces they use.
 type Store struct {
 	Keys     Keys
-	Users    Users
 	Groups   Groups
 	Routes   Routes
 	Sessions Sessions
@@ -154,25 +192,17 @@ type Store struct {
 // readable.
 
 type KeyUpsert struct {
-	MeterID string // sha256(secret) hex — the record id
-	Prefix  string
-	User    string
-	Status  string
-	// CanReadBalance is whether the key may read its holder's credit.
-	CanReadBalance bool
-}
-
-type UserUpsert struct {
-	Name        string
-	Email       string
+	MeterID     string // sha256(secret) hex — the record id
+	Prefix      string
+	Team        string
+	Status      string
 	Groups      string // comma list of Model Group names
 	Allow       string // comma list
 	Deny        string // comma list
 	Limited     bool
 	LogPayloads bool
 	Geography   string
-	Prepaid     bool
-	Budget      int64  // nano-USD
+	Budget      int64  // the key's cap, nano-USD
 	Limits      string // comma list of metric:window:value
 }
 
@@ -181,39 +211,46 @@ type GroupUpsert struct {
 	Models string // comma list
 }
 
+type TeamUpsert struct {
+	Team        string // Central Team doc name — the record id
+	Limited     bool
+	LogPayloads bool
+	Limits      string // comma list of metric:window:value; what its keys run under by default
+}
+
 // Accrual is one metered request. Fields already carry the cost beside the counters; Cost is
-// repeated so the store can move the holder's lifetime spend without reading the map back.
+// repeated so the store can move the key's spend for the month without reading the map back.
 type Accrual struct {
 	// ID is the request id: what makes a spooled accrual's replay land once.
 	ID     string           `json:"id"`
 	Prefix string           `json:"prefix"`
 	Fields map[string]int64 `json:"fields"`
 	Cost   int64            `json:"cost"`
-	// User names whose spend moves; blank moves nobody's. Budget is what the holder's balance is
-	// reported against, so the drain carries this store's own view of it.
-	User   string `json:"user"`
+	// Key is the record (sha256 hex) whose spend moves; blank moves nobody's. Budget is the cap
+	// the key's balance is reported against, so the drain carries this store's own view of it.
+	Key    string `json:"key"`
 	Budget int64  `json:"budget"`
 }
 
 // The state-push shapes (plan_agent_state_sync.md). A nil section is untouched; a present one is
-// authoritative for its namespace, so anything it does not name is deleted. users and keys arrive
+// authoritative for its namespace, so anything it does not name is deleted. teams and keys arrive
 // in buckets (domain.BucketOf) and each bucket prunes only its own members.
 
 type StatePush struct {
 	Groups *GroupsPush
-	Users  map[string]UserBucket // bucket label → contents; empty Records = prune the bucket
+	Teams  map[string]TeamBucket // bucket label → contents; empty Records = prune the bucket
 	Keys   map[string]KeyBucket
 	Routes *RoutesPush
+}
+
+type TeamBucket struct {
+	Hash    string
+	Records []TeamUpsert
 }
 
 type GroupsPush struct {
 	Hash    string
 	Records []GroupUpsert
-}
-
-type UserBucket struct {
-	Hash    string
-	Records []UserUpsert
 }
 
 type KeyBucket struct {
@@ -229,7 +266,7 @@ type RoutesPush struct {
 // StateCounts is records written per section, informational for the control plane's run log.
 type StateCounts struct {
 	Groups int `json:"groups"`
-	Users  int `json:"users"`
+	Teams  int `json:"teams"`
 	Keys   int `json:"keys"`
 	Routes int `json:"routes"`
 }

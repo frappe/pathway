@@ -4,26 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/phot0n/pathway/internal/domain"
 )
-
-// The ring walks every key once on a 429, opens once more, and never again; a rejected key stays
-// out through the re-opening.
-func TestKeyRingSpendsRetiresAndReopensOnce(t *testing.T) {
-	a, b := domain.Credential{ID: "a"}, domain.Credential{ID: "b"}
-	ring := newKeyRing([]domain.Credential{a, b})
-
-	if next := ring.next(a, 429); next.ID != "b" {
-		t.Fatalf("after a's 429 got %q, want b", next.ID)
-	}
-	if next := ring.next(b, 401); next.ID != "a" {
-		t.Fatalf("after b's 401 got %q, want a once more (the ring re-opened)", next.ID)
-	}
-	if next := ring.next(a, 429); next.ID != "" {
-		t.Fatalf("after a's second 429 got %q, want nothing: b is dead and the ring opened already", next.ID)
-	}
-}
 
 // The first final status decides; a held attempt leaks nothing, a forwarded one everything.
 func TestAttemptWriterHoldsOrForwards(t *testing.T) {

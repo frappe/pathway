@@ -11,17 +11,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/observability"
-	"github.com/phot0n/pathway/internal/repository/memory"
-	"github.com/phot0n/pathway/internal/service/admission"
-	"github.com/phot0n/pathway/internal/service/catalog"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/provisioning"
-	"github.com/phot0n/pathway/internal/service/routing"
-	"github.com/phot0n/pathway/internal/service/transform"
-	"github.com/phot0n/pathway/internal/transport/http/middleware"
-	"github.com/phot0n/pathway/internal/transport/http/proxy"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/observability"
+	"github.com/frappe/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/service/admission"
+	"github.com/frappe/pathway/internal/service/catalog"
+	"github.com/frappe/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/provisioning"
+	"github.com/frappe/pathway/internal/service/routing"
+	"github.com/frappe/pathway/internal/service/transform"
+	"github.com/frappe/pathway/internal/transport/http/middleware"
+	"github.com/frappe/pathway/internal/transport/http/proxy"
 )
 
 // Maintenance: new requests are refused, running ones finish, and the control plane can watch the
@@ -88,7 +88,7 @@ func (m *maintained) waitFor(t *testing.T, want int64) {
 }
 
 func (m *maintained) request(ctx context.Context) (*http.Response, error) {
-	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, m.front.URL+"/v1/chat/completions",
+	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, m.front.URL+"/openai/v1/chat/completions",
 		strings.NewReader(`{"model":"qwen3-4b"}`))
 	r.Header.Set("Authorization", "Bearer "+secret)
 	return http.DefaultClient.Do(r)
@@ -133,7 +133,7 @@ func TestMaintenanceRefusesNewRequestsAndFailsHealth(t *testing.T) {
 		t.Errorf("healthz = %d %s, want 503 maintenance", w.Code, w.Body)
 	}
 	// The routes the mux answers itself refuse too — the whole customer surface, not just /v1/.
-	for _, path := range []string{"/", "/v1/models", "/anthropic/v1/models"} {
+	for _, path := range []string{"/", "/openai/v1/models", "/anthropic/v1/models"} {
 		resp, err := http.Get(m.front.URL + path)
 		if err != nil {
 			t.Fatal(err)
@@ -238,7 +238,7 @@ func TestARealtimeSessionIsInFlightUntilItCloses(t *testing.T) {
 	engine := echoEngine(t)
 	m := newMaintained(t, realtimeStore(t, engine.URL, "transcription"))
 
-	resp, _, conn := upgrade(t, m.front, "/v1/realtime?model=nemotron-asr")
+	resp, _, conn := upgrade(t, m.front, "/openai/v1/realtime?model=nemotron-asr")
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("status = %d, want 101", resp.StatusCode)
 	}

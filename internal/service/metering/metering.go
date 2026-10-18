@@ -9,14 +9,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // Report is one finished request, as the proxy saw it.
 type Report struct {
 	RequestID string // the id the gateway stamped: what makes a spooled replay land once
-	Prefix    string // API Key doc name — which bucket this accrues to
+	Prefix    string // API Key doc name — which bucket this accrues to, and whose limits are debited
+	MeterID   string // the key's record id — whose spend moves
 	Model     string // from the request body; buckets per-model usage
 	// Deployment is which placement actually served it. On a direct route the gateway already
 	// knows; on an ingress route only the ingress does, and it says so in a response header.
@@ -26,18 +27,15 @@ type Report struct {
 	Usage string
 	// UsageStart is the first usage line of a response that carried more than one. May be empty.
 	UsageStart string
-	// What it cost and whom it cost: the pricing that charges it (nil = unpriced), and the holder
-	// whose lifetime spend moves, with the amount they loaded that their balance is reported against.
-	// Only a prepaid holder is charged: a free one's spend never moves, so turning them prepaid
-	// later starts them at what they load, not in debt for what was free.
+	// What it cost: the pricing that charges it (nil = unpriced), and the cap the key's balance
+	// is reported against.
 	Pricing *domain.Pricing
-	User    string
-	Prepaid bool
 	Budget  int64
-	// Limits is the holder's rate limits: the answer's tokens are debited from the token ones.
+	// Limits is the key's rate limits: the answer's tokens are debited from the token ones.
 	Limits []domain.Limit
-	// How the hop went, for passive ejection: the upstream's status, and the X-Grove-Reason an
-	// ingress sets when it is healthy but has no replica for this model.
+	// How the hop went: the upstream's status, which decides whether the request is accounted at
+	// all (domain.IsServed) and, with the X-Grove-Reason an ingress sets when it is healthy but has
+	// no replica for this model, how the target is scored for passive ejection.
 	Target         string
 	UpstreamStatus string
 	Reason         string
@@ -61,15 +59,15 @@ func New(usage repository.Usage, limits repository.Limits, health repository.Hea
 	return &Service{usage: usage, limits: limits, health: health, log: log, Now: time.Now}
 }
 
-// debit charges the answer's tokens to the holder's token limits, in the window the answer ended
+// debit charges the answer's tokens to the key's token limits, in the window the answer ended
 // in. Never spooled: replayed later, it would land in a window the tokens were not used in.
 func (s *Service) debit(ctx context.Context, rep Report, tokens int64) {
 	limits := domain.LimitsOn(rep.Limits, domain.LimitTokens)
 	if tokens == 0 || len(limits) == 0 {
 		return
 	}
-	if err := s.limits.Debit(ctx, rep.User, limits, tokens, s.Now()); err != nil {
-		s.log.Error("token limits not debited", "user", rep.User, "tokens", tokens, "err", err)
+	if err := s.limits.Debit(ctx, rep.Prefix, limits, tokens, s.Now()); err != nil {
+		s.log.Error("token limits not debited", "key", rep.Prefix, "tokens", tokens, "err", err)
 	}
 }
 
@@ -77,9 +75,10 @@ func (s *Service) debit(ctx context.Context, rep Report, tokens int64) {
 // returned to the caller: the request is over, and failing it retroactively helps nobody.
 func (s *Service) Record(ctx context.Context, rep Report) {
 	s.recordOutcome(ctx, rep)
-	if rep.Prefix == "" {
-		// No bucket to accrue to. The outcome above still counted — how a target behaves is not
-		// contingent on the usage record that happened to ride along with the report.
+	if rep.Prefix == "" || !domain.IsServed(rep.UpstreamStatus) {
+		// No bucket to accrue to, or nothing to accrue: an upstream that refused, failed or never
+		// answered served the caller nothing, and is not a request of theirs. The outcome above
+		// still counted — how a target behaves is not contingent on the usage that rode along.
 		return
 	}
 	fields, trusted := UsageFields(rep)
@@ -95,10 +94,9 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 			s.log.Error("pricing carries no counter table; nothing priced", "pricing", rep.Pricing.ID, "model", rep.Model)
 		}
 	}
-	cost := PricedFields(fields, rep.Pricing, rep.Prepaid)
-	accrual := repository.Accrual{ID: rep.RequestID, Prefix: rep.Prefix, Fields: fields, Cost: cost}
-	if rep.Prepaid {
-		accrual.User, accrual.Budget = rep.User, rep.Budget
+	cost := PricedFields(fields, rep.Pricing)
+	accrual := repository.Accrual{
+		ID: rep.RequestID, Prefix: rep.Prefix, Fields: fields, Cost: cost, Key: rep.MeterID, Budget: rep.Budget,
 	}
 	if err := s.usage.Accrue(ctx, accrual); err != nil {
 		s.log.Error("usage not recorded; spooled", "prefix", rep.Prefix, "model", rep.Model, "err", err)
@@ -209,18 +207,14 @@ func landed(buckets map[string]int64, table domain.CounterTable, prompt int64) m
 // PricedFields prices the request and tags what it priced with the pricing's id: each priced
 // counter again as p:<id>:<counter>, and the cost as p:<id>:cost beside the flat one. The pull prices
 // each p:<id> group with that same pricing's table, so a switch mid-drain never reads as drift.
-// A request that is not charged is tagged f: instead, so the pull bills exactly what moved a spend.
 // → the cost in nano-USD.
-func PricedFields(fields map[string]int64, pricing *domain.Pricing, charged bool) int64 {
+func PricedFields(fields map[string]int64, pricing *domain.Pricing) int64 {
 	if pricing == nil || pricing.ID == "" {
 		return 0
 	}
 	table := pricing.Table()
 	cost := table.Cost(fields, pricing.Rates)
-	tag := "f:" + pricing.ID + ":"
-	if charged {
-		tag = "p:" + pricing.ID + ":"
-	}
+	tag := "p:" + pricing.ID + ":"
 	for _, counter := range table {
 		if n := fields[counter.Name]; n > 0 {
 			fields[tag+counter.Name] = n

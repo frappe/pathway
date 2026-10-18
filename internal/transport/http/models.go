@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/service/admission"
-	"github.com/phot0n/pathway/internal/transport/http/middleware"
-	"github.com/phot0n/pathway/internal/transport/respond"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/service/admission"
+	"github.com/frappe/pathway/internal/transport/http/middleware"
+	"github.com/frappe/pathway/internal/transport/respond"
 )
 
 // GET /v1/models — the gateway answers directly with the models THIS key may use, instead of
@@ -69,13 +69,13 @@ func (s *Server) identifyCaller(w http.ResponseWriter, r *http.Request) (admissi
 	// Attribute the access line: auth happens here rather than in the chain, so the accesslog
 	// stage wrapped around this handler would otherwise log every keyed call as anonymous.
 	middleware.From(r).Identity = identity
-	// Revoked/inactive is refused. Over budget is not: what a key is entitled to and what its
-	// holder has left live on the user, so only inference is blocked.
+	// Revoked/inactive is refused. Over budget is not: what a key may see and what it has left
+	// are separate questions, so only inference is blocked.
 	if identity.Key.Status != "active" {
 		respond.ErrorFor(w, r, http.StatusUnauthorized, "unknown or revoked api key")
 		return admission.Identity{}, false
 	}
-	if err := domain.GeographyDenial(identity.User, s.deps.Geography); err != nil {
+	if err := domain.GeographyDenial(identity.Key, s.deps.Geography); err != nil {
 		respond.DenialFor(w, r, err)
 		return admission.Identity{}, false
 	}

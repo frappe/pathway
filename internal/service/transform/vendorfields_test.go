@@ -1,6 +1,7 @@
 package transform
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -263,6 +264,31 @@ func TestTheMessagesShapeIsSentAsItCame(t *testing.T) {
 	changed, err := chain(t, "vendorfields").Apply(Context{Path: "/v1/messages", Provider: true, Vendor: "deepseek"}, body)
 	if err != nil || changed || len(body) != 2 {
 		t.Errorf("changed=%v err=%v body = %v", changed, err, body)
+	}
+}
+
+// Fast mode is twice the rate and unpriced here: a vendor is never asked for it, whichever vendor,
+// and the caller is told. An engine of ours gets the body as sent.
+func TestFastModeIsTakenOffARequestToAVendor(t *testing.T) {
+	for _, tc := range []struct {
+		vendor, raw, want string
+		told              []string
+	}{
+		{"anthropic", `{"max_tokens":16,"speed":"fast"}`, `{"max_tokens":16}`, []string{"speed=default"}},
+		{"deepseek", `{"max_tokens":16,"speed":"fast"}`, `{"max_tokens":16}`, []string{"speed=default"}},
+		{"anthropic", `{"max_tokens":16}`, `{"max_tokens":16}`, nil},
+		{"", `{"max_tokens":16,"speed":"fast"}`, `{"max_tokens":16,"speed":"fast"}`, nil},
+	} {
+		body, told := decode(t, tc.raw), []string{}
+		if _, err := (vendorFields{}).Apply(Context{Path: "/v1/messages", Provider: tc.vendor != "", Vendor: tc.vendor, Changed: &told}, body); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := json.Marshal(body); string(got) != tc.want {
+			t.Errorf("%q %s: body = %s, want %s", tc.vendor, tc.raw, got, tc.want)
+		}
+		if !slices.Equal(told, tc.told) {
+			t.Errorf("%q %s: told %v, want %v", tc.vendor, tc.raw, told, tc.told)
+		}
 	}
 }
 

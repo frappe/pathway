@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/routing"
-	"github.com/phot0n/pathway/internal/service/transform"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/routing"
+	"github.com/frappe/pathway/internal/service/transform"
 )
 
 func init() {
@@ -56,7 +56,7 @@ func newFallback(deps Deps) (Middleware, error) {
 					deps.Routing.Release(ctx, loser.Route, loser.RequestID)
 				}
 				deps.Metering.Record(ctx, metering.Report{
-					Target:         loser.EngineURL(),
+					Target:         loser.HealthTarget(),
 					UpstreamStatus: statusText(state.Outcome.Status),
 					Reason:         state.Outcome.Reason,
 					Cut:            state.Outcome.Cut,

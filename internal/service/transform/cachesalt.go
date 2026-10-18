@@ -29,11 +29,11 @@ func (cacheSalt) Apply(ctx Context, body Body) (bool, error) {
 		return true, nil
 	}
 	var salt string
-	if json.Unmarshal(raw, &salt) != nil || ctx.User == "" {
+	if json.Unmarshal(raw, &salt) != nil || ctx.Team == "" {
 		// Not a string — the engine's schema error to give, not ours to guess around.
 		return false, nil
 	}
-	encoded, err := json.Marshal(ctx.User + ":" + salt)
+	encoded, err := json.Marshal(ctx.Team + ":" + salt)
 	if err != nil {
 		return false, err
 	}

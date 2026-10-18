@@ -3,9 +3,9 @@ package http
 import (
 	"net/http"
 
-	"github.com/phot0n/pathway/internal/transport/http/middleware"
-	"github.com/phot0n/pathway/internal/transport/http/proxy"
-	"github.com/phot0n/pathway/internal/transport/respond"
+	"github.com/frappe/pathway/internal/transport/http/middleware"
+	"github.com/frappe/pathway/internal/transport/http/proxy"
+	"github.com/frappe/pathway/internal/transport/respond"
 )
 
 // proxyHandler is the bottom of the chain: every decision has been made above it, so all this does
@@ -39,6 +39,6 @@ func root(w http.ResponseWriter, _ *http.Request) {
 	respond.JSON(w, map[string]any{
 		"status":  "ok",
 		"message": "Grove Gateway Service",
-		"usage":   "POST /v1/chat/completions, or /anthropic/v1/messages for Anthropic clients",
+		"usage":   "POST /openai/v1/chat/completions or /anthropic/v1/messages",
 	})
 }

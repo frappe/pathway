@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/phot0n/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/domain"
 )
 
 // carryLimit bounds what is held across reads — a partial line of a stream, or a body that is one

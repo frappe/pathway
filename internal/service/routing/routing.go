@@ -1,6 +1,7 @@
-// Package routing turns a model into an engine. Stickiness, region tiering, the capacity gate and
-// least-in-flight all live here; the rule itself is domain.PickRoute and is shared with the ingress
-// tier unchanged.
+// Package routing turns a model into an upstream. Two routers sit behind one Pick: engine.go for
+// what we run (stickiness, the capacity gate, ejection, in-flight claims, shared with the ingress
+// tier) and vendor.go for a third party's fronts (the key ring). Both narrow by region and health
+// with domain.PickRoute.
 package routing
 
 import (
@@ -10,11 +11,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
 // StickyTTL is how long a caller that names its own session keeps its engine. Client-declared
@@ -36,6 +36,10 @@ type Request struct {
 	// Inputs is what the request carries besides text (domain.SentInputs), checked against what
 	// the model takes. Set only for a fallback: the model asked for is the caller's to get wrong.
 	Inputs []string
+	// Tools is every name the request asks a tool by (domain.SentTools), checked against what a
+	// vendor row denies. Set for the model asked for too: a vendor-run tool is the vendor's bill,
+	// not the caller's mistake to pay for.
+	Tools []string
 	// RequestID was minted at the edge; the claim and the decision carry it. Blank is minted here
 	// rather than claimed as "" — a blank member would silently undercount the engine.
 	RequestID string
@@ -57,6 +61,15 @@ type Decision struct {
 // EngineURL and RequestID together name the in-flight slot this decision claimed.
 func (d Decision) EngineURL() string { return d.Route.EngineURL }
 
+// HealthTarget is what this hop's outcome is counted against, blank for a vendor row: with no
+// sibling to steer to, ejecting it would only turn the vendor's errors into our 503.
+func (d Decision) HealthTarget() string {
+	if d.Route.IsProvider() {
+		return ""
+	}
+	return d.Route.EngineURL
+}
+
 type Service struct {
 	routes   repository.Routes
 	sessions repository.Sessions
@@ -73,6 +86,8 @@ type Service struct {
 	// cursors is the round-robin position per vendor ring (ringID → *atomic.Uint64), this process's
 	// own: two gateways each take even turns without agreeing on whose turn it is.
 	cursors sync.Map
+	// warned is each model already logged for a mixed table: a stale table is a line, not a flood.
+	warned sync.Map
 }
 
 func serving(table []domain.Route, dialect, path string) []domain.Route {
@@ -149,153 +164,28 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	if len(table) == 0 {
 		return Decision{}, domain.Deny(404, req.Model+" does not take "+strings.Join(req.Inputs, ", ")+" input")
 	}
-
-	var stickyURL string
-	if session != "" {
-		stickyURL, _ = s.sessions.Engine(ctx, session)
-	}
-	s.fillInFlight(ctx, table)
-	s.markUnhealthy(ctx, table)
-
-	route, status := domain.PickRoute(table, stickyURL, s.region)
-	if status == 429 {
-		route, status = s.waitForRoom(ctx, table, stickyURL)
-	}
-	if status == 429 {
-		return Decision{}, domain.Deny(429, "every replica of "+req.Model+" is at capacity")
-	}
-	if status != 200 {
-		return Decision{}, domain.Deny(503, "no healthy server for model")
-	}
-
-	if session != "" {
-		if err := s.sessions.Pin(ctx, session, route.EngineURL, ttl); err != nil {
-			// A lost pin costs one cold prefix cache, not a wrong answer.
-			s.log.Warn("session pin failed", "session", session, "err", err)
+	// A vendor row that denies a tool the request names would run it at our cost. 400 and not the
+	// 404 above: the model serves this surface, the body asks for what is not offered.
+	var refused string
+	table = slices.DeleteFunc(table, func(candidate domain.Route) bool {
+		if name := domain.Refuses(candidate.DeniedTools, req.Tools); name != "" {
+			refused = name
+			return true
 		}
+		return false
+	})
+	if len(table) == 0 {
+		return Decision{}, domain.Deny(400, req.Model+" does not run "+refused)
 	}
 
-	decision := Decision{
-		Route:     route,
-		RequestID: req.RequestID,
-		Key:       s.PickKey(route.Keyring()),
-		Session:   session,
+	// A model is one kind, so its first row names its router. A push that mixes them is refused,
+	// but a table an older binary stored is not re-read until it changes: ours win there — the old
+	// pick could land on its vendor row, this one never does — until the control plane's next push.
+	table = s.oneKind(req.Model, table)
+	if table[0].IsProvider() {
+		return s.pickVendor(req, table)
 	}
-	if route.IsIngress() && session != "" {
-		decision.SessionKey = domain.SHA256Hex(session)
-	}
-	// A vendor row holds no slot: it has no capacity of ours and no engine to balance against.
-	if !route.IsProvider() {
-		if err := s.inFlight.Claim(ctx, route.EngineURL, decision.RequestID); err != nil {
-			// Undercounting an engine biases it toward more traffic; refusing the request over a
-			// counter would be worse.
-			s.log.Warn("in-flight claim failed", "engine", route.EngineURL, "err", err)
-		}
-	}
-	s.log.Debug("route picked",
-		"model", req.Model, "engine", route.EngineURL, "deployment", route.Deployment,
-		"kind", route.Kind, "in_flight", route.InFlight, "sticky", stickyURL != "",
-		"candidates", len(table), "rid", decision.RequestID)
-	return decision, nil
-}
-
-// capacityPoll is how often a waiting pick re-reads the in-flight counts.
-const capacityPoll = 50 * time.Millisecond
-
-// waitForRoom re-picks until a replica has room, the wait runs out, or the client leaves. Nothing is
-// claimed while waiting, and this sits above meter, so a request that gives up bills nothing.
-// ponytail: polls the in-flight store every capacityPoll per waiting request; a release
-// notification is the upgrade if many requests wait at once.
-func (s *Service) waitForRoom(ctx context.Context, table []domain.Route, stickyURL string) (domain.Route, int) {
-	var wait time.Duration
-	if s.capacityWait != nil {
-		wait = s.capacityWait()
-	}
-	deadline := time.Now().Add(wait)
-	for time.Until(deadline) > 0 {
-		timer := time.NewTimer(min(capacityPoll, time.Until(deadline)))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return domain.Route{}, 429
-		case <-timer.C:
-		}
-		s.fillInFlight(ctx, table)
-		if route, status := domain.PickRoute(table, stickyURL, s.region); status != 429 {
-			return route, status
-		}
-	}
-	return domain.Route{}, 429
-}
-
-// PickKey is the route's one selection strategy, round robin: the credential a request dials with,
-// the next in the ring's order after the last request's. The cursor is per ring, and a vendor's ring
-// is the same on every model it serves, so its keys take even turns across models — the limits they
-// share are the vendor's. A session still changes key between requests, so a vendor's prompt cache
-// stays per credential; that is the strategy's known cost. Blank on an empty ring.
-func (s *Service) PickKey(keyring []domain.Credential) domain.Credential {
-	if len(keyring) == 0 {
-		return domain.Credential{}
-	}
-	cursor, _ := s.cursors.LoadOrStore(ringID(keyring), new(atomic.Uint64))
-	turn := cursor.(*atomic.Uint64).Add(1) - 1
-	return keyring[turn%uint64(len(keyring))]
-}
-
-// ringID names a ring by its members: the ids the control plane counts the keys under, in the
-// order it pushed them. An engine's one blank-id credential names the one ring every engine shares,
-// which has a single position anyway.
-func ringID(keyring []domain.Credential) string {
-	ids := make([]string, len(keyring))
-	for i, key := range keyring {
-		ids[i] = key.ID
-	}
-	return strings.Join(ids, ",")
-}
-
-// NextKey is the retry stage's walk: the first key after `loser` in ring order that is not in
-// `spent`, round the ring once. Blank when every key is spent.
-func NextKey(keyring []domain.Credential, loser domain.Credential, spent map[string]bool) domain.Credential {
-	start := slices.IndexFunc(keyring, func(key domain.Credential) bool { return key.ID == loser.ID })
-	for step := 1; step <= len(keyring); step++ {
-		if key := keyring[(start+step)%len(keyring)]; !spent[key.ID] {
-			return key
-		}
-	}
-	return domain.Credential{}
-}
-
-// PickReplica is the ingress tier: the same rule with no session synthesis, no region (every
-// replica is in this ingress's own VPC) and an already-opaque session key.
-func (s *Service) PickReplica(ctx context.Context, model, sessionKey, requestID string) (domain.Route, error) {
-	table, err := s.routes.Get(ctx, model)
-	if err != nil || len(table) == 0 {
-		// no-replica, not unhealthy. The gateway must not eject a whole network over one model
-		// that has nowhere to go inside it.
-		return domain.Route{}, domain.Deny(503, "no-replica")
-	}
-	s.fillInFlight(ctx, table)
-
-	var stickyURL string
-	if sessionKey != "" {
-		stickyURL, _ = s.sessions.Engine(ctx, sessionKey)
-	}
-	route, status := domain.PickRoute(table, stickyURL, "")
-	if status == 429 {
-		return domain.Route{}, domain.Deny(429, "at-capacity")
-	}
-	if status != 200 {
-		return domain.Route{}, domain.Deny(503, "no-replica")
-	}
-	if sessionKey != "" {
-		if err := s.sessions.Pin(ctx, sessionKey, route.EngineURL, StickyTTL); err != nil {
-			s.log.Warn("replica pin failed", "err", err)
-		}
-	}
-	if err := s.inFlight.Claim(ctx, route.EngineURL, requestID); err != nil {
-		s.log.Warn("in-flight claim failed", "engine", route.EngineURL, "err", err)
-	}
-	return route, nil
+	return s.pickEngine(ctx, req, table, session, ttl)
 }
 
 // What CanServe reports instead of a bare open socket. Fixed strings: they reach a public health
@@ -323,7 +213,10 @@ func (s *Service) CanServe(ctx context.Context) error {
 		if err != nil || len(table) == 0 {
 			continue
 		}
-		s.markUnhealthy(ctx, table)
+		table = s.oneKind(model, table)
+		if !table[0].IsProvider() {
+			s.markUnhealthy(ctx, table)
+		}
 		if _, status := domain.PickRoute(table, "", s.region); status == 200 {
 			return nil
 		}
@@ -334,57 +227,14 @@ func (s *Service) CanServe(ctx context.Context) error {
 	return ErrNoEngine
 }
 
-// Release crosses a finished request off its engine. A vendor row claimed nothing.
-func (s *Service) Release(ctx context.Context, route domain.Route, requestID string) {
-	if route.IsProvider() {
-		return
+// oneKind drops a mixed table's vendor rows (domain.MixedKinds). Loud once per model, since the
+// table is wrong and the engine router would otherwise count, eject and pin against a vendor.
+func (s *Service) oneKind(model string, table []domain.Route) []domain.Route {
+	if !domain.MixedKinds(table) {
+		return table
 	}
-	if err := s.inFlight.Release(ctx, route.EngineURL, requestID); err != nil {
-		s.log.Warn("in-flight release failed", "engine", route.EngineURL, "rid", requestID, "err", err)
+	if _, seen := s.warned.LoadOrStore(model, true); !seen {
+		s.log.Warn("mixed route table, vendor rows ignored until the next push", "model", model)
 	}
-}
-
-// fillInFlight sets each route's InFlight to what its engine is running now; a vendor row is never
-// counted. A store failure leaves every count at zero, degrading to the first healthy route —
-// refusing instead would 503 a working engine over an unreadable counter.
-func (s *Service) fillInFlight(ctx context.Context, table []domain.Route) {
-	rows := make([]int, 0, len(table))
-	urls := make([]string, 0, len(table))
-	for i, r := range table {
-		if !r.IsProvider() {
-			rows = append(rows, i)
-			urls = append(urls, r.EngineURL)
-		}
-	}
-	if len(urls) == 0 {
-		return
-	}
-	counts, err := s.inFlight.Counts(ctx, urls)
-	if err != nil {
-		s.log.Warn("in-flight counts unavailable, falling back to the first healthy route", "err", err)
-		return
-	}
-	for i, row := range rows {
-		table[row].InFlight = counts[i]
-	}
-}
-
-// markUnhealthy flips Healthy off where a target has failed too often in a row; PickRoute's own
-// check does the rest. A store failure leaves the table as the control plane pushed it — ejection
-// is an optimisation on something already correct, so an unreadable counter must not cause an outage.
-func (s *Service) markUnhealthy(ctx context.Context, table []domain.Route) {
-	targets := make([]string, len(table))
-	for i, r := range table {
-		targets[i] = r.EngineURL
-	}
-	failures, err := s.health.Failures(ctx, targets)
-	if err != nil {
-		return
-	}
-	for i := range table {
-		if failures[i] >= domain.EjectAfter {
-			table[i].Healthy = false
-			s.log.Debug("target ejected", "engine", table[i].EngineURL, "failures", failures[i])
-		}
-	}
+	return slices.DeleteFunc(table, domain.Route.IsProvider)
 }

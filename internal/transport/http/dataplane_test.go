@@ -8,23 +8,24 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/phot0n/pathway/internal/config"
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/observability"
-	"github.com/phot0n/pathway/internal/repository/memory"
-	"github.com/phot0n/pathway/internal/service/admission"
-	"github.com/phot0n/pathway/internal/service/catalog"
-	"github.com/phot0n/pathway/internal/service/metering"
-	"github.com/phot0n/pathway/internal/service/provisioning"
-	"github.com/phot0n/pathway/internal/service/routing"
-	"github.com/phot0n/pathway/internal/service/transform"
-	"github.com/phot0n/pathway/internal/transport/http/middleware"
-	"github.com/phot0n/pathway/internal/transport/http/proxy"
+	"github.com/frappe/pathway/internal/config"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/observability"
+	"github.com/frappe/pathway/internal/repository/memory"
+	"github.com/frappe/pathway/internal/service/admission"
+	"github.com/frappe/pathway/internal/service/catalog"
+	"github.com/frappe/pathway/internal/service/metering"
+	"github.com/frappe/pathway/internal/service/provisioning"
+	"github.com/frappe/pathway/internal/service/routing"
+	"github.com/frappe/pathway/internal/service/transform"
+	"github.com/frappe/pathway/internal/transport/http/middleware"
+	"github.com/frappe/pathway/internal/transport/http/proxy"
 )
 
 // The whole data path against a fake vLLM: what the engine received, what the client got back, and
@@ -44,6 +45,7 @@ type engineRecord struct {
 	groveModel    string
 	groveSession  string
 	forwardedFor  string
+	headers       http.Header
 	apiKey        string
 	apiVersion    string
 	body          []byte
@@ -69,6 +71,7 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 			groveModel:    r.Header.Get("X-Grove-Model"),
 			groveSession:  r.Header.Get("X-Grove-Session-Key"),
 			forwardedFor:  r.Header.Get("X-Forwarded-For"),
+			headers:       r.Header.Clone(),
 			apiKey:        r.Header.Get("x-api-key"),
 			apiVersion:    r.Header.Get("anthropic-version"),
 			body:          body,
@@ -79,9 +82,8 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-		Status: "active", User: "test-user", KeyPrefix: "abc123",
+		Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"), Budget: 1_000_000_000_000,
 	}
-	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	store.Routes["qwen3-4b"] = []domain.Route{{
 		EngineURL: engine.URL + "/e/md1", InternalKey: "engine-key",
@@ -154,11 +156,11 @@ func jsonEngine(payload string) http.HandlerFunc {
 func TestNonStreamingRequestIsMetered(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{"id":"chatcmpl-1",`+usageObject+`}`))
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
-	usage := f.store.Usage["abc123"]
+	usage := f.store.UsageOf("abc123")
 	for field, want := range map[string]int64{
 		"request_count": 1, "prompt_tokens": 100, "completion_tokens": 20,
 		"total_tokens": 120, "cached_tokens": 80,
@@ -179,7 +181,7 @@ func TestTheEngineSeesTheRewrittenRequest(t *testing.T) {
 		w.Header().Set("X-Request-Id", r.Header.Get("X-Request-Id"))
 		jsonEngine(`{`+usageObject+`}`)(w, r)
 	})
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`)
 
 	if f.seen.path != "/e/md1/v1/chat/completions" {
 		t.Errorf("engine path = %q, want /e/md1/v1/chat/completions", f.seen.path)
@@ -206,7 +208,7 @@ func TestTheEngineSeesTheRewrittenRequest(t *testing.T) {
 // which is what lets metering trust the stream.
 func TestTheBodyReachesTheEngineTransformed(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
-	f.post("/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
+	f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
 
 	var body map[string]any
 	if err := json.Unmarshal(f.seen.body, &body); err != nil {
@@ -223,7 +225,7 @@ func TestTheBodyReachesTheEngineTransformed(t *testing.T) {
 func TestANonStreamingBodyIsForwardedUnchanged(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
 	sent := `{"model":"qwen3-4b","messages":[],"priority":-999}`
-	f.post("/v1/chat/completions", sent)
+	f.post("/openai/v1/chat/completions", sent)
 
 	if string(f.seen.body) != sent {
 		t.Errorf("engine body = %s, want it byte-for-byte as sent", f.seen.body)
@@ -231,16 +233,16 @@ func TestANonStreamingBodyIsForwardedUnchanged(t *testing.T) {
 }
 
 // The wiring behind the cachesalt transform: the tenant it prefixes with is the authenticated
-// Grove user, not anything the caller can choose.
-func TestACacheSaltIsNamespacedByTheAuthenticatedUser(t *testing.T) {
+// key's team, not anything the caller can choose.
+func TestACacheSaltIsNamespacedByTheAuthenticatedTeam(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
-	f.post("/v1/chat/completions", `{"model":"qwen3-4b","cache_salt":"team-a","messages":[]}`)
+	f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","cache_salt":"team-a","messages":[]}`)
 
 	var body map[string]any
 	if err := json.Unmarshal(f.seen.body, &body); err != nil {
 		t.Fatalf("engine body: %v", err)
 	}
-	if body["cache_salt"] != "test-user:team-a" {
+	if body["cache_salt"] != "test-team:team-a" {
 		t.Errorf("cache_salt = %v, want the tenant-prefixed form", body["cache_salt"])
 	}
 }
@@ -250,7 +252,7 @@ func TestACacheSaltIsNamespacedByTheAuthenticatedUser(t *testing.T) {
 func TestAnUngatedEndpointIsForwardedUntouched(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
 	const body = `{"model":"qwen3-4b","input":"hello"}`
-	f.post("/v1/embeddings", body)
+	f.post("/openai/v1/embeddings", body)
 
 	if string(f.seen.body) != body {
 		t.Errorf("engine body = %s, want it untouched (%s)", f.seen.body, body)
@@ -274,12 +276,12 @@ func TestAStreamIsRelayedUnmodifiedAndStillMetered(t *testing.T) {
 		}
 	})
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
 	want := strings.Join(frames, "\n\n") + "\n\n"
 	if resp.Body.String() != want {
 		t.Errorf("stream was altered.\n got: %q\nwant: %q", resp.Body.String(), want)
 	}
-	if got := f.store.Usage["abc123"]["total_tokens"]; got != 120 {
+	if got := f.store.UsageOf("abc123")["total_tokens"]; got != 120 {
 		t.Errorf("total_tokens = %d, want 120 — the usage frame was not captured", got)
 	}
 }
@@ -296,37 +298,49 @@ func TestAUsageFrameSplitAcrossWritesIsStillCaptured(t *testing.T) {
 			w.(http.Flusher).Flush()
 		}
 	})
-	f.post("/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
+	f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
 
-	if got := f.store.Usage["abc123"]["total_tokens"]; got != 120 {
+	if got := f.store.UsageOf("abc123")["total_tokens"]; got != 120 {
 		t.Errorf("total_tokens = %d, want 120", got)
 	}
 }
 
+// firstByte is a client that says when the first byte of the answer reached it: the upstream's
+// 200 is on record by then, so a client that leaves after it abandons a served request.
+type firstByte struct {
+	*httptest.ResponseRecorder
+	once sync.Once
+	got  chan struct{}
+}
+
+func (c *firstByte) Write(b []byte) (int, error) {
+	c.once.Do(func() { close(c.got) })
+	return c.ResponseRecorder.Write(b)
+}
+
 // The case a metering call placed after the proxy would miss, and the one that leaves an engine
-// counted as busy forever.
+// counted as busy forever. The upstream served the request, so it is still a request.
 func TestAClientDisconnectStillReleasesTheSlot(t *testing.T) {
-	started := make(chan struct{})
 	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
 		w.(http.Flusher).Flush()
-		close(started)
 		<-r.Context().Done() // hold the stream open until the client goes away
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions",
 		strings.NewReader(`{"model":"qwen3-4b","stream":true}`)).WithContext(ctx)
 	r.Header.Set("Authorization", "Bearer "+secret)
 
+	client := &firstByte{ResponseRecorder: httptest.NewRecorder(), got: make(chan struct{})}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.handler.ServeHTTP(httptest.NewRecorder(), r)
+		f.handler.ServeHTTP(client, r)
 	}()
 
-	<-started
+	<-client.got
 	cancel()
 	<-done
 
@@ -334,7 +348,7 @@ func TestAClientDisconnectStillReleasesTheSlot(t *testing.T) {
 	if got := len(f.store.InFlight[engineURL]); got != 0 {
 		t.Errorf("in-flight = %d after a disconnect — the engine stays out of rotation", got)
 	}
-	if f.store.Usage["abc123"]["request_count"] != 1 {
+	if f.store.UsageOf("abc123")["request_count"] != 1 {
 		t.Error("an abandoned request was not counted at all")
 	}
 }
@@ -344,7 +358,7 @@ func TestADeadUpstreamIsA502AndCountsAgainstTheTarget(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{}`))
 	f.engine.Close() // the route now points at nothing
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`)
 	if resp.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", resp.Code)
 	}
@@ -366,7 +380,7 @@ func TestAnIngressRouteGetsHeadersAndAHashedSession(t *testing.T) {
 	})
 	f.store.Routes["qwen3-4b"][0].Kind = "ingress"
 
-	f.post("/v1/chat/completions", `{"model":"qwen3-4b","user":"acme-support-bot"}`)
+	f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","user":"acme-support-bot"}`)
 
 	if f.seen.groveModel != "qwen3-4b" {
 		t.Errorf("X-Grove-Model = %q", f.seen.groveModel)
@@ -379,7 +393,7 @@ func TestAnIngressRouteGetsHeadersAndAHashedSession(t *testing.T) {
 	}
 	// The replica the ingress chose, off its response header — the only way usage reaches a
 	// placement this gateway never picked.
-	if got := f.store.Usage["abc123"]["m:total_tokens:MD-00099"]; got != 120 {
+	if got := f.store.UsageOf("abc123")["m:total_tokens:MD-00099"]; got != 120 {
 		t.Errorf("m:total_tokens:MD-00099 = %d, want 120", got)
 	}
 }
@@ -403,7 +417,7 @@ func TestDataPathRefusals(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{}`))
 			f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b,drained")}
-			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(c.body))
+			r := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(c.body))
 			r.Header.Set("Authorization", "Bearer "+c.key)
 			w := httptest.NewRecorder()
 			f.handler.ServeHTTP(w, r)
@@ -429,7 +443,7 @@ func TestDataPathRefusals(t *testing.T) {
 // A refused request must never claim a slot it will not release.
 func TestARefusedRequestClaimsNothing(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{}`))
-	f.post("/v1/chat/completions", `{"model":"secret-model"}`)
+	f.post("/openai/v1/chat/completions", `{"model":"secret-model"}`)
 
 	for engine, ids := range f.store.InFlight {
 		if len(ids) != 0 {
@@ -452,12 +466,10 @@ func TestAGeographyPinIsHonoured(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{}`))
-			user := f.store.Users["test-user"]
-			user.Geography = c.pin
-			f.store.Users["test-user"] = user
+			f.withKey(func(k *domain.KeyRecord) { k.Geography = c.pin })
 			f.handler = buildHandler(t, f.store, config.Config{Geography: c.gateway}, 0)
 
-			w := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
+			w := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`)
 			if w.Code != c.want {
 				t.Fatalf("inference status = %d, want %d (%s)", w.Code, c.want, w.Body)
 			}
@@ -465,12 +477,12 @@ func TestAGeographyPinIsHonoured(t *testing.T) {
 				t.Errorf("refusal does not name the pin: %s", w.Body)
 			}
 
-			r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			r := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
 			r.Header.Set("Authorization", "Bearer "+secret)
 			listing := httptest.NewRecorder()
 			f.handler.ServeHTTP(listing, r)
 			if listing.Code != c.want {
-				t.Errorf("/v1/models status = %d, want %d (%s)", listing.Code, c.want, listing.Body)
+				t.Errorf("/openai/v1/models status = %d, want %d (%s)", listing.Code, c.want, listing.Body)
 			}
 		})
 	}
@@ -480,12 +492,11 @@ func TestAGeographyPinIsHonoured(t *testing.T) {
 // was sent.
 func TestAnOversizedBodyIsRefused(t *testing.T) {
 	store := memory.New()
-	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", User: "test-user", KeyPrefix: "abc123"}
-	store.Users["test-user"] = domain.UserRecord{Groups: domain.ModelSet("acme")}
+	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"), Budget: 1_000_000_000_000}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	handler := buildHandler(t, store, config.Config{}, 128)
 
-	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions",
 		strings.NewReader(fmt.Sprintf(`{"model":"qwen3-4b","x":%q}`, strings.Repeat("a", 4096))))
 	r.Header.Set("Authorization", "Bearer "+secret)
 	w := httptest.NewRecorder()
@@ -499,7 +510,7 @@ func TestAnOversizedBodyIsRefused(t *testing.T) {
 // /v1/models is answered here and never forwarded — an engine only knows its own model.
 func TestModelsIsAnsweredByTheGateway(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{}`))
-	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
 	r.Header.Set("Authorization", "Bearer "+secret)
 	w := httptest.NewRecorder()
 	f.handler.ServeHTTP(w, r)
@@ -508,7 +519,7 @@ func TestModelsIsAnsweredByTheGateway(t *testing.T) {
 		t.Fatalf("status = %d", w.Code)
 	}
 	if f.seen.path != "" {
-		t.Error("/v1/models was forwarded to an engine")
+		t.Error("/openai/v1/models was forwarded to an engine")
 	}
 	var list struct {
 		Data []struct{ ID string } `json:"data"`
@@ -526,7 +537,7 @@ func TestDrainingAnswersARestartingMessage(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{}`))
 	f.handler = drainingHandler(t, f.store)
 
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b"}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b"}`)
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.Code)
 	}
@@ -601,7 +612,7 @@ func TestTokensArriveBeforeTheResponseEnds(t *testing.T) {
 	})
 
 	start := time.Now()
-	resp := f.post("/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
+	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","stream":true}`)
 	total := time.Since(start)
 	flushed := <-firstSeen
 

@@ -5,55 +5,53 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/phot0n/pathway/internal/domain"
-	"github.com/phot0n/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/repository"
 )
 
-// key:<sha256(secret)>, user:<Grove User name>, model_group:<Model Group name>. Three records
-// rather than one projection on the credential, so one leaked key dies without touching the rest
-// and a budget flip is one write however many keys the holder has.
+// key:<sha256(secret)>, team:<Central Team> and model_group:<Model Group name>. The key carries
+// its own policy — what it may call, where, how fast, and the cap it spends against — because a
+// key lives in one geography and so on one store, which is what lets that store gate the cap
+// exactly. The team is its own record so a verdict on the team is one write, not one per key; the
+// group is its own record so a grant shared by many keys is one write.
 
 type keys struct{ rdb *redis.Client }
 
-// resolveScript follows a credential to its user and that user's groups in one call: each read
-// needs the one before it, so a pipeline could not join them. It only fetches. Which groups to read
-// comes from the user record's list, or from the key's own when it has no user record; every
-// decision over what comes back is made in Go. Replies {key, user, {name, group, ...}}, each
-// record as HGETALL answers it and empty when absent.
+// resolveScript follows a credential to its team and its groups in one call: which to read comes
+// off the key record, so a pipeline could not join them. It only fetches; every decision over what
+// comes back is made in Go. Replies {key, team, {name, group, ...}}, each record as HGETALL answers
+// it and empty when absent.
 //
-// It reads user: and model_group: keys it is not handed, so the store must be a single Redis.
+// It reads team: and model_group: keys it is not handed, so the store must be a single Redis.
 //
 // KEYS[1] key:<meter id>
 var resolveScript = redis.NewScript(`
 local key = redis.call('HGETALL', KEYS[1])
-local user, names = {}, nil
+local names, team = '', ''
 for i = 1, #key, 2 do
-  if key[i] == 'user' and key[i + 1] ~= '' then
-    user = redis.call('HGETALL', 'user:' .. key[i + 1])
-  elseif key[i] == 'group' then
+  if key[i] == 'group' then
     names = key[i + 1]
+  elseif key[i] == 'team' then
+    team = key[i + 1]
   end
 end
-if #user > 0 then
-  names = nil
-  for i = 1, #user, 2 do
-    if user[i] == 'group' then
-      names = user[i + 1]
-    end
-  end
+local teamrec = {}
+if team ~= '' then
+  teamrec = redis.call('HGETALL', 'team:' .. team)
 end
 local groups = {}
-for name in string.gmatch(names or '', '[^,]+') do
+for name in string.gmatch(names, '[^,]+') do
   name = string.match(name, '^%s*(.-)%s*$')
   if name ~= '' then
     groups[#groups + 1] = name
     groups[#groups + 1] = redis.call('HGETALL', 'model_group:' .. name)
   end
 end
-return {key, user, groups}
+return {key, teamrec, groups}
 `)
 
 func (k keys) Resolve(ctx context.Context, meterID string) (repository.Holder, bool, error) {
@@ -64,16 +62,21 @@ func (k keys) Resolve(ctx context.Context, meterID string) (repository.Holder, b
 	if len(res) != 3 {
 		return repository.Holder{}, false, fmt.Errorf("resolve answered %d records, want 3", len(res))
 	}
-	key, user := hashOf(res[0]), hashOf(res[1])
+	key := hashOf(res[0])
 	if len(key) == 0 {
 		return repository.Holder{}, false, nil
 	}
-	holder := repository.Holder{Key: keyRecord(key), Groups: map[string]domain.GroupRecord{}}
-	if len(user) > 0 {
-		if holder.User, err = userRecord(user); err != nil {
+	rec, err := keyRecord(key, spentField(time.Now()))
+	if err != nil {
+		return repository.Holder{}, false, err
+	}
+	holder := repository.Holder{Key: rec, Groups: map[string]domain.GroupRecord{}}
+	if team := hashOf(res[1]); len(team) > 0 {
+		teamRec, err := teamRecord(team)
+		if err != nil {
 			return repository.Holder{}, false, err
 		}
-		holder.HasUser = true
+		holder.Team = &teamRec
 	}
 	groups, _ := res[2].([]any)
 	for i := 0; i+1 < len(groups); i += 2 {
@@ -94,27 +97,89 @@ func hashOf(reply any) map[string]string {
 	return h
 }
 
-func keyRecord(h map[string]string) domain.KeyRecord {
-	group, hasGroup := h["group"] // present-but-blank = ungrouped; absent = a pre-group record
-	rec := domain.KeyRecord{
-		Status:         h["status"],
-		User:           h["user"],
-		KeyPrefix:      h["prefix"],
-		CanReadBalance: h["can_read_balance"] == "1",
-		Legacy: domain.LegacyKey{
-			HasGroup: hasGroup,
-			Group:    strings.TrimSpace(group),
-			Allow:    domain.ModelSet(h["allow"]),
-			Deny:     domain.ModelSet(h["deny"]),
-			Models:   domain.ModelSet(h["models"]),
-		},
+// spentField names the hash field a key's spend lands under for the month of now. A month not yet
+// written reads 0, so a new month needs no reset. Earlier months' fields stay behind, ~20 bytes a
+// key a month, and nothing reads them.
+// ponytail: fields accumulate one per key per month; HDEL the previous month on first write if it ever matters.
+func spentField(now time.Time) string { return "spent:" + domain.MonthOf(now) }
+
+// keyRecord reads a record as HGETALL answered it; spent is the field this month's spend is under.
+func keyRecord(h map[string]string, spent string) (domain.KeyRecord, error) {
+	// A push is refused unless every limit reads, so one that does not was written by a newer
+	// binary. Serving that key uncapped would hide it.
+	limits, err := domain.ParseLimits(h["limits"])
+	if err != nil {
+		return domain.KeyRecord{}, err
 	}
-	// Status used to carry the holder's budget flag as a third value. Lift it off here, so Status
-	// means only "is this credential live" — which is all a current record puts there.
-	if rec.Status == "rate_limited" {
-		rec.Status, rec.Legacy.Limited = "active", true
+	return domain.KeyRecord{
+		Status:      h["status"],
+		Team:        h["team"],
+		KeyPrefix:   h["prefix"],
+		Groups:      domain.ModelSet(h["group"]),
+		Allow:       domain.ModelSet(h["allow"]),
+		Deny:        domain.ModelSet(h["deny"]),
+		Limited:     strings.TrimSpace(h["limited"]) == "1",
+		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
+		Geography:   strings.TrimSpace(h["geography"]),
+		Budget:      int64Field(h, "budget"),
+		Spent:       int64Field(h, spent),
+		Limits:      limits,
+	}, nil
+}
+
+// teamRecord reads a team as HGETALL answered it. A limit that does not read was written by a
+// newer binary, and is refused the way a key's is.
+func teamRecord(h map[string]string) (domain.TeamRecord, error) {
+	limits, err := domain.ParseLimits(h["limits"])
+	if err != nil {
+		return domain.TeamRecord{}, err
 	}
-	return rec
+	return domain.TeamRecord{
+		Limited:     strings.TrimSpace(h["limited"]) == "1",
+		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
+		Limits:      limits,
+	}, nil
+}
+
+// writeTeam lands one team record whole.
+func writeTeam(ctx context.Context, p redis.Pipeliner, rec repository.TeamUpsert) {
+	p.HSet(ctx, "team:"+rec.Team, map[string]any{
+		"limited":      flag(rec.Limited),
+		"log_payloads": flag(rec.LogPayloads),
+		"limits":       rec.Limits, // always written: blank is what clears a removed limit
+	})
+}
+
+// keyFields is what a push writes. No `spent:<month>` is among them: those are this box's own
+// counters, and an HSET here never clears a field it does not name.
+func keyFields(rec repository.KeyUpsert) map[string]any {
+	return map[string]any{
+		"status":       rec.Status,
+		"team":         rec.Team,
+		"prefix":       rec.Prefix,
+		"group":        rec.Groups, // comma list of group names
+		"allow":        rec.Allow,
+		"deny":         rec.Deny,
+		"limited":      flag(rec.Limited),
+		"log_payloads": flag(rec.LogPayloads),
+		"geography":    rec.Geography,
+		"budget":       strconv.FormatInt(rec.Budget, 10),
+		"limits":       rec.Limits, // always written: blank is what clears a removed limit
+	}
+}
+
+// staleKeyFields were written by control planes before the policy moved onto the key: the user
+// pointer and the balance-read flag, and the flattened model set before that; and `spent`, the
+// lifetime counter this gateway kept before spend was counted by month. Dropped with every write
+// so a record never shows new fields beside stale ones.
+var staleKeyFields = []string{"user", "can_read_balance", "models", "priority", "spent"}
+
+// writeKey lands one record whole: the write and the strip of stale fields go in one
+// transaction, so a reader never sees it half-updated.
+func writeKey(ctx context.Context, p redis.Pipeliner, rec repository.KeyUpsert) {
+	redisKey := "key:" + rec.MeterID
+	p.HSet(ctx, redisKey, keyFields(rec))
+	p.HDel(ctx, redisKey, staleKeyFields...)
 }
 
 func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error {
@@ -122,21 +187,8 @@ func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error 
 		if rec.MeterID == "" {
 			continue
 		}
-		redisKey := "key:" + rec.MeterID
-		// One transaction, so a reader never sees this record half-updated: the write and the strip
-		// below land together or not at all. Two commands left a window showing new fields beside
-		// stale legacy ones — inert today, a torn read regardless, and free to fix.
 		_, err := k.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
-			p.HSet(ctx, redisKey, map[string]any{
-				"status":           rec.Status,
-				"user":             rec.User,
-				"prefix":           rec.Prefix,
-				"can_read_balance": flag(rec.CanReadBalance),
-			})
-			// A pre-group control plane flattened access onto the key; that set is stale the moment a
-			// group is pushed. `group`/`allow`/`deny` stay: this cannot tell a current push from an
-			// older plane still writing them, and dropping them there would leave no access at all.
-			p.HDel(ctx, redisKey, "models", "priority")
+			writeKey(ctx, p, rec)
 			return nil
 		})
 		if err != nil {
@@ -150,103 +202,35 @@ func (k keys) Delete(ctx context.Context, ids []string) (int, error) {
 	return deletePrefixed(ctx, k.rdb, "key:", ids)
 }
 
-type users struct{ rdb *redis.Client }
-
-func (u users) Get(ctx context.Context, name string) (domain.UserRecord, bool, error) {
-	h, err := u.rdb.HGetAll(ctx, "user:"+name).Result()
-	if err != nil {
-		return domain.UserRecord{}, false, err
-	}
-	if len(h) == 0 {
-		return domain.UserRecord{}, false, nil
-	}
-	rec, err := userRecord(h)
-	return rec, err == nil, err
-}
-
-func userRecord(h map[string]string) (domain.UserRecord, error) {
-	// A push is refused unless every limit reads, so one that does not was written by a newer
-	// binary. Serving that holder uncapped would hide it.
-	limits, err := domain.ParseLimits(h["limits"])
-	if err != nil {
-		return domain.UserRecord{}, err
-	}
-	return domain.UserRecord{
-		Limits:      limits,
-		Email:       h["email"],
-		Groups:      domain.ModelSet(h["group"]),
-		Allow:       domain.ModelSet(h["allow"]),
-		Deny:        domain.ModelSet(h["deny"]),
-		Limited:     strings.TrimSpace(h["limited"]) == "1",
-		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
-		Geography:   strings.TrimSpace(h["geography"]),
-		Prepaid:     strings.TrimSpace(h["prepaid"]) == "1",
-		Budget:      int64Field(h, "budget"),
-		Spent:       int64Field(h, "spent"),
-	}, nil
-}
-
-func (u users) Upsert(ctx context.Context, records []repository.UserUpsert) error {
-	for _, rec := range records {
-		if rec.Name == "" {
-			continue
-		}
-		if err := u.rdb.HSet(ctx, "user:"+rec.Name, userFields(rec)).Err(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// userFields is what a push writes. `spent` is not among them: it is this box's own counter, and
-// an HSET here never clears a field it does not name.
-func userFields(rec repository.UserUpsert) map[string]any {
-	return map[string]any{
-		"email":        rec.Email,
-		"group":        rec.Groups, // comma list of group names
-		"allow":        rec.Allow,
-		"deny":         rec.Deny,
-		"limited":      flag(rec.Limited),
-		"log_payloads": flag(rec.LogPayloads),
-		"geography":    rec.Geography,
-		"prepaid":      flag(rec.Prepaid),
-		"budget":       strconv.FormatInt(rec.Budget, 10),
-		"limits":       rec.Limits, // always written: blank is what clears a removed limit
-	}
-}
-
 // int64Field reads a decimal field, 0 when absent — a record from before the field existed.
 func int64Field(h map[string]string, field string) int64 {
 	n, _ := strconv.ParseInt(strings.TrimSpace(h[field]), 10, 64)
 	return n
 }
 
-func (u users) Delete(ctx context.Context, ids []string) (int, error) {
-	return deletePrefixed(ctx, u.rdb, "user:", ids)
-}
-
-// adjustScript moves one holder's spend once per adjustment id. Replies {spent, code}: code 1
-// applied, 0 already applied, -1 no such holder. The id is kept a week: a retry comes within
+// adjustScript moves one key's spend for the month once per adjustment id. Replies {spent, code}:
+// code 1 applied, 0 already applied, -1 no such key. The id is kept a week: a retry comes within
 // minutes, and the control plane names each adjustment after its own row, so ids never recur.
 //
-// KEYS[1] adjust:<id>, KEYS[2] user:<name>; ARGV[1] delta, ARGV[2] seconds to keep the id
+// KEYS[1] adjust:<id>, KEYS[2] key:<meter id>; ARGV[1] delta, ARGV[2] seconds to keep the id,
+// ARGV[3] the key's spent field for the month
 var adjustScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[2]) == 0 then
   return {'0', -1}
 end
 if redis.call('EXISTS', KEYS[1]) == 1 then
-  return {redis.call('HGET', KEYS[2], 'spent') or '0', 0}
+  return {redis.call('HGET', KEYS[2], ARGV[3]) or '0', 0}
 end
-local spent = redis.call('HINCRBY', KEYS[2], 'spent', ARGV[1])
+local spent = redis.call('HINCRBY', KEYS[2], ARGV[3], ARGV[1])
 redis.call('SET', KEYS[1], '1', 'EX', ARGV[2])
 return {tostring(spent), 1}
 `)
 
 const adjustKeep = 7 * 24 * 60 * 60
 
-func (u users) AdjustSpent(ctx context.Context, name, id string, delta int64) (int64, bool, bool, error) {
-	res, err := adjustScript.Run(ctx, u.rdb, []string{"adjust:" + id, "user:" + name},
-		strconv.FormatInt(delta, 10), adjustKeep).Slice()
+func (k keys) AdjustSpent(ctx context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
+	res, err := adjustScript.Run(ctx, k.rdb, []string{"adjust:" + id, "key:" + meterID},
+		strconv.FormatInt(delta, 10), adjustKeep, spentField(time.Now())).Slice()
 	if err != nil || len(res) != 2 {
 		return 0, false, false, err
 	}

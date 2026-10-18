@@ -3,6 +3,8 @@ package transform
 import (
 	"bytes"
 	"encoding/json"
+
+	"github.com/frappe/pathway/internal/service/vendor"
 )
 
 func init() {
@@ -24,6 +26,22 @@ type vendorFields struct{}
 func (vendorFields) Name() string        { return "vendorfields" }
 func (vendorFields) Endpoints() []string { return []string{"/v1/chat/completions", messages} }
 
+// ownEngine is an upstream we run: vLLM reads the cap under either name, and takes the running
+// usage count. Not a vendor, so not in that package.
+var ownEngine = vendor.Quirks{
+	OutputCap: vendor.AsSent, UsagePerChunk: true,
+	UntypedTools: false, DeveloperAsSystem: false, BlankReasoning: false, UnthinkForcedTool: false,
+	UnreasonWithTools: false, DefaultSampling: false,
+}
+
+// upstreamOf is what the hop a request is on reads differently.
+func upstreamOf(ctx Context) vendor.Quirks {
+	if !ctx.Provider {
+		return ownEngine
+	}
+	return vendor.For(ctx.Vendor).Quirks()
+}
+
 // rewrite is one difference of an upstream, written into the body. It reports whether it changed
 // anything, and leaves a body it cannot read to the upstream to refuse.
 type rewrite func(Context, Body) (bool, error)
@@ -36,8 +54,22 @@ var (
 		nameOutputCap, developerAsSystem, unthinkForcedFunction, blankReasoningContent, unreasonWithTools,
 		defaultSampling,
 	}
-	messagesRewrites = []rewrite{untypeCustomTools, unthinkForcedTool, blankThinkingBlock}
+	messagesRewrites = []rewrite{dropSpeed, untypeCustomTools, unthinkForcedTool, blankThinkingBlock}
 )
+
+// dropSpeed takes fast mode off a request to a vendor. `speed` is Anthropic's faster tier at twice
+// the rate, and nothing here prices it: the request goes at the standard speed and the caller is
+// told. Ours, not a vendor's quirk, so every vendor's Anthropic front gets it and the table has no
+// flag. An engine we run gets the body as sent. OpenAI's tier is `service_tier`, which the
+// `servicetier` transform drops on every hop.
+func dropSpeed(ctx Context, body Body) (bool, error) {
+	if !ctx.Provider || !said(body, "speed") {
+		return false, nil
+	}
+	delete(body, "speed")
+	ctx.tell("speed=default")
+	return true, nil
+}
 
 func (vendorFields) Apply(ctx Context, body Body) (bool, error) {
 	rewrites := chatRewrites
@@ -58,30 +90,30 @@ func (vendorFields) Apply(ctx Context, body Body) (bool, error) {
 // nameOutputCap moves the output cap under the one name the vendor reads. A name the vendor does
 // not read is refused by one and silently ignored by another, which uncaps the output.
 func nameOutputCap(ctx Context, body Body) (bool, error) {
-	name := upstreamOf(ctx).outputCap
-	if name == asSent {
+	name := upstreamOf(ctx).OutputCap
+	if name == vendor.AsSent {
 		return false, nil
 	}
-	other := maxTokens
-	if name == maxTokens {
-		other = maxCompletionTokens
+	other := vendor.MaxTokens
+	if name == vendor.MaxTokens {
+		other = vendor.MaxCompletionTokens
 	}
 	value, stray := body[other]
 	if !stray {
 		return false, nil
 	}
 	// Sent under both names, the newer one is the caller's word.
-	if _, both := body[name]; !both || other == maxCompletionTokens {
+	if _, both := body[name]; !both || other == vendor.MaxCompletionTokens {
 		body[name] = value
 	}
 	delete(body, other)
 	return true, nil
 }
 
-// untypeCustomTools drops `"type":"custom"` from each tool. Any other type is a tool the vendor
-// runs, and stays.
+// untypeCustomTools drops `"type":"custom"` from each tool. Any other type stays: one the vendor
+// would run on its own side was refused at `route`, from the route's denied_tools, before this ran.
 func untypeCustomTools(ctx Context, body Body) (bool, error) {
-	if !upstreamOf(ctx).untypedTools {
+	if !upstreamOf(ctx).UntypedTools {
 		return false, nil
 	}
 	return eachObject(body, "tools", func(tool map[string]json.RawMessage) bool {
@@ -95,7 +127,7 @@ func untypeCustomTools(ctx Context, body Body) (bool, error) {
 
 // developerAsSystem renames the role of a `developer` message.
 func developerAsSystem(ctx Context, body Body) (bool, error) {
-	if !upstreamOf(ctx).developerAsSystem || !mentions(body, `"developer"`) {
+	if !upstreamOf(ctx).DeveloperAsSystem || !mentions(body, `"developer"`) {
 		return false, nil
 	}
 	return eachObject(body, "messages", func(message map[string]json.RawMessage) bool {
@@ -110,7 +142,7 @@ func developerAsSystem(ctx Context, body Body) (bool, error) {
 // blankReasoningContent gives a past tool-call turn an empty `reasoning_content` when the caller
 // sent none back, which is what most clients do.
 func blankReasoningContent(ctx Context, body Body) (bool, error) {
-	if !upstreamOf(ctx).blankReasoning || isThinkingOff(body) || !mentions(body, `"tool_calls"`) {
+	if !upstreamOf(ctx).BlankReasoning || isThinkingOff(body) || !mentions(body, `"tool_calls"`) {
 		return false, nil
 	}
 	return eachObject(body, "messages", func(message map[string]json.RawMessage) bool {
@@ -127,7 +159,7 @@ func blankReasoningContent(ctx Context, body Body) (bool, error) {
 // blankThinkingBlock is blankReasoningContent on the Anthropic shape: a past `tool_use` turn sent
 // back with no thinking block gets an empty one in front.
 func blankThinkingBlock(ctx Context, body Body) (bool, error) {
-	if !upstreamOf(ctx).blankReasoning || isThinkingOff(body) || !mentions(body, `"tool_use"`) {
+	if !upstreamOf(ctx).BlankReasoning || isThinkingOff(body) || !mentions(body, `"tool_use"`) {
 		return false, nil
 	}
 	return eachObject(body, "messages", func(message map[string]json.RawMessage) bool {
@@ -148,7 +180,7 @@ func blankThinkingBlock(ctx Context, body Body) (bool, error) {
 // asked for reasoning gets the upstream's refusal: the gateway does not choose between the two.
 func unthinkForcedFunction(ctx Context, body Body) (bool, error) {
 	forced := string(body["tool_choice"]) == `"required"` || typeOf(body["tool_choice"]) == "function"
-	if !upstreamOf(ctx).unthinkForcedTool || !forced || said(body, "thinking", "reasoning_effort") {
+	if !upstreamOf(ctx).UnthinkForcedTool || !forced || said(body, "thinking", "reasoning_effort") {
 		return false, nil
 	}
 	body["thinking"] = thinkingDisabled
@@ -159,7 +191,7 @@ func unthinkForcedFunction(ctx Context, body Body) (bool, error) {
 // unthinkForcedTool is unthinkForcedFunction on the Anthropic shape, where only a named tool is
 // refused: `any` is taken.
 func unthinkForcedTool(ctx Context, body Body) (bool, error) {
-	if !upstreamOf(ctx).unthinkForcedTool || typeOf(body["tool_choice"]) != "tool" || said(body, "thinking") {
+	if !upstreamOf(ctx).UnthinkForcedTool || typeOf(body["tool_choice"]) != "tool" || said(body, "thinking") {
 		return false, nil
 	}
 	body["thinking"] = thinkingDisabled
@@ -172,7 +204,7 @@ func unthinkForcedTool(ctx Context, body Body) (bool, error) {
 // ponytail: every model of a flagged vendor must take `"none"`; a per-model switch when one does not.
 func unreasonWithTools(ctx Context, body Body) (bool, error) {
 	var tools []json.RawMessage
-	if !upstreamOf(ctx).unreasonWithTools || said(body, "reasoning_effort") ||
+	if !upstreamOf(ctx).UnreasonWithTools || said(body, "reasoning_effort") ||
 		json.Unmarshal(body["tools"], &tools) != nil || len(tools) == 0 {
 		return false, nil
 	}
@@ -190,7 +222,7 @@ var sampling = []string{"temperature", "top_p", "logprobs", "top_logprobs"}
 // ponytail: every model of a flagged vendor must reason by default; a per-model switch before one
 // that does not is routed, or its temperature is taken from it for nothing.
 func defaultSampling(ctx Context, body Body) (bool, error) {
-	if !upstreamOf(ctx).defaultSampling || string(body["reasoning_effort"]) == `"none"` {
+	if !upstreamOf(ctx).DefaultSampling || string(body["reasoning_effort"]) == `"none"` {
 		return false, nil
 	}
 	changed := false

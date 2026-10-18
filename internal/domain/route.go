@@ -1,5 +1,7 @@
 package domain
 
+import "strings"
+
 // Route is one placement of a model: the vLLM instance's URL plus the internal
 // key to reach it. Mirrors an entry of Redis deploy:<model> (§8A.D).
 type Route struct {
@@ -39,6 +41,11 @@ type Route struct {
 	// unrestricted.
 	InputModalities  []string `json:"input_modalities,omitempty"`
 	OutputModalities []string `json:"output_modalities,omitempty"`
+	// DeniedTools is what this vendor would run on its own side and bill outside the token
+	// counts: a `tools[].type` ("web_search_20250305") or a top-level request field
+	// ("web_search_options"), as the control plane lists them. A request that names one is
+	// refused before the dial (SentTools, Refuses). Empty on every row we run ourselves.
+	DeniedTools []string `json:"denied_tools,omitempty"`
 	// What this upstream answers to, when that is not the id the caller sent. The control plane
 	// owns the mapping. Blank on every route we run ourselves — an engine is started under the
 	// Grove id — and on any route pushed before this field existed, which reads as "send unchanged".
@@ -79,13 +86,18 @@ func (r Route) Keyring() []Credential {
 	return []Credential{{Secret: r.InternalKey}}
 }
 
-// KeyStats is what one credential has answered, lifetime, as the store counts it. OK is every
+// KeyStats is what one credential has answered since the control plane last took it, as the store
+// counts it. OK is every
 // answer that was not the key's fault nor the upstream's — a 2xx, or a 4xx the request earned;
 // Failed is a 5xx or a hop that produced no status. Timestamps are unix seconds.
 type KeyStats struct {
-	Requests        int64 `json:"requests"`
-	OK              int64 `json:"ok"`
-	RateLimited     int64 `json:"rate_limited"`
+	Requests     int64 `json:"requests"`
+	OK           int64 `json:"ok"`
+	RateLimited  int64 `json:"rate_limited"`
+	Unauthorized int64 `json:"unauthorized"`
+	Unpaid       int64 `json:"unpaid"`
+	Forbidden    int64 `json:"forbidden"`
+	// Rejected is the three above together: the one count a reader had before they were split.
 	Rejected        int64 `json:"rejected"`
 	Failed          int64 `json:"failed"`
 	LastUsed        int64 `json:"last_used"`
@@ -99,7 +111,40 @@ func IsKeyFailure(status int) bool { return status == 429 || IsKeyRejected(statu
 
 // IsKeyRejected reports a status that says the credential is dead for this request: unauthorised,
 // unpaid or forbidden. A rate limit is not — that key may be back once the others are spent.
-func IsKeyRejected(status int) bool { return status == 401 || status == 402 || status == 403 }
+func IsKeyRejected(status int) bool { _, ok := RefusedCredential(status); return ok }
+
+// CredentialRefusal is what a 401, 402 or 403 from an upstream means — the gateway's own
+// credential was turned away — and what the client is told instead: nothing the upstream wrote
+// about our account is theirs to read. Class is the KeyStats field it counts under and the
+// access line's reason suffix.
+type CredentialRefusal struct {
+	Class, Message string
+}
+
+// RefusedCredential names the refusal a status carries, if it is one.
+func RefusedCredential(status int) (CredentialRefusal, bool) {
+	switch status {
+	case 401:
+		return CredentialRefusal{"unauthorized", "upstream credential rejected"}, true
+	case 402:
+		return CredentialRefusal{"unpaid", "upstream account unpaid"}, true
+	case 403:
+		return CredentialRefusal{"forbidden", "upstream credential lacks permission"}, true
+	}
+	return CredentialRefusal{}, false
+}
+
+// ClassifyUpstream is the status an upstream's answer means, which is not always the one it
+// sent: an exhausted account is OpenAI's 429 `insufficient_quota` and Anthropic's 400 "credit
+// balance", and reads here as the 402 it is. Anything else means its own status.
+func ClassifyUpstream(status int, body []byte) int {
+	lower := strings.ToLower(string(body))
+	if (status == 429 && strings.Contains(lower, "insufficient_quota")) ||
+		(status == 400 && strings.Contains(lower, "credit balance")) {
+		return 402
+	}
+	return status
+}
 
 // MaxFallbacks is how many other models one request may name to fall back on: each can cost a dial.
 const MaxFallbacks = 3
@@ -112,11 +157,12 @@ func IsModelFailure(status int) bool { return status >= 500 || IsKeyFailure(stat
 
 // KeyStatusClass is the KeyStats bucket an attempt's status lands in, by the field's JSON name.
 func KeyStatusClass(status int) string {
+	if refusal, ok := RefusedCredential(status); ok {
+		return refusal.Class
+	}
 	switch {
 	case status == 429:
 		return "rate_limited"
-	case IsKeyRejected(status):
-		return "rejected"
 	case status >= 200 && status < 500:
 		return "ok"
 	default:
@@ -140,6 +186,20 @@ func (r Route) IsIngress() bool { return r.Kind == "ingress" }
 // hop then leaves our network, which is what makes its credential and its certificate different in
 // kind from an engine's.
 func (r Route) IsProvider() bool { return r.Kind == "provider" }
+
+// MixedKinds reports whether a table holds both a vendor's rows and ours. A model is one kind: its
+// whole table goes to the vendor router or the engine router, and a mix has no router to go to.
+func MixedKinds(table []Route) bool {
+	var vendor, ours bool
+	for _, r := range table {
+		if r.IsProvider() {
+			vendor = true
+		} else {
+			ours = true
+		}
+	}
+	return vendor && ours
+}
 
 // HasRoom reports whether this engine can take another request. A placement with no
 // --max-num-seqs set has no number to hold it to, so it is never held back.
