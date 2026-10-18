@@ -10,9 +10,9 @@ func set(models ...string) map[string]bool {
 	return m
 }
 
-// key builds a live key record in a group.
+// key builds a live, funded key record in a group.
 func key(group string) KeyRecord {
-	return KeyRecord{Status: "active", Groups: ModelSet(group)}
+	return KeyRecord{Status: "active", Groups: ModelSet(group), Budget: 1_000_000_000_000}
 }
 
 func TestEvaluate(t *testing.T) {
@@ -89,12 +89,12 @@ func TestEvaluateCreditPrecedence(t *testing.T) {
 	}
 }
 
-// The prepaid gate is this box's own view of the key's spend against its cap. The control plane's
+// The cap gate is this box's own view of the key's spend against its cap. The control plane's
 // flag — the team's balance is gone — refuses alike, whatever this box's counter says.
-func TestEvaluateThePrepaidCap(t *testing.T) {
+func TestEvaluateTheCap(t *testing.T) {
 	tier := GroupRecord{Models: set("a")}
-	prepaid := func(spent, budget int64) KeyRecord {
-		return KeyRecord{Status: "active", Groups: ModelSet("tier"), Prepaid: true, Spent: spent, Budget: budget}
+	capped := func(spent, budget int64) KeyRecord {
+		return KeyRecord{Status: "active", Groups: ModelSet("tier"), Spent: spent, Budget: budget}
 	}
 	cases := []struct {
 		name   string
@@ -102,12 +102,11 @@ func TestEvaluateThePrepaidCap(t *testing.T) {
 		status int
 		reason string
 	}{
-		{"funded admits", prepaid(999, 1000), 200, ""},
-		{"spent to the ceiling", prepaid(1000, 1000), 402, "credit balance exhausted"},
-		{"overspent", prepaid(1500, 1000), 402, "credit balance exhausted"},
-		{"no cap pushed", prepaid(0, 0), 402, "credit balance exhausted"},
-		{"not prepaid ignores the cap", KeyRecord{Status: "active", Groups: ModelSet("tier"), Spent: 1500, Budget: 1000}, 200, ""},
-		{"limited refuses a funded key", KeyRecord{Status: "active", Groups: ModelSet("tier"), Limited: true, Prepaid: true, Budget: 1000}, 402, "credit balance exhausted"},
+		{"funded admits", capped(999, 1000), 200, ""},
+		{"spent to the ceiling", capped(1000, 1000), 402, "credit balance exhausted"},
+		{"overspent", capped(1500, 1000), 402, "credit balance exhausted"},
+		{"no cap pushed", capped(0, 0), 402, "credit balance exhausted"},
+		{"limited refuses a funded key", KeyRecord{Status: "active", Groups: ModelSet("tier"), Limited: true, Budget: 1000}, 402, "credit balance exhausted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,11 +146,11 @@ func TestGeographyDenial(t *testing.T) {
 // The team's record decides what was the team's on the key — the verdicts and the flags — and its
 // limits stand in only where the key names none of its own.
 func TestUnderTakesTheTeamsVerdicts(t *testing.T) {
-	stale := KeyRecord{Status: "active", Limited: true, Prepaid: false, LogPayloads: false, Budget: 1000}
-	team := TeamRecord{Limited: false, Prepaid: true, LogPayloads: true, Limits: []Limit{{Metric: "requests", Window: "1m", Value: 5}}}
+	stale := KeyRecord{Status: "active", Limited: true, LogPayloads: false, Budget: 1000}
+	team := TeamRecord{Limited: false, LogPayloads: true, Limits: []Limit{{Metric: "requests", Window: "1m", Value: 5}}}
 
 	got := stale.Under(team)
-	if got.Limited || !got.Prepaid || !got.LogPayloads || got.Budget != 1000 {
+	if got.Limited || !got.LogPayloads || got.Budget != 1000 {
 		t.Errorf("under team = %+v, want the team's flags over the key's and the key's budget kept", got)
 	}
 	if len(got.Limits) != 1 || got.Limits[0].Value != 5 {

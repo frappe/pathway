@@ -21,7 +21,7 @@ func serviceOver(store *memory.Store) *Service {
 
 // liveKey is an active key in the named groups.
 func liveKey(groups string) domain.KeyRecord {
-	return domain.KeyRecord{Status: "active", Team: "T-1", KeyPrefix: "abc123", Groups: domain.ModelSet(groups)}
+	return domain.KeyRecord{Status: "active", Team: "T-1", KeyPrefix: "abc123", Groups: domain.ModelSet(groups), Budget: 1_000_000_000_000}
 }
 
 // The happy path is two hops — key → group — and the whole reason the group is its own record.

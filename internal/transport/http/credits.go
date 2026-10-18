@@ -31,17 +31,13 @@ type creditsBody struct {
 
 // handleCredits answers what the key has left on this store this month — the figure the quota
 // stage gates on. Its own cap and nothing of the team's, so every key may read it. An exhausted key still
-// reads it: that is when it is asked. A free one is never charged, so it reads zeros.
+// reads it: that is when it is asked.
 func (s *Server) handleCredits(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.identifyCaller(w, r)
 	if !ok {
 		return
 	}
 	key := identity.Key
-	if !key.Prepaid {
-		respond.JSON(w, creditsBody{})
-		return
-	}
 	respond.JSON(w, creditsBody{
 		Balance: usd(key.Budget - key.Spent),
 		Spent:   usd(key.Spent),

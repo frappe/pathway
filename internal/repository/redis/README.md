@@ -29,8 +29,8 @@ would stay missing until its section changed; only gateway-owned keys expire
 
 ```
 key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
-                           geography  prepaid  budget  spent:<YYYY-MM>  limits
-team:<Central Team>        limited  prepaid  log_payloads  limits
+                           geography  budget  spent:<YYYY-MM>  limits
+team:<Central Team>        limited  log_payloads  limits
 model_group:<Model Group>  models
 usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
@@ -46,18 +46,18 @@ usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  tota
 to everything, which is the fail-closed default. `group` holds every group the key is in, so a
 name containing a comma would split — Grove refuses one. `team` is the Central Team the key bills
 to: the cache-salt namespace, the payload log's join field, and the record whose `limited`,
-`prepaid`, `log_payloads` and default `limits` are applied onto the key at resolve. The same four
+`log_payloads` and default `limits` are applied onto the key at resolve. The same three
 fields on the key record are what a control plane from before teams wrote, read only while the
 store holds no team record.
 
-`prepaid` / `budget` / `spent:<YYYY-MM>` are the credit gate. `budget` is the key's monthly cap,
-nano-USD; Grove keeps Σ caps within the team's tier limit. `spent:<YYYY-MM>` is this Redis's own
-counter for the UTC month: every metered request of a prepaid key moves this month's field, a push
+`budget` / `spent:<YYYY-MM>` are the credit gate. `budget` is the key's monthly cap, nano-USD, 0
+until Grove sets one; Grove keeps Σ caps within the team's tier limit. `spent:<YYYY-MM>` is this
+Redis's own counter for the UTC month: every metered request moves this month's field, a push
 never does (the push is an HSET of the fields it names), and only `spend-adjust` corrects it. A new
 month is a field not yet written, which reads 0, so nothing resets and nothing runs at midnight;
 earlier months' fields stay behind (about 20 bytes a key a month) and nothing reads them. This
 box's balance for the key is `budget − spent`; Grove keeps the team's own from the pulled usage and
-audits the two every pull. `prepaid && spent >= budget` → 402 `credit balance
+audits the two every pull. `spent >= budget` → 402 `credit balance
 exhausted` (`billing_error` on the Anthropic surface), at `quota` before the body is read, and
 `/v1/models` refuses through the same `Evaluate`. `limited` is the control plane's verdict on the
 team and refuses alike. A key pinned by `geography` lives on one store, so its gate is exact —

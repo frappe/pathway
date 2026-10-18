@@ -40,7 +40,7 @@ func TestAccrueAgainstRealRedis(t *testing.T) {
 	ctx := context.Background()
 	bucket := domain.BucketOf("aa")
 	push := repository.StatePush{Keys: map[string]repository.KeyBucket{bucket: {
-		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Prepaid: true, Budget: 1_000}},
+		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Budget: 1_000}},
 	}}}
 	if _, err := state.Apply(ctx, push); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -68,8 +68,8 @@ func TestAccrueAgainstRealRedis(t *testing.T) {
 		}
 	}
 	holder, _, err := client.Store().Keys.Resolve(ctx, "aa")
-	if rec := holder.Key; err != nil || !rec.Prepaid || rec.Budget != 1_000 || rec.Spent != 500 {
-		t.Errorf("Resolve = %+v, %v; want prepaid, budget 1000, spent 500", rec, err)
+	if rec := holder.Key; err != nil || rec.Budget != 1_000 || rec.Spent != 500 {
+		t.Errorf("Resolve = %+v, %v; want budget 1000, spent 500", rec, err)
 	}
 
 	if _, err := state.Apply(ctx, push); err != nil {
@@ -88,7 +88,7 @@ func TestSpentIsThisMonthsOnRealRedis(t *testing.T) {
 	client.rdb.HSet(ctx, "key:aa", "spent", "900", "spent:2000-01", "800")
 	bucket := domain.BucketOf("aa")
 	push := repository.StatePush{Keys: map[string]repository.KeyBucket{bucket: {
-		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Prepaid: true, Budget: 1_000}},
+		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Budget: 1_000}},
 	}}}
 	if _, err := state.Apply(ctx, push); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -304,7 +304,7 @@ func TestReplayLandsOncePerRequestAgainstRealRedis(t *testing.T) {
 	ctx := context.Background()
 	bucket := domain.BucketOf("aa")
 	push := repository.StatePush{Keys: map[string]repository.KeyBucket{bucket: {
-		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Prepaid: true, Budget: 1_000}},
+		Hash: "kh", Records: []repository.KeyUpsert{{MeterID: "aa", Prefix: "abc", Status: "active", Budget: 1_000}},
 	}}}
 	if _, err := state.Apply(ctx, push); err != nil {
 		t.Fatalf("Apply: %v", err)

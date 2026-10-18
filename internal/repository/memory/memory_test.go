@@ -22,7 +22,7 @@ func accrual(prefix, key string, cost int64) repository.Accrual {
 // own view of the balance for the drain to report.
 func TestAccrueMovesCountersAndSpendTogether(t *testing.T) {
 	store := New()
-	store.Keys["k1"] = domain.KeyRecord{Prepaid: true, Budget: 1_000, Spent: 100}
+	store.Keys["k1"] = domain.KeyRecord{Budget: 1_000, Spent: 100}
 	usage := store.Repositories().Usage
 	ctx := context.Background()
 
@@ -48,8 +48,8 @@ func TestAccrueMovesCountersAndSpendTogether(t *testing.T) {
 // read or an accrue touches it first, and an adjustment lands on this month.
 func TestSpentStartsEachMonthAtZero(t *testing.T) {
 	store := New()
-	store.Keys["k1"] = domain.KeyRecord{Prepaid: true, Budget: 1_000, Spent: 900}
-	store.Keys["k2"] = domain.KeyRecord{Prepaid: true, Budget: 1_000, Spent: 900}
+	store.Keys["k1"] = domain.KeyRecord{Budget: 1_000, Spent: 900}
+	store.Keys["k2"] = domain.KeyRecord{Budget: 1_000, Spent: 900}
 	store.SpentMonth["k1"], store.SpentMonth["k2"] = "2000-01", "2000-01"
 	repos := store.Repositories()
 	ctx := context.Background()
@@ -162,15 +162,15 @@ func TestAPushLeavesSpentAlone(t *testing.T) {
 	bucket := domain.BucketOf("k1")
 	_, err := store.Repositories().State.Apply(context.Background(), repository.StatePush{
 		Keys: map[string]repository.KeyBucket{bucket: {Hash: "kh", Records: []repository.KeyUpsert{
-			{MeterID: "k1", Prepaid: true, Budget: 5_000},
+			{MeterID: "k1", Budget: 5_000},
 		}}},
 	})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	rec := store.Keys["k1"]
-	if !rec.Prepaid || rec.Budget != 5_000 || rec.Spent != 700 {
-		t.Errorf("key = %+v, want prepaid, budget 5000, spent 700", rec)
+	if rec.Budget != 5_000 || rec.Spent != 700 {
+		t.Errorf("key = %+v, want budget 5000, spent 700", rec)
 	}
 }
 
@@ -333,7 +333,7 @@ func TestATeamPushLandsPrunesItsBucketAndResolvesWithItsKey(t *testing.T) {
 	}
 	counts, err := store.Repositories().State.Apply(context.Background(), repository.StatePush{
 		Teams: map[string]repository.TeamBucket{bucket: {Hash: "th", Records: []repository.TeamUpsert{
-			{Team: "T-1", Limited: true, Prepaid: true, LogPayloads: true, Limits: "requests:1m:5"},
+			{Team: "T-1", Limited: true, LogPayloads: true, Limits: "requests:1m:5"},
 		}}},
 	})
 	if err != nil || counts.Teams != 1 {

@@ -30,9 +30,8 @@ type adminKey struct {
 	// LogPayloads opts this key's prompts and outputs into the payload log. Absent decodes false — off.
 	LogPayloads bool   `json:"log_payloads"`
 	Geography   string `json:"geography"` // blank = unpinned
-	// Prepaid gates this key on Budget, its cap in nano-USD. Absent: no gate.
-	Prepaid bool  `json:"prepaid"`
-	Budget  int64 `json:"budget"`
+	// Budget is the key's monthly cap in nano-USD, what it is gated on. Absent: 0, refused.
+	Budget int64 `json:"budget"`
 	// Limits is the key's rate limits, a comma list of metric:window:value; "" = none.
 	Limits string `json:"limits"`
 }
@@ -46,7 +45,7 @@ func (k adminKey) upsert() (repository.KeyUpsert, error) {
 	return repository.KeyUpsert{
 		MeterID: k.KeyHash, Prefix: k.Prefix, Team: k.Team, Status: k.Status, Groups: k.Group,
 		Allow: k.Allow, Deny: k.Deny, Limited: k.Limited, LogPayloads: k.LogPayloads,
-		Geography: k.Geography, Prepaid: k.Prepaid, Budget: k.Budget, Limits: k.Limits,
+		Geography: k.Geography, Budget: k.Budget, Limits: k.Limits,
 	}, nil
 }
 
@@ -72,7 +71,6 @@ type adminGroup struct {
 type adminTeam struct {
 	Team    string `json:"team"` // Central Team doc name — the record id
 	Limited bool   `json:"limited"`
-	Prepaid bool   `json:"prepaid"`
 	// LogPayloads opts the team's keys' prompts and outputs into the payload log. Absent: off.
 	LogPayloads bool `json:"log_payloads"`
 	// Limits is what a key with none of its own runs under, a comma list of metric:window:value.
@@ -85,7 +83,7 @@ func (t adminTeam) upsert() (repository.TeamUpsert, error) {
 		return repository.TeamUpsert{}, fmt.Errorf("team %s: %w", t.Team, err)
 	}
 	return repository.TeamUpsert{
-		Team: t.Team, Limited: t.Limited, Prepaid: t.Prepaid, LogPayloads: t.LogPayloads, Limits: t.Limits,
+		Team: t.Team, Limited: t.Limited, LogPayloads: t.LogPayloads, Limits: t.Limits,
 	}, nil
 }
 

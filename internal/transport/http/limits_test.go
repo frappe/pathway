@@ -79,7 +79,7 @@ func TestARequestLimitRefusesPastItsCeiling(t *testing.T) {
 }
 
 // Tokens are known only after the answer: the request that crosses the limit completes, and the
-// next is refused. The key is not prepaid — a limit is the only gate a free team has.
+// next is refused. The key is far from its cap — the limit is the only gate that fires.
 func TestATokenLimitRefusesOnceADebitCrossesIt(t *testing.T) {
 	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	f := limitedFixture(t, "total_tokens:1h:200", &clock)

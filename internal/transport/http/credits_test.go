@@ -21,19 +21,19 @@ func (f *fixture) withKey(edit func(*domain.KeyRecord)) {
 	f.store.Keys[id] = rec
 }
 
-// The prepaid gate through the chain: refused at quota, before the body is read, in the shape
-// of the surface asked; the control plane's flag refuses alike.
-func TestThePrepaidGate(t *testing.T) {
+// The cap gate through the chain: refused at quota, before the body is read, in the shape of the
+// surface asked; the control plane's flag refuses alike.
+func TestTheCapGate(t *testing.T) {
 	cases := []struct {
 		name   string
 		edit   func(*domain.KeyRecord)
 		status int
 		reason string
 	}{
-		{"funded admits", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1000, 999 }, 200, ""},
-		{"exhausted", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1000, 1000 }, 402, "credit balance exhausted"},
-		{"not prepaid ignores the cap", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 5000 }, 200, ""},
-		{"limited refuses a funded key", func(k *domain.KeyRecord) { k.Limited, k.Prepaid, k.Budget = true, true, 1000 }, 402, "credit balance exhausted"},
+		{"funded admits", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 999 }, 200, ""},
+		{"exhausted", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 1000 }, 402, "credit balance exhausted"},
+		{"no cap pushed", func(k *domain.KeyRecord) { k.Budget = 0 }, 402, "credit balance exhausted"},
+		{"limited refuses a funded key", func(k *domain.KeyRecord) { k.Limited, k.Budget = true, 1000 }, 402, "credit balance exhausted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,9 +65,9 @@ func TestThePrepaidGate(t *testing.T) {
 }
 
 // Under /anthropic the refusal takes the Anthropic envelope, like every other denial.
-func TestThePrepaidGateSpeaksAnthropic(t *testing.T) {
+func TestTheCapGateSpeaksAnthropic(t *testing.T) {
 	f := providerFixtureAnswering(t, jsonEngine(anthropicMessage))
-	f.withKey(func(k *domain.KeyRecord) { k.Prepaid = true })
+	f.withKey(func(k *domain.KeyRecord) { k.Spent = k.Budget })
 
 	resp := f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16,"messages":[]}`)
 	if resp.Code != http.StatusPaymentRequired {
@@ -102,7 +102,7 @@ func counters(t *testing.T) domain.CounterTable {
 // request sees the new balance — the gate is exact within one store.
 func TestAServedRequestSpendsTheCap(t *testing.T) {
 	f := newFixture(t, jsonEngine(`{`+usageObject+`}`))
-	f.withKey(func(k *domain.KeyRecord) { k.Prepaid, k.Budget = true, 400_000 })
+	f.withKey(func(k *domain.KeyRecord) { k.Budget = 400_000 })
 	f.store.Routes["qwen3-4b"][0].Pricing = &domain.Pricing{
 		ID: "mp1", Rates: map[string]int64{"prompt_tokens": 3e9, "cached_tokens": 3e8, "completion_tokens": 15e9},
 		Counters: counters(t),
@@ -133,22 +133,22 @@ func TestAServedRequestSpendsTheCap(t *testing.T) {
 	}
 }
 
-// The keys section of a state push, as the control plane sends it: prepaid and the cap land,
-// spent — this box's own counter, never on the wire — does not move.
+// The keys section of a state push, as the control plane sends it: the cap lands, spent — this
+// box's own counter, never on the wire — does not move.
 func TestAKeysPushCarriesTheCapAndLeavesSpentAlone(t *testing.T) {
 	store := memory.New()
 	store.Keys["aa"] = domain.KeyRecord{Spent: 700}
 	handler := adminFixture(t, store)
 	body := fmt.Sprintf(`{"keys": {"buckets": {"%s": {"hash": "kh", "records": [
 		{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "group": "acme",
-		 "prepaid": true, "budget": 5000000}]}}}}`,
+		 "budget": 5000000}]}}}}`,
 		domain.BucketOf("aa"))
 	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body); w.Code != http.StatusOK {
 		t.Fatalf("POST state = %d: %s", w.Code, w.Body)
 	}
 	rec := store.Keys["aa"]
-	if !rec.Prepaid || rec.Budget != 5_000_000 || rec.Spent != 700 || !rec.Groups["acme"] || rec.Team != "T-1" {
-		t.Errorf("key = %+v, want prepaid, budget 5000000, spent 700, in acme, team T-1", rec)
+	if rec.Budget != 5_000_000 || rec.Spent != 700 || !rec.Groups["acme"] || rec.Team != "T-1" {
+		t.Errorf("key = %+v, want budget 5000000, spent 700, in acme, team T-1", rec)
 	}
 }
 
@@ -162,14 +162,14 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 		status    int
 		want      string
 	}{
-		{"prepaid", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 15_750_000_000, 3_250_000_000 },
+		{"funded", "active", func(k *domain.KeyRecord) { k.Budget, k.Spent = 15_750_000_000, 3_250_000_000 },
 			200, `{"balance":12.50,"spent":3.25}`},
-		{"overspent still reads", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1_000_000_000, 1_500_000_000 },
+		{"overspent still reads", "active", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1_000_000_000, 1_500_000_000 },
 			200, `{"balance":-0.50,"spent":1.50}`},
-		{"rounded to the cent", "active", func(k *domain.KeyRecord) { k.Prepaid, k.Budget, k.Spent = true, 1_000_000_000, 123_456_789 },
+		{"rounded to the cent", "active", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1_000_000_000, 123_456_789 },
 			200, `{"balance":0.88,"spent":0.12}`},
-		{"free", "active", func(*domain.KeyRecord) {}, 200, `{"balance":0.00,"spent":0.00}`},
-		{"revoked key", "revoked", func(k *domain.KeyRecord) { k.Prepaid, k.Budget = true, 1_000_000_000 }, 401, "unknown or revoked api key"},
+		{"no cap yet", "active", func(k *domain.KeyRecord) { k.Budget = 0 }, 200, `{"balance":0.00,"spent":0.00}`},
+		{"revoked key", "revoked", func(k *domain.KeyRecord) { k.Budget = 1_000_000_000 }, 401, "unknown or revoked api key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -190,8 +190,8 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 	}
 }
 
-// The team record gates the keys it owns: its verdict, its prepaid flag and nothing of the key's
-// own copies — a stale `limited` on the key is not read once the team record is there.
+// The team record gates the keys it owns: its verdict and nothing of the key's own copies — a
+// stale `limited` on the key is not read once the team record is there.
 func TestTheTeamRecordGatesItsKeys(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -199,10 +199,9 @@ func TestTheTeamRecordGatesItsKeys(t *testing.T) {
 		team   domain.TeamRecord
 		status int
 	}{
-		{"a limited team refuses a funded key", func(k *domain.KeyRecord) { k.Budget = 1000 }, domain.TeamRecord{Limited: true, Prepaid: true}, 402},
-		{"a prepaid team gates the key on its cap", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 1000 }, domain.TeamRecord{Prepaid: true}, 402},
-		{"a funded key under a prepaid team admits", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 999 }, domain.TeamRecord{Prepaid: true}, 200},
-		{"a free team ignores the cap", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 5000 }, domain.TeamRecord{}, 200},
+		{"a limited team refuses a funded key", func(k *domain.KeyRecord) { k.Budget = 1000 }, domain.TeamRecord{Limited: true}, 402},
+		{"the key is gated on its own cap", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 1000 }, domain.TeamRecord{}, 402},
+		{"a funded key admits", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 999 }, domain.TeamRecord{}, 200},
 		{"the team record wins over a stale flag on the key", func(k *domain.KeyRecord) { k.Limited = true }, domain.TeamRecord{}, 200},
 	}
 	for _, tc := range cases {

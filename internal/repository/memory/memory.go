@@ -93,7 +93,7 @@ func (s *Store) putKey(rec repository.KeyUpsert) {
 		Status: rec.Status, Team: rec.Team, KeyPrefix: rec.Prefix, Groups: domain.ModelSet(rec.Groups),
 		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
-		Prepaid: rec.Prepaid, Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent,
+		Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent,
 		Limits: limits,
 	}
 }
@@ -101,7 +101,7 @@ func (s *Store) putKey(rec repository.KeyUpsert) {
 func (s *Store) putTeam(rec repository.TeamUpsert) {
 	limits, _ := domain.ParseLimits(rec.Limits) // the push handler already refused one that does not read
 	s.Teams[rec.Team] = domain.TeamRecord{
-		Limited: rec.Limited, Prepaid: rec.Prepaid, LogPayloads: rec.LogPayloads, Limits: limits,
+		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Limits: limits,
 	}
 }
 

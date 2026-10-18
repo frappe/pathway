@@ -9,7 +9,7 @@
 | `POST /v1/*` | nothing: a 404 naming the base the path belongs under (`/openai/v1/chat/completions`, `/anthropic/v1/messages`) |
 | `GET /openai/v1/models` | answered here, never forwarded — an engine only knows its own model. With a key: what that key may use through the OpenAI surface. Without one: 401 |
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
-| `GET /v1/credits` | answered here: what the key has left of its own monthly cap on this store this month, in US dollars to the cent — `{"balance", "spent"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it. A key of a free team reads zeros |
+| `GET /v1/credits` | answered here: what the key has left of its own monthly cap on this store this month, in US dollars to the cent — `{"balance", "spent"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
 | `GET /healthz` | 200, or 503 while draining or in maintenance |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |

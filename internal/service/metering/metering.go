@@ -28,10 +28,8 @@ type Report struct {
 	// UsageStart is the first usage line of a response that carried more than one. May be empty.
 	UsageStart string
 	// What it cost: the pricing that charges it (nil = unpriced), and the cap the key's balance
-	// is reported against. Only a prepaid key is charged: a free one's spend never moves, so a
-	// team turned prepaid later starts at what it loads, not in debt for what was free.
+	// is reported against.
 	Pricing *domain.Pricing
-	Prepaid bool
 	Budget  int64
 	// Limits is the key's rate limits: the answer's tokens are debited from the token ones.
 	Limits []domain.Limit
@@ -96,10 +94,9 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 			s.log.Error("pricing carries no counter table; nothing priced", "pricing", rep.Pricing.ID, "model", rep.Model)
 		}
 	}
-	cost := PricedFields(fields, rep.Pricing, rep.Prepaid)
-	accrual := repository.Accrual{ID: rep.RequestID, Prefix: rep.Prefix, Fields: fields, Cost: cost}
-	if rep.Prepaid {
-		accrual.Key, accrual.Budget = rep.MeterID, rep.Budget
+	cost := PricedFields(fields, rep.Pricing)
+	accrual := repository.Accrual{
+		ID: rep.RequestID, Prefix: rep.Prefix, Fields: fields, Cost: cost, Key: rep.MeterID, Budget: rep.Budget,
 	}
 	if err := s.usage.Accrue(ctx, accrual); err != nil {
 		s.log.Error("usage not recorded; spooled", "prefix", rep.Prefix, "model", rep.Model, "err", err)
@@ -210,18 +207,14 @@ func landed(buckets map[string]int64, table domain.CounterTable, prompt int64) m
 // PricedFields prices the request and tags what it priced with the pricing's id: each priced
 // counter again as p:<id>:<counter>, and the cost as p:<id>:cost beside the flat one. The pull prices
 // each p:<id> group with that same pricing's table, so a switch mid-drain never reads as drift.
-// A request that is not charged is tagged f: instead, so the pull bills exactly what moved a spend.
 // → the cost in nano-USD.
-func PricedFields(fields map[string]int64, pricing *domain.Pricing, charged bool) int64 {
+func PricedFields(fields map[string]int64, pricing *domain.Pricing) int64 {
 	if pricing == nil || pricing.ID == "" {
 		return 0
 	}
 	table := pricing.Table()
 	cost := table.Cost(fields, pricing.Rates)
-	tag := "f:" + pricing.ID + ":"
-	if charged {
-		tag = "p:" + pricing.ID + ":"
-	}
+	tag := "p:" + pricing.ID + ":"
 	for _, counter := range table {
 		if n := fields[counter.Name]; n > 0 {
 			fields[tag+counter.Name] = n

@@ -168,7 +168,7 @@ func TestUsageFieldsCountsAudioInsideThePrompt(t *testing.T) {
 					t.Errorf("%s = %d, want %d", field, fields[field], want)
 				}
 			}
-			if cost := PricedFields(fields, pricing, true); cost != tc.cost {
+			if cost := PricedFields(fields, pricing); cost != tc.cost {
 				t.Errorf("cost = %d, want %d", cost, tc.cost)
 			}
 		})
@@ -182,7 +182,7 @@ func TestAudioOutputIsChargedApartFromTheCompletion(t *testing.T) {
 		`"completion_tokens_details":{"audio_tokens":5}}}`
 	pricing := priced(t, "a1", map[string]int64{"completion_tokens": 15e9, "completion_audio_tokens": 80e9})
 	fields, _ := UsageFields(Report{Model: "gpt-audio", Usage: usage, Pricing: pricing})
-	if cost := PricedFields(fields, pricing, true); cost != 15*15000+5*80000 {
+	if cost := PricedFields(fields, pricing); cost != 15*15000+5*80000 {
 		t.Errorf("cost = %d, want 625000", cost)
 	}
 	for field, want := range map[string]int64{
@@ -236,7 +236,7 @@ func TestALongRequestKeepsItsOneRatePartsWithTheBaseCounters(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pricing := priced(t, "p", tc.rates)
 			fields, trusted := UsageFields(Report{Model: "m", Usage: tc.usage, Pricing: pricing})
-			if cost := PricedFields(fields, pricing, true); !trusted || cost != tc.cost {
+			if cost := PricedFields(fields, pricing); !trusted || cost != tc.cost {
 				t.Errorf("trusted %v, cost = %d, want %d", trusted, cost, tc.cost)
 			}
 			for field, want := range tc.want {
@@ -270,11 +270,11 @@ func TestCacheBucketsBeyondThePromptBillAsPlain(t *testing.T) {
 // them with the same table.
 func TestRecordAccruesCostAndSpend(t *testing.T) {
 	store := memory.New()
-	store.Keys["k1"] = domain.KeyRecord{Prepaid: true, Budget: 10_000_000}
+	store.Keys["k1"] = domain.KeyRecord{Budget: 10_000_000}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 
 	svc.Record(context.Background(), Report{
-		Prefix: "abc", Model: "qwen3-4b", Usage: openAIUsage, MeterID: "k1", Prepaid: true, Budget: 10_000_000, UpstreamStatus: "200",
+		Prefix: "abc", Model: "qwen3-4b", Usage: openAIUsage, MeterID: "k1", Budget: 10_000_000, UpstreamStatus: "200",
 		// $3/Mtok plain, $0.30/Mtok cached, $15/Mtok completion, in nano-USD per Mtok.
 		Pricing: priced(t, "mp1", map[string]int64{"prompt_tokens": 3e9, "cached_tokens": 3e8, "completion_tokens": 15e9}),
 	})
@@ -304,9 +304,9 @@ func TestRecordAccruesCostAndSpend(t *testing.T) {
 // spend is still reported — a request on an unpriced model is not an invisible one.
 func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 	store := memory.New()
-	store.Keys["k1"] = domain.KeyRecord{Prepaid: true}
+	store.Keys["k1"] = domain.KeyRecord{}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
-	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: openAIUsage, MeterID: "k1", Prepaid: true, UpstreamStatus: "200"})
+	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: openAIUsage, MeterID: "k1", UpstreamStatus: "200"})
 
 	usage := store.UsageOf("abc")
 	if _, present := usage["cost"]; present {
@@ -315,34 +315,6 @@ func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 	spent, reported := usage["key_spent"]
 	if usage["total_tokens"] != 120 || !reported || spent != 0 {
 		t.Errorf("usage = %v", usage)
-	}
-}
-
-// A free holder's usage is counted and priced like anyone's, but tagged f: not p:, their spend
-// never moves and the drain carries no balance for them: there is nothing to gate and nothing owed.
-func TestAFreeHoldersSpendNeverMoves(t *testing.T) {
-	store := memory.New()
-	store.Keys["k1"] = domain.KeyRecord{Spent: 40}
-	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
-	svc.Record(context.Background(), Report{
-		Prefix: "abc", Model: "m", Usage: openAIUsage, MeterID: "k1", UpstreamStatus: "200",
-		Pricing: priced(t, "mp1", map[string]int64{"completion_tokens": 15e9}),
-	})
-
-	usage := store.UsageOf("abc")
-	if usage["f:mp1:cost"] != 20*15000 || usage["f:mp1:completion_tokens"] != 20 {
-		t.Errorf("a free holder's usage is still priced: usage = %v", usage)
-	}
-	if _, present := usage["p:mp1:cost"]; present {
-		t.Error("a free holder's usage is tagged as charged")
-	}
-	for _, field := range []string{"key_spent", "key_balance"} {
-		if _, present := usage[field]; present {
-			t.Errorf("%s reported for a free holder", field)
-		}
-	}
-	if store.Keys["k1"].Spent != 40 {
-		t.Errorf("spent = %d, want it left at 40", store.Keys["k1"].Spent)
 	}
 }
 
@@ -460,7 +432,7 @@ func TestAPromptAbove272kIsCountedAndChargedApart(t *testing.T) {
 		"prompt_tokens_above_272k": 5e9, "cached_tokens_above_272k": 0.5e9, "completion_tokens_above_272k": 22.5e9,
 	})
 	fields, _ := UsageFields(Report{Model: "gpt", Usage: longUsage, Pricing: pricing})
-	if cost := PricedFields(fields, pricing, true); cost != 262_500_000 {
+	if cost := PricedFields(fields, pricing); cost != 262_500_000 {
 		t.Errorf("cost = %d, want 262500000", cost)
 	}
 	for field, want := range map[string]int64{
@@ -490,7 +462,7 @@ func TestAbove272kIsChargedAtTheBaseRatesWithoutItsOwn(t *testing.T) {
 		"prompt_tokens": 2.5e9, "cached_tokens": 0.25e9, "completion_tokens": 15e9,
 	})
 	fields, _ := UsageFields(Report{Model: "gpt", Usage: longUsage, Pricing: pricing})
-	if cost := PricedFields(fields, pricing, true); cost != 135_000_000 {
+	if cost := PricedFields(fields, pricing); cost != 135_000_000 {
 		t.Errorf("cost = %d, want 135000000", cost)
 	}
 	if fields["p:base:prompt_tokens_above_272k"] != 300000 || fields["p:base:cached_tokens_above_272k"] != 280000 {
@@ -552,7 +524,7 @@ func TestAPromptAbove272kCountsItsCacheWritesApart(t *testing.T) {
 		"cache_write_tokens_above_272k": 6.25e9, "completion_tokens_above_272k": 22.5e9,
 	})
 	fields, trusted := UsageFields(Report{Model: "gpt", Usage: usage, Pricing: pricing})
-	if cost := PricedFields(fields, pricing, true); !trusted || cost != 722_500_000 {
+	if cost := PricedFields(fields, pricing); !trusted || cost != 722_500_000 {
 		t.Errorf("trusted %v, cost = %d, want 722500000", trusted, cost)
 	}
 	for field, want := range map[string]int64{
@@ -608,7 +580,7 @@ func TestThePushedTableDecidesTheBrackets(t *testing.T) {
 	}
 	// 100k plain at $8, 450k cached at $0.80, 30k writes at the base $2.50 (no 500k row), 20k hour
 	// writes with no rate; prompt_tokens' own 20k is all parts, so it charges nothing.
-	if cost := PricedFields(fields, pricing, true); cost != 800_000_000+360_000_000+75_000_000 {
+	if cost := PricedFields(fields, pricing); cost != 800_000_000+360_000_000+75_000_000 {
 		t.Errorf("cost = %d", cost)
 	}
 	if fields["p:br:prompt_tokens_above_500k"] != 580000 || fields["p:br:cache_write_1h_tokens"] != 20000 {
@@ -634,7 +606,7 @@ func TestAPushedThresholdReplacesTheDefault(t *testing.T) {
 	if _, present := fields["prompt_tokens_above_272k"]; present {
 		t.Error("the default table's row was used")
 	}
-	if cost := PricedFields(fields, pricing, true); cost != 500_000_000 {
+	if cost := PricedFields(fields, pricing); cost != 500_000_000 {
 		t.Errorf("cost = %d, want 500000000", cost)
 	}
 }

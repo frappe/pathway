@@ -13,7 +13,7 @@ import (
 func spoolFixture(t *testing.T, maxBytes int64) (*memory.Store, *Service, string) {
 	t.Helper()
 	store := memory.New()
-	store.Keys["k1"] = domain.KeyRecord{Prepaid: true, Budget: 1_000}
+	store.Keys["k1"] = domain.KeyRecord{Budget: 1_000}
 	path := filepath.Join(t.TempDir(), "spool.jsonl")
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 	svc.Spool = NewSpool(store.Repositories().Usage, quiet(), func() string { return path }, func() int64 { return maxBytes })
@@ -22,7 +22,7 @@ func spoolFixture(t *testing.T, maxBytes int64) (*memory.Store, *Service, string
 
 func record(t *testing.T, svc *Service, id string) {
 	svc.Record(context.Background(), Report{
-		RequestID: id, Prefix: "K-1", Model: "m", MeterID: "k1", Prepaid: true, Budget: 1_000, UpstreamStatus: "200",
+		RequestID: id, Prefix: "K-1", Model: "m", MeterID: "k1", Budget: 1_000, UpstreamStatus: "200",
 		Pricing: priced(t, "mp1", map[string]int64{"request_count": 7}),
 	})
 }

@@ -6,8 +6,7 @@ groups' grants are unioned into one before the gates run, so every gate reads on
 
 **The key is the policy; the team is the verdict.** Everything that is the key's — models,
 geography, its own rate limits, and the cap it spends against — sits on the key. What is the
-team's — `limited` (its balance is spent), `prepaid` (its keys are gated on their caps),
-`log_payloads`, and the rate limits a key with none of its own runs under — sits on `team:<Central
+team's — `limited` (its balance is spent), `log_payloads`, and the rate limits a key with none of its own runs under — sits on `team:<Central
 Team>`, one record however many keys the team holds, so suspending a team is one write. The cap and
 its counter stay on the key: a key lives on one geography's store, that store holds the key's whole
 cap and counts all its spend, so the gate is exact however many other keys the team holds
@@ -19,7 +18,7 @@ plane from before teams wrote onto it — until the cleanup release, when it is 
 | Gate | Status | Why in this position |
 |---|---|---|
 | key is `active` | 401 | Checked first: a revoked key is 401 even when it is also over quota, because the key is the thing that is wrong |
-| key has credit | 402 | `limited` is a pushed flag (the control plane's verdict on the team); `prepaid && spent >= budget` is this Redis's own counter for the month against the key's monthly cap. Either → 402 |
+| key has credit | 402 | `limited` is a pushed flag (the control plane's verdict on the team); `spent >= budget` is this Redis's own counter for the month against the key's monthly cap, 0 until the control plane sets one. Either → 402 |
 | `CanUse(model)` | 403 | |
 
 `CanUse` is the whole access rule and fails closed:
@@ -37,7 +36,7 @@ something the inference path would refuse.
 
 Two, both read off the key record before the body is, both answering 402
 `credit balance exhausted`. The control plane's: its verdict on the team, flipped as `limited` and
-pushed onto every key of the team. This box's own: `prepaid && spent >= budget`, the key's monthly
+pushed onto every key of the team. This box's own: `spent >= budget`, the key's monthly
 cap against this month's counter on the record (see [The records themselves](../../repository/redis/README.md#the-records-themselves)). A client cannot
 tell which one refused it.
 

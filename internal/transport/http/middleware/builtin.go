@@ -198,8 +198,8 @@ func newAuth(deps Deps) (Middleware, error) {
 	}, nil
 }
 
-// quota honours the geography pin, the credit flag the control plane pushed, and the prepaid
-// balance this box keeps — all read off the key record, before the body is. The rate limits come
+// quota honours the geography pin, the credit flag the control plane pushed, and the cap this
+// box counts against — all read off the key record, before the body is. The rate limits come
 // last: a key refused above must not use up a request.
 func newQuota(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
@@ -412,7 +412,6 @@ func newMeter(deps Deps) (Middleware, error) {
 					Usage:          state.Outcome.Usage,
 					UsageStart:     state.Outcome.UsageStart,
 					Pricing:        state.Decision.Route.Pricing,
-					Prepaid:        state.Identity.Key.Prepaid,
 					Budget:         state.Identity.Key.Budget,
 					Limits:         state.Identity.Key.Limits,
 					Target:         state.Decision.HealthTarget(),

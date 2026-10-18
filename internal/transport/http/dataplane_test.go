@@ -82,7 +82,7 @@ func newFixture(t *testing.T, engineHandler http.HandlerFunc) *fixture {
 
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-		Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"),
+		Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"), Budget: 1_000_000_000_000,
 	}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	store.Routes["qwen3-4b"] = []domain.Route{{
@@ -492,7 +492,7 @@ func TestAGeographyPinIsHonoured(t *testing.T) {
 // was sent.
 func TestAnOversizedBodyIsRefused(t *testing.T) {
 	store := memory.New()
-	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme")}
+	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"), Budget: 1_000_000_000_000}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("qwen3-4b")}
 	handler := buildHandler(t, store, config.Config{}, 128)
 

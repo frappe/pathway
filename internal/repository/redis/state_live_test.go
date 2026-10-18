@@ -142,7 +142,7 @@ func TestAKeyRecordRoundTripsItsPolicy(t *testing.T) {
 	if _, err := state.Apply(ctx, repository.StatePush{Keys: map[string]repository.KeyBucket{
 		bucket: {Hash: "kh", Records: []repository.KeyUpsert{{
 			MeterID: "aa", Prefix: "abc", Team: "T-1", Status: "active", Groups: "acme", Allow: "m9",
-			Deny: "m2", Limited: true, LogPayloads: true, Geography: "eu", Prepaid: true, Budget: 1_000,
+			Deny: "m2", Limited: true, LogPayloads: true, Geography: "eu", Budget: 1_000,
 			Limits: "requests:1m:5",
 		}}},
 	}}); err != nil {
@@ -151,7 +151,7 @@ func TestAKeyRecordRoundTripsItsPolicy(t *testing.T) {
 	holder, found, err := client.Store().Keys.Resolve(ctx, "aa")
 	rec := holder.Key
 	if err != nil || !found || rec.Team != "T-1" || !rec.Groups["acme"] || !rec.Allow["m9"] || !rec.Deny["m2"] ||
-		!rec.Limited || !rec.LogPayloads || rec.Geography != "eu" || !rec.Prepaid || rec.Budget != 1_000 ||
+		!rec.Limited || !rec.LogPayloads || rec.Geography != "eu" || rec.Budget != 1_000 ||
 		rec.Spent != 40 || len(rec.Limits) != 1 {
 		t.Errorf("Resolve = %+v, %v, %v; want every pushed field and spent left alone", rec, found, err)
 	}
@@ -172,7 +172,7 @@ func TestPushedStateNeverExpires(t *testing.T) {
 		Groups: &repository.GroupsPush{Hash: "gh", Records: []repository.GroupUpsert{{Name: "acme", Models: "m"}}},
 		Keys: map[string]repository.KeyBucket{domain.BucketOf("aa"): {
 			Hash: "kh", Records: []repository.KeyUpsert{{
-				MeterID: "aa", Prefix: "abc", Team: "T-1", Status: "active", Prepaid: true, Budget: 1_000, Limits: "requests:1m:5",
+				MeterID: "aa", Prefix: "abc", Team: "T-1", Status: "active", Budget: 1_000, Limits: "requests:1m:5",
 			}},
 		}},
 		Routes: &repository.RoutesPush{Hash: "rh", Table: map[string][]domain.Route{"m": {{EngineURL: "http://e", Healthy: true}}}},
@@ -231,7 +231,7 @@ func TestATeamRecordResolvesWithItsKey(t *testing.T) {
 
 	counts, err := state.Apply(ctx, repository.StatePush{
 		Teams: map[string]repository.TeamBucket{bucket: {Hash: "th", Records: []repository.TeamUpsert{
-			{Team: "T-1", Limited: true, Prepaid: true, Limits: "requests:1m:5"},
+			{Team: "T-1", Limited: true, Limits: "requests:1m:5"},
 		}}},
 		Keys: map[string]repository.KeyBucket{domain.BucketOf(key): {Hash: "kh", Records: []repository.KeyUpsert{
 			{MeterID: key, Prefix: "K-1", Team: "T-1", Status: "active"},
@@ -245,7 +245,7 @@ func TestATeamRecordResolvesWithItsKey(t *testing.T) {
 	if err != nil || !found || holder.Team == nil {
 		t.Fatalf("resolve = %+v, %v, %v; want the team record", holder, found, err)
 	}
-	if !holder.Team.Limited || !holder.Team.Prepaid || len(holder.Team.Limits) != 1 || holder.Team.Limits[0].Value != 5 {
+	if !holder.Team.Limited || len(holder.Team.Limits) != 1 || holder.Team.Limits[0].Value != 5 {
 		t.Errorf("team = %+v", *holder.Team)
 	}
 	if holder, _, _ := client.Store().Keys.Resolve(ctx, "aa"); holder.Team != nil {

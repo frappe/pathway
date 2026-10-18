@@ -28,14 +28,13 @@ type KeyRecord struct {
 	LogPayloads bool
 	// Geography pins this key to one geography's gateways; blank serves anywhere.
 	Geography string
-	// Prepaid gates this key on its cap. Budget is the cap the control plane set for one calendar
-	// month (nano-USD); Spent is what this store has counted against it in the current UTC month,
-	// moved by every metered request and never by a push. A new month starts at 0 with nothing
-	// reset: the store keeps one counter per month and reads the current one. This box's balance
-	// for the key is Budget − Spent.
-	Prepaid bool
-	Budget  int64
-	Spent   int64
+	// Budget is the cap the control plane set for one calendar month (nano-USD), what this key is
+	// gated on; Spent is what this store has counted against it in the current UTC month, moved by
+	// every metered request and never by a push. A new month starts at 0 with nothing reset: the
+	// store keeps one counter per month and reads the current one. This box's balance for the key
+	// is Budget − Spent.
+	Budget int64
+	Spent  int64
 	// Limits caps the key's requests and tokens per reset window; none = uncapped.
 	Limits []Limit
 }
@@ -47,11 +46,10 @@ type GroupRecord struct {
 }
 
 // TeamRecord is team:<Central Team id>: what is the team's and holds for every key it owns, so a
-// team suspended or marked Free is one record, not one field on each of its keys. Verdicts and
+// team suspended is one record, not one field on each of its keys. Verdicts and
 // settings only — nothing here counts; the cap and its spend stay on the key.
 type TeamRecord struct {
 	Limited     bool    // the team's balance is spent → 402 on every key it holds
-	Prepaid     bool    // its keys are gated on their caps
 	LogPayloads bool    // its keys' prompts and outputs go to the payload log
 	Limits      []Limit // what a key with no limits of its own runs under; none = uncapped
 }
@@ -60,7 +58,7 @@ type TeamRecord struct {
 // the copies a key record carried before teams were pushed, and its limits where the key names
 // none of its own.
 func (k KeyRecord) Under(team TeamRecord) KeyRecord {
-	k.Limited, k.Prepaid, k.LogPayloads = team.Limited, team.Prepaid, team.LogPayloads
+	k.Limited, k.LogPayloads = team.Limited, team.LogPayloads
 	if len(k.Limits) == 0 {
 		k.Limits = team.Limits
 	}
@@ -69,7 +67,7 @@ func (k KeyRecord) Under(team TeamRecord) KeyRecord {
 
 // Exhausted reports whether the key has run out: the control plane's verdict on its team, or this
 // box's own view of the key's cap for the month.
-func (k KeyRecord) Exhausted() bool { return k.Limited || (k.Prepaid && k.Spent >= k.Budget) }
+func (k KeyRecord) Exhausted() bool { return k.Limited || k.Spent >= k.Budget }
 
 // MonthOf names the month a spend counts in, "2006-01" in UTC: the field the store keeps a key's
 // Spent under, and what the control plane's monthly cap is for.

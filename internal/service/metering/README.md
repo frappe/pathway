@@ -101,15 +101,10 @@ root (a vendor fee reported in `usage`) is one parser line that fills its bucket
 pricing in force; a price change lands with the push that carries it, and a request is charged by
 the pricing its gateway held. One Lua script per request: HINCRBY every counter, each priced counter again as `p:<pricing id>:<counter>`,
 then `cost` and `p:<pricing id>:cost` — Σ counter × rate, nano-USD, truncated per counter, 0 on an
-unpriced route — then, for a prepaid key only, `HINCRBY key:<hash> spent:<YYYY-MM> cost` (the UTC
-month the request lands in) and `HSET key_spent key_balance` (`budget − spent`, negative once
-overspent; last writer wins) on the usage hash. A free
-team's usage is counted and priced the same, but tagged `f:<pricing id>:` instead of `p:`; its keys'
-`spent` never moves and the drain carries no balance for them, so turning the team prepaid later
-starts it at what it loads. The tag is set per request, so a drain that spans a flip carries both and the
-pull bills only the `p:` part. The pull prices each
-`p:<pricing id>` or `f:<pricing id>` group with that same pricing's table, so the two sides can only disagree when they
-hold different rates for one pricing id. A drain therefore never sees a counter without its cost, or a cost without the spend it
+unpriced route — then `HINCRBY key:<hash> spent:<YYYY-MM> cost` (the UTC month the request lands
+in) and `HSET key_spent key_balance` (`budget − spent`, negative once overspent; last writer wins)
+on the usage hash. The pull prices each `p:<pricing id>` group with that same pricing's table, so
+the two sides can only disagree when they hold different rates for one pricing id. A drain therefore never sees a counter without its cost, or a cost without the spend it
 moved. The spend moves only on a key the control plane has pushed.
 
 ## The spool

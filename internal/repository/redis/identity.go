@@ -121,7 +121,6 @@ func keyRecord(h map[string]string, spent string) (domain.KeyRecord, error) {
 		Limited:     strings.TrimSpace(h["limited"]) == "1",
 		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
 		Geography:   strings.TrimSpace(h["geography"]),
-		Prepaid:     strings.TrimSpace(h["prepaid"]) == "1",
 		Budget:      int64Field(h, "budget"),
 		Spent:       int64Field(h, spent),
 		Limits:      limits,
@@ -137,7 +136,6 @@ func teamRecord(h map[string]string) (domain.TeamRecord, error) {
 	}
 	return domain.TeamRecord{
 		Limited:     strings.TrimSpace(h["limited"]) == "1",
-		Prepaid:     strings.TrimSpace(h["prepaid"]) == "1",
 		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
 		Limits:      limits,
 	}, nil
@@ -147,7 +145,6 @@ func teamRecord(h map[string]string) (domain.TeamRecord, error) {
 func writeTeam(ctx context.Context, p redis.Pipeliner, rec repository.TeamUpsert) {
 	p.HSet(ctx, "team:"+rec.Team, map[string]any{
 		"limited":      flag(rec.Limited),
-		"prepaid":      flag(rec.Prepaid),
 		"log_payloads": flag(rec.LogPayloads),
 		"limits":       rec.Limits, // always written: blank is what clears a removed limit
 	})
@@ -166,7 +163,6 @@ func keyFields(rec repository.KeyUpsert) map[string]any {
 		"limited":      flag(rec.Limited),
 		"log_payloads": flag(rec.LogPayloads),
 		"geography":    rec.Geography,
-		"prepaid":      flag(rec.Prepaid),
 		"budget":       strconv.FormatInt(rec.Budget, 10),
 		"limits":       rec.Limits, // always written: blank is what clears a removed limit
 	}

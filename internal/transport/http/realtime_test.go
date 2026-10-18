@@ -53,7 +53,7 @@ func realtimeStore(t *testing.T, engineURL, output string) *memory.Store {
 	t.Helper()
 	store := memory.New()
 	store.Keys[domain.SHA256Hex(secret)] = domain.KeyRecord{
-		Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"),
+		Status: "active", Team: "test-team", KeyPrefix: "abc123", Groups: domain.ModelSet("acme"), Budget: 1_000_000_000_000,
 	}
 	store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("nemotron-asr")}
 	store.Routes["nemotron-asr"] = []domain.Route{{

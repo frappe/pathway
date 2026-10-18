@@ -202,7 +202,6 @@ type KeyUpsert struct {
 	Limited     bool
 	LogPayloads bool
 	Geography   string
-	Prepaid     bool
 	Budget      int64  // the key's cap, nano-USD
 	Limits      string // comma list of metric:window:value
 }
@@ -215,7 +214,6 @@ type GroupUpsert struct {
 type TeamUpsert struct {
 	Team        string // Central Team doc name — the record id
 	Limited     bool
-	Prepaid     bool
 	LogPayloads bool
 	Limits      string // comma list of metric:window:value; what its keys run under by default
 }
