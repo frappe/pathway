@@ -239,6 +239,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("/grove-admin/usage", adminAuth(s.adminToken, s.handleAdminUsage))
 	mux.HandleFunc("POST /grove-admin/usage/ack", adminAuth(s.adminToken, s.handleAdminUsageAck))
 	mux.HandleFunc("POST /grove-admin/spend-adjust", adminAuth(s.adminToken, s.handleAdminSpendAdjust))
+	mux.HandleFunc("/grove-admin/spent", adminAuth(s.adminToken, s.handleAdminSpent))
 	mux.HandleFunc("/grove-admin/provider-keys", adminAuth(s.adminToken, s.handleAdminProviderKeys))
 	return mux
 }

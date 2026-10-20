@@ -287,17 +287,9 @@ func commaList(value string) []string {
 // GET /grove-admin/usage[?keys=p1,p2] — pull: live counters set aside under a new drain id (only
 // the listed prefixes when keys is given), answered with every counter not yet acknowledged,
 // grouped by drain id. Nothing is deleted here, so a key the control plane failed to record is
-// answered again on the next pull under its own id, while the rest move on. With peek=1 the same
-// shape is answered and nothing is set aside: the live counters come under the id "".
+// answered again on the next pull under its own id, while the rest move on.
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
-	keys := commaList(r.URL.Query().Get("keys"))
-	var drains repository.Drains
-	var err error
-	if r.URL.Query().Get("peek") == "1" {
-		drains, err = s.provisioning.PeekUsage(r.Context(), keys)
-	} else {
-		drains, err = s.provisioning.DrainUsage(r.Context(), keys)
-	}
+	drains, err := s.provisioning.DrainUsage(r.Context(), commaList(r.URL.Query().Get("keys")))
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "usage store error")
 		return
@@ -336,6 +328,18 @@ func (s *Server) handleAdminUsageAck(w http.ResponseWriter, r *http.Request) {
 		count += forgot
 	}
 	respond.JSON(w, map[string]any{"ok": true, "count": count})
+}
+
+// GET /grove-admin/spent?ids=a,b — each key's spend this month on this store, nano-USD by the id
+// the control plane pushed it under: the figure a cap check is made on, off the counter the cap
+// is gated on. A key not held here is left out; the drains are not touched.
+func (s *Server) handleAdminSpent(w http.ResponseWriter, r *http.Request) {
+	spent, err := s.provisioning.Spent(r.Context(), commaList(r.URL.Query().Get("ids")))
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "key store error")
+		return
+	}
+	respond.JSON(w, spent)
 }
 
 // POST /grove-admin/spend-adjust {"key", "delta", "id"} — correct one key's spend for the

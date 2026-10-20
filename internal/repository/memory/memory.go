@@ -168,6 +168,24 @@ func (k keys) Delete(_ context.Context, ids []string) (int, error) {
 	return deleteFrom(ids, func(id string) { delete(k.s.Keys, id) }), k.s.failed("keys")
 }
 
+// Spent matches the real one: this month's counter of each key the store holds, nothing for one
+// never pushed.
+func (k keys) Spent(_ context.Context, ids []string) (map[string]int64, error) {
+	k.s.mu.Lock()
+	defer k.s.mu.Unlock()
+	if err := k.s.failed("keys"); err != nil {
+		return nil, err
+	}
+	out := map[string]int64{}
+	for _, id := range ids {
+		if _, ok := k.s.Keys[id]; ok {
+			k.s.rollMonth(id)
+			out[id] = k.s.Keys[id].Spent
+		}
+	}
+	return out, nil
+}
+
 // AdjustSpent matches the real one: once per id, and only on a key the store knows.
 func (k keys) AdjustSpent(_ context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
 	k.s.mu.Lock()
@@ -527,25 +545,6 @@ func (u usage) Drain(_ context.Context, newID string, keys []string) (repository
 		delete(u.s.Usage, bucket)
 	}
 	return u.unacked(want), nil
-}
-
-// Peek matches the real one: every unacknowledged pair, and every live counter under the id "",
-// nothing moved.
-func (u usage) Peek(_ context.Context, keys []string) (repository.Drains, error) {
-	u.s.mu.Lock()
-	defer u.s.mu.Unlock()
-	if err := u.s.failed("usage"); err != nil {
-		return nil, err
-	}
-	want := wantedBuckets(keys)
-	out := u.unacked(want)
-	for bucket, fields := range u.s.Usage {
-		if want(bucket) {
-			prefix, day := repository.SplitBucket(bucket)
-			out.Put("", prefix, day, counters(fields))
-		}
-	}
-	return out, nil
 }
 
 // unacked is every set-aside pair not yet acknowledged, as the wire carries it. Caller holds mu.

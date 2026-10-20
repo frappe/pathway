@@ -227,33 +227,8 @@ func TestAnUnackedKeyIsResentOnRealRedis(t *testing.T) {
 	}
 }
 
-// A peek on the real store: the unacked pair under its id, the live bucket under "", nothing moved.
-func TestAPeekMovesNothingOnRealRedis(t *testing.T) {
-	client, _ := liveStore(t)
-	ctx := context.Background()
-	usage := client.Store().Usage
-	today := domain.DayOf(time.Now())
-	_ = usage.Accrue(ctx, liveAccrual("bad", "", 3))
-	if _, err := usage.Drain(ctx, "d1", []string{"bad"}); err != nil {
-		t.Fatal(err)
-	}
-	_ = usage.Accrue(ctx, liveAccrual("bad", "", 3))
-	_ = usage.Accrue(ctx, liveAccrual("good", "", 3))
-
-	peek, err := usage.Peek(ctx, []string{"bad"})
-	if err != nil || peek["d1"]["bad"][today]["request_count"] != "1" || peek[""]["bad"][today]["request_count"] != "1" || peek[""]["good"] != nil {
-		t.Fatalf("peek = %+v, %v; want d1:bad and the live bad only", peek, err)
-	}
-	if n := client.rdb.Exists(ctx, "usage:"+todays("bad"), "usage:"+todays("good"), "drained:d1:"+todays("bad")).Val(); n != 3 {
-		t.Errorf("a peek moved something: %d of the three keys left", n)
-	}
-	if members := client.rdb.SMembers(ctx, "drain:unacked").Val(); len(members) != 1 {
-		t.Errorf("unacked = %v, want d1:bad alone", members)
-	}
-}
-
-// A drain past one pipeline chunk sets every bucket aside and answers each once; a peek then sees
-// them all under the drain's id and nothing live.
+// A drain past one pipeline chunk sets every bucket aside and answers each once; the next drain
+// answers them all under the first id and nothing new.
 func TestADrainPastOneChunkLandsEveryBucketOnRealRedis(t *testing.T) {
 	client, _ := liveStore(t)
 	ctx := context.Background()
@@ -271,9 +246,47 @@ func TestADrainPastOneChunkLandsEveryBucketOnRealRedis(t *testing.T) {
 	if left := client.rdb.Keys(ctx, "usage:*").Val(); len(left) != 0 {
 		t.Errorf("%d buckets left live after the drain", len(left))
 	}
-	peek, err := usage.Peek(ctx, nil)
-	if err != nil || len(peek["d1"]) != n || len(peek[""]) != 0 {
-		t.Errorf("peek = %d under d1 and %d live, %v; want %d and none", len(peek["d1"]), len(peek[""]), err, n)
+	again, err := usage.Drain(ctx, "d2", nil)
+	if err != nil || len(again["d1"]) != n || len(again["d2"]) != 0 {
+		t.Errorf("the next drain = %d under d1 and %d under d2, %v; want %d and none", len(again["d1"]), len(again["d2"]), err, n)
+	}
+}
+
+// Spent is what Accrue counted on each key this month, by the id the control plane pushed it
+// under, after any correction — the figure a cap check reads, and the one the gate reads. A key
+// never pushed is left out, a pushed key never served reads 0, last month's field is not this one's.
+func TestSpentIsWhatAccrueCountedOnRealRedis(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	push := repository.StatePush{Keys: map[string]repository.KeyBucket{domain.BucketOf("aa"): {
+		Hash: "kh", Records: []repository.KeyUpsert{
+			{MeterID: "aa", Prefix: "abc", Status: "active", Budget: 1_000},
+			{MeterID: "bb", Prefix: "def", Status: "active", Budget: 1_000},
+		},
+	}}}
+	if _, err := state.Apply(ctx, push); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	keys, usage := client.Store().Keys, client.Store().Usage
+	for _, a := range []repository.Accrual{liveAccrual("abc", "aa", 250), liveAccrual("abc", "aa", 250), liveAccrual("xyz", "ghost", 5)} {
+		if err := usage.Accrue(ctx, a); err != nil {
+			t.Fatalf("Accrue: %v", err)
+		}
+	}
+	client.rdb.HSet(ctx, "key:aa", "spent:2000-01", "800")
+
+	spent, err := keys.Spent(ctx, []string{"aa", "bb", "ghost"})
+	if err != nil || len(spent) != 2 || spent["aa"] != 500 || spent["bb"] != 0 {
+		t.Fatalf("Spent = %v, %v; want aa 500, bb 0, ghost absent", spent, err)
+	}
+	if holder, _, _ := keys.Resolve(ctx, "aa"); holder.Key.Spent != spent["aa"] {
+		t.Errorf("the gate reads %d, the check %d", holder.Key.Spent, spent["aa"])
+	}
+	if _, _, _, err := keys.AdjustSpent(ctx, "aa", "CD-1", -100); err != nil {
+		t.Fatal(err)
+	}
+	if spent, _ = keys.Spent(ctx, []string{"aa"}); spent["aa"] != 400 {
+		t.Errorf("after a correction Spent = %v, want aa 400", spent)
 	}
 }
 
