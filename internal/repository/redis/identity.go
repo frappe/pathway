@@ -240,6 +240,28 @@ func (k keys) AdjustSpent(ctx context.Context, meterID, id string, delta int64) 
 	return spent, code == 1, code != -1, nil
 }
 
+// Spent reads every id's counter in one round trip: status tells a key this store holds from one
+// it does not, and a month's field never written reads 0.
+func (k keys) Spent(ctx context.Context, ids []string) (map[string]int64, error) {
+	field := spentField(time.Now())
+	cmds, err := pipelined(ctx, k.rdb, len(ids), func(p redis.Pipeliner, i int) {
+		p.HMGet(ctx, "key:"+ids[i], "status", field)
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]int64{}
+	for i, cmd := range cmds {
+		vals := cmd.(*redis.SliceCmd).Val()
+		if len(vals) != 2 || vals[0] == nil {
+			continue
+		}
+		text, _ := vals[1].(string)
+		out[ids[i]], _ = strconv.ParseInt(text, 10, 64)
+	}
+	return out, nil
+}
+
 func flag(b bool) string {
 	if b {
 		return "1"

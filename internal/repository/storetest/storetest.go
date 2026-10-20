@@ -31,7 +31,7 @@ func Run(t *testing.T, open func(t *testing.T) repository.Store) {
 		{"ProviderKeysTakeClears", providerKeysTakeClears},
 		{"AdmitTakesTheLastSlotOnce", admitTakesTheLastSlotOnce},
 		{"ADrainIsResentUntilAcked", aDrainIsResentUntilAcked},
-		{"APeekMovesNothing", aPeekMovesNothing},
+		{"SpentIsEachKeysOwnCounter", spentIsEachKeysOwnCounter},
 		{"AReplayLandsOnce", aReplayLandsOnce},
 	}
 	for _, c := range cases {
@@ -198,14 +198,19 @@ func aDrainIsResentUntilAcked(t *testing.T, store repository.Store) {
 	}
 }
 
-func aPeekMovesNothing(t *testing.T, store repository.Store) {
-	must(t, store.Usage.Accrue(ctx, accrual("r1")))
-	peek, err := store.Usage.Peek(ctx, nil)
-	if err != nil || requests(peek, "") != 1 {
-		t.Fatalf("Peek = %v, %v, want the live counter under \"\"", peek, err)
+func spentIsEachKeysOwnCounter(t *testing.T, store repository.Store) {
+	must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{
+		{MeterID: "k1", Prefix: "abc", Status: "active"}, {MeterID: "k2", Prefix: "def", Status: "active"},
+	}))
+	if _, _, _, err := store.Keys.AdjustSpent(ctx, "k1", "a1", 300); err != nil {
+		t.Fatal(err)
 	}
-	if drained, _ := store.Usage.Drain(ctx, "d1", nil); requests(drained, "d1") != 1 {
-		t.Fatalf("Drain after Peek = %v, want the counter still there", drained)
+	spent, err := store.Keys.Spent(ctx, []string{"k1", "k2", "never"})
+	if err != nil || len(spent) != 2 || spent["k1"] != 300 || spent["k2"] != 0 {
+		t.Fatalf("Spent = %v, %v; want k1 300, k2 0, never absent", spent, err)
+	}
+	if none, err := store.Keys.Spent(ctx, nil); err != nil || len(none) != 0 {
+		t.Fatalf("Spent of nothing = %v, %v", none, err)
 	}
 }
 

@@ -210,30 +210,6 @@ func flat(drains repository.Drains) []map[string]string {
 	return out
 }
 
-// A key the control plane never acknowledges is answered again under its own id on every drain,
-// beside the new ones, while an acknowledged key moves on: one stuck key holds back only itself.
-// A peek answers the live counters under "" and the set-aside ones under their id, and moves none.
-func TestAPeekAnswersLiveAndUnackedAndMovesNothing(t *testing.T) {
-	store := New()
-	usage := store.Repositories().Usage
-	ctx := context.Background()
-	store.Usage["bad"] = map[string]int64{"request_count": 2}
-	_, _ = usage.Drain(ctx, "d1", nil)
-	store.Usage["bad"] = map[string]int64{"request_count": 5, "cost": 50}
-	store.Usage["good"] = map[string]int64{"request_count": 4}
-
-	peek, _ := usage.Peek(ctx, []string{"bad"})
-	if peek["d1"]["bad"][""]["request_count"] != "2" || peek[""]["bad"][""]["cost"] != "50" || peek[""]["good"] != nil {
-		t.Errorf("peek = %+v, want d1:bad and the live bad, nothing of good", peek)
-	}
-	if everything, _ := usage.Peek(ctx, nil); everything[""]["good"][""]["request_count"] != "4" {
-		t.Errorf("unfiltered peek = %+v", everything)
-	}
-	if len(store.Usage) != 2 || len(store.Unacked) != 1 {
-		t.Errorf("a peek moved something: live %v, unacked %v", store.Usage, store.Unacked)
-	}
-}
-
 func TestAnUnackedKeyIsResentWhileTheRestMoveOn(t *testing.T) {
 	store := New()
 	usage := store.Repositories().Usage

@@ -22,6 +22,9 @@ type Keys interface {
 	// AdjustSpent moves a key's spend for the current month by delta nano-USD, once per id: a
 	// repeated id answers the current spend with applied=false. found=false when the key is not here.
 	AdjustSpent(ctx context.Context, meterID, id string, delta int64) (spent int64, applied, found bool, err error)
+	// Spent answers each id's spend this month in nano-USD, ids the store does not hold left out:
+	// the control plane's figure for a cap check, off the counter the cap is gated on.
+	Spent(ctx context.Context, ids []string) (map[string]int64, error)
 }
 
 // Holder is a credential and what stands behind it, as the store read them.
@@ -107,10 +110,6 @@ type Usage interface {
 	// non-empty — and answers every counter not yet acknowledged, old drains included, so one the
 	// control plane failed to record comes back under its own id. Nothing is deleted here.
 	Drain(ctx context.Context, newID string, keys []string) (Drains, error)
-	// Peek answers what Drain would without setting anything aside: every live counter under the
-	// id "" beside every counter not yet acknowledged, only these prefixes' when keys is non-empty.
-	// For a control plane that needs this box's figure now and will land it on its next drain.
-	Peek(ctx context.Context, keys []string) (Drains, error)
 	// Ack marks (drain id → prefix → days) recorded: each is kept for retention, then expires. A
 	// counter that is not unacknowledged is a no-op. → how many moved.
 	Ack(ctx context.Context, acks Acks, retention time.Duration) (int, error)

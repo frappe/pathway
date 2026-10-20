@@ -65,41 +65,30 @@ func TestTheDrainAckCycle(t *testing.T) {
 	}
 }
 
-// A peek is the pull's answer without the pull: the control plane reads what the box holds for a
-// check it makes now, and nothing is set aside, so the next pull finds it all.
-func TestAPeekMovesNothing(t *testing.T) {
+// The cap check's read: each key's own counter by the id it was pushed under, a key never pushed
+// left out, and the drains untouched.
+func TestSpentReadsEachKeysOwnCounter(t *testing.T) {
 	store := memory.New()
-	day := domain.DayOf(time.Now())
-	store.Usage[repository.UsageBucket("K-1", time.Now())] = map[string]int64{"request_count": 3, "cost": 300}
-	store.Usage[repository.UsageBucket("K-2", time.Now())] = map[string]int64{"request_count": 1}
+	store.Keys["aa"] = domain.KeyRecord{Spent: 3_000}
+	store.Keys["bb"] = domain.KeyRecord{}
+	store.Usage[repository.UsageBucket("K-1", time.Now())] = map[string]int64{"request_count": 3}
 	handler := adminFixture(t, store)
-	get := func(path string) repository.Drains {
+	get := func(path string) map[string]int64 {
 		w := adminCall(t, handler, http.MethodGet, path, "")
-		var p struct {
-			Drains repository.Drains `json:"drains"`
-		}
-		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &p) != nil {
+		var spent map[string]int64
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &spent) != nil || spent == nil {
 			t.Fatalf("GET %s = %d: %s", path, w.Code, w.Body)
 		}
-		return p.Drains
+		return spent
 	}
-	// K-2 set aside once and never acked: a peek shows it under its drain id, K-1 live under "".
-	drained := get("/grove-admin/usage?keys=K-2")
-	var id string
-	for id = range drained {
+	if spent := get("/grove-admin/spent?ids=aa,bb,never"); len(spent) != 2 || spent["aa"] != 3_000 || spent["bb"] != 0 {
+		t.Errorf("spent = %v, want aa 3000, bb 0, never absent", spent)
 	}
-	peek := get("/grove-admin/usage?keys=K-1,K-2&peek=1")
-	if peek[""]["K-1"][day]["cost"] != "300" || peek[id]["K-2"][day]["request_count"] != "1" || len(peek) != 2 {
-		t.Fatalf("peek = %+v, want K-1 live and K-2 under %s", peek, id)
+	if none := get("/grove-admin/spent"); len(none) != 0 {
+		t.Errorf("spent of nothing = %v", none)
 	}
-	if alone := get("/grove-admin/usage?keys=K-1&peek=1"); len(alone) != 1 || alone[""]["K-1"] == nil {
-		t.Errorf("K-1 alone = %+v", alone)
-	}
-	if len(store.Usage) != 1 || len(store.Unacked) != 1 {
-		t.Errorf("after the peeks: live %v, unacked %v — a peek moves nothing", store.Usage, store.Unacked)
-	}
-	if pull := get("/grove-admin/usage"); pull[id]["K-2"] == nil || len(pull) != 2 {
-		t.Errorf("the pull after a peek = %+v, want K-2 still waiting and K-1 set aside now", pull)
+	if len(store.Usage) != 1 || len(store.Unacked) != 0 {
+		t.Errorf("a read moved usage: live %v, unacked %v", store.Usage, store.Unacked)
 	}
 }
 

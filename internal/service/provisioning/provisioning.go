@@ -95,12 +95,6 @@ func (s *Service) DrainUsage(ctx context.Context, keys []string) (repository.Dra
 	return s.store.Usage.Drain(ctx, NewDrainID(time.Now()), keys)
 }
 
-// PeekUsage answers what DrainUsage would, moving nothing: the control plane's figure for a check
-// it makes now, landed on its next drain.
-func (s *Service) PeekUsage(ctx context.Context, keys []string) (repository.Drains, error) {
-	return s.store.Usage.Peek(ctx, keys)
-}
-
 // AckUsage says these (drain, prefix, day) counters are recorded: kept for retention, then expired.
 func (s *Service) AckUsage(ctx context.Context, acks repository.Acks, retention time.Duration) (int, error) {
 	return s.store.Usage.Ack(ctx, acks, retention)
@@ -109,6 +103,13 @@ func (s *Service) AckUsage(ctx context.Context, acks repository.Acks, retention 
 // AdjustSpent corrects a key's spend for the current month on this store, once per id.
 func (s *Service) AdjustSpent(ctx context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
 	return s.store.Keys.AdjustSpent(ctx, meterID, id, delta)
+}
+
+// Spent answers each key's spend this month on this store in nano-USD, by the id it was pushed
+// under: the control plane's figure for a cap check, off the counter the cap is gated on. A key
+// not held here is left out.
+func (s *Service) Spent(ctx context.Context, ids []string) (map[string]int64, error) {
+	return s.store.Keys.Spent(ctx, ids)
 }
 
 // NewDrainID is sortable by when the drain started, and unique across boxes on one store.

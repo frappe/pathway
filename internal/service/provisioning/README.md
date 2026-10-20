@@ -36,11 +36,13 @@ Every admin endpoint is gated on `X-Grove-Admin-Token`, compared in constant tim
 `GET /grove-admin/in-flight` is read-only: `{"maintenance": bool, "in_flight": n}`, where
 `in_flight` counts data requests past the `drain` stage, realtime sessions until they close.
 
+`GET /grove-admin/spent?ids=a,b` answers `{"<id>": nano-USD}`: each key's spend this month on this
+store, by the id the control plane pushed it under, off the counter the cap is gated on
+(`spent:<month>` on `key:<id>`). A key not held here is left out. One pipelined read, the drains
+untouched: the figure a cap check is made on.
+
 `GET /grove-admin/usage[?keys=p1,p2]` answers `{"drains": {"<drain id>": {"<prefix>": {"<YYYY-MM-DD>":
-hash}}}}` and deletes nothing. With `peek=1` it answers the same shape and sets nothing aside —
-the live counters come under the id `""` beside every unacked pair — for a control plane that
-needs this box's figure now (a cap check) and will land it on its next pull; it holds its own
-pull lock meanwhile, so no drain moves a counter under it. A live counter is one key's usage for one UTC day — the day this box
+hash}}}}` and deletes nothing. A live counter is one key's usage for one UTC day — the day this box
 served it, off the clock that names the key's `spent:<month>` — so the day and the month the
 control plane records are this store's own. Each live `usage:<prefix>:<day>` — every one, or only
 the listed prefixes', found by one SCAN either way — is RENAMEd to `drained:<id>:<prefix>:<day>`

@@ -134,11 +134,11 @@ const pipelineChunk = 1000
 
 // pipelined queues fn(p, i) for every i below n, pipelineChunk per round trip, and stops at the
 // first chunk with a failed command. → every command, in order.
-func (u usage) pipelined(ctx context.Context, n int, fn func(p redis.Pipeliner, i int)) ([]redis.Cmder, error) {
+func pipelined(ctx context.Context, rdb *redis.Client, n int, fn func(p redis.Pipeliner, i int)) ([]redis.Cmder, error) {
 	var all []redis.Cmder
 	for start := 0; start < n; start += pipelineChunk {
 		end := min(start+pipelineChunk, n)
-		cmds, err := u.rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
+		cmds, err := rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
 			for i := start; i < end; i++ {
 				fn(p, i)
 			}
@@ -155,7 +155,7 @@ func (u usage) pipelined(ctx context.Context, n int, fn func(p redis.Pipeliner, 
 // hashes is HGETALL over keyPrefix+name for every name, pipelined: each one's fields, in order,
 // empty for a hash that is gone.
 func (u usage) hashes(ctx context.Context, keyPrefix string, names []string) ([]map[string]string, error) {
-	cmds, err := u.pipelined(ctx, len(names), func(p redis.Pipeliner, i int) { p.HGetAll(ctx, keyPrefix+names[i]) })
+	cmds, err := pipelined(ctx, u.rdb, len(names), func(p redis.Pipeliner, i int) { p.HGetAll(ctx, keyPrefix+names[i]) })
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +209,7 @@ func (u usage) Drain(ctx context.Context, newID string, keys []string) (reposito
 	want := prefixesOf(keys)
 	buckets := want.filter(live)
 	// Eval, not Run: inside a pipeline Run cannot see NOSCRIPT and fall back, so the body goes along.
-	_, err = u.pipelined(ctx, len(buckets), func(p redis.Pipeliner, i int) {
+	_, err = pipelined(ctx, u.rdb, len(buckets), func(p redis.Pipeliner, i int) {
 		member := newID + ":" + buckets[i]
 		setAsideScript.Eval(ctx, p, []string{"usage:" + buckets[i], "drained:" + member, unackedKey}, member)
 	})
@@ -217,34 +217,6 @@ func (u usage) Drain(ctx context.Context, newID string, keys []string) (reposito
 		return nil, err
 	}
 	return u.read(ctx, want)
-}
-
-// Peek reads what Drain would answer and moves nothing: the unacknowledged pairs, then every live
-// bucket under the id "". The control plane holds its own pull lock while it peeks, so no drain of
-// its renames a bucket between the two reads.
-func (u usage) Peek(ctx context.Context, keys []string) (repository.Drains, error) {
-	want := prefixesOf(keys)
-	out, err := u.read(ctx, want)
-	if err != nil {
-		return nil, err
-	}
-	live, err := u.scanLive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	buckets := want.filter(live)
-	hashes, err := u.hashes(ctx, "usage:", buckets)
-	if err != nil {
-		return nil, err
-	}
-	for i, bucket := range buckets {
-		if len(hashes[i]) == 0 {
-			continue
-		}
-		prefix, day := repository.SplitBucket(bucket)
-		out.Put("", prefix, day, hashes[i])
-	}
-	return out, nil
 }
 
 func (u usage) scanLive(ctx context.Context) ([]string, error) {
