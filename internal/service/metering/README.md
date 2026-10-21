@@ -102,7 +102,7 @@ pricing in force; a price change lands with the push that carries it, and a requ
 the pricing its gateway held. One Lua script per request: HINCRBY every counter, each priced counter again as `p:<pricing id>:<counter>`,
 then `cost` and `p:<pricing id>:cost` — Σ counter × rate, nano-USD, truncated per counter, 0 on an
 unpriced route — then `HINCRBY key:<hash> spent:<YYYY-MM> cost` (the UTC month the request lands
-in) and `HSET key_spent key_balance` (`budget − spent`, negative once overspent; last writer wins)
+in; `spent:total` for a key whose `budget_window` is `total`) and `HSET key_spent key_balance` (`budget − spent`, negative once overspent; last writer wins)
 on the usage hash. The pull prices each `p:<pricing id>` group with that same pricing's table, so
 the two sides can only disagree when they hold different rates for one pricing id. A drain therefore never sees a counter without its cost, or a cost without the spend it
 moved. The spend moves only on a key the control plane has pushed.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/repository"
 )
 
@@ -18,14 +19,15 @@ import (
 // records the counters on it: its day and month are this store's own.
 type usage struct{ rdb *redis.Client }
 
-// accrueBody lands one request in one call: the counters, then the key's spend for the month and
-// the balance view the drain carries. One script rather than a pipeline because key_spent needs
+// accrueBody lands one request in one call: the counters, then the key's spend under the field its
+// window names and the balance view the drain carries. One script rather than a pipeline because key_spent needs
 // the incremented total, and a drain landing between two calls would split one request across two
 // pulls. The spend moves only on a key the control plane has pushed: writing to an absent hash
 // would fabricate a record that grants nothing. Values travel as strings — a Lua number is a
 // double, and would round a nano-USD total past 14 digits on its way back into a command.
 //
-// ARGV[1] cost, ARGV[2] budget, ARGV[3] the key's spent field for the month, ARGV[4..] field, value, ...
+// ARGV[1] cost, ARGV[2] budget, ARGV[3] the month's spent field (a total key's spend lands under
+// spent:total instead), ARGV[4..] field, value, ...
 const accrueBody = `
 local function accrue(usage, key)
   for i = 4, #ARGV, 2 do
@@ -34,8 +36,12 @@ local function accrue(usage, key)
   if key == nil or redis.call('EXISTS', key) == 0 then
     return 0
   end
-  redis.call('HINCRBY', key, ARGV[3], ARGV[1])
-  local spent = redis.call('HGET', key, ARGV[3])
+  local field = ARGV[3]
+  if redis.call('HGET', key, 'budget_window') == 'total' then
+    field = 'spent:total'
+  end
+  redis.call('HINCRBY', key, field, ARGV[1])
+  local spent = redis.call('HGET', key, field)
   redis.call('HSET', usage, 'key_spent', spent, 'key_balance', ARGV[2])
   if spent ~= '0' then
     redis.call('HINCRBY', usage, 'key_balance', '-' .. spent)
@@ -59,10 +65,11 @@ end
 accrue(KEYS[2], KEYS[3])
 return 1`)
 
-// accrueArgs stamps the spend with the month it lands in, off the now that named the bucket. A
+// accrueArgs stamps the spend with the month it lands in, off the now that named the bucket; the
+// script reads the key's own window and lands a total key's spend under spent:total instead. A
 // spooled accrual replayed after the day turned counts in the new one, day and month alike.
 func accrueArgs(a repository.Accrual, now time.Time) []any {
-	args := []any{a.Cost, a.Budget, spentField(now)}
+	args := []any{a.Cost, a.Budget, spentFieldFor(domain.WindowMonth, now)}
 	for field, n := range a.Fields {
 		args = append(args, field, strconv.FormatInt(n, 10))
 	}

@@ -261,3 +261,29 @@ func TestAMixedRouteTableIsRefused(t *testing.T) {
 		t.Errorf("a refused table was written: %v", store.Routes)
 	}
 }
+
+// A key's budget window rides the push: total is kept on the record, and a window this binary
+// cannot gate refuses the push whole, the way a bad limit does.
+func TestAStatePushCarriesTheKeysBudgetWindow(t *testing.T) {
+	store := memory.New()
+	handler := adminFixture(t, store)
+	bucket := domain.BucketOf("aa")
+	body := fmt.Sprintf(`{"keys": {"buckets": {"%s": {"hash": "kh", "records": [
+		{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "budget": 5, "budget_window": "total"}]}}}}`, bucket)
+	if w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body); w.Code != http.StatusOK {
+		t.Fatalf("POST state = %d: %s", w.Code, w.Body)
+	}
+	if got := store.Keys["aa"].BudgetWindow; got != domain.WindowTotal {
+		t.Errorf("aa window = %q, want total", got)
+	}
+
+	body = fmt.Sprintf(`{"keys": {"buckets": {"%s": {"hash": "kh2", "records": [
+		{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "budget_window": "fortnight"}]}}}}`, bucket)
+	w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "key K-1") {
+		t.Fatalf("an unknown window: status = %d, body = %s", w.Code, w.Body)
+	}
+	if got := store.Keys["aa"].BudgetWindow; got != domain.WindowTotal {
+		t.Errorf("a refused push changed the window to %q", got)
+	}
+}

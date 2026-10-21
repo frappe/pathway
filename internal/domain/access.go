@@ -14,7 +14,7 @@ import (
 // grants nothing.
 type KeyRecord struct {
 	Status    string          // "active" | "revoked"
-	Team      string          // Central Team doc name — the tenant boundary the cache salt and payload log key on
+	Team      string          // Grove Team doc name — the tenant boundary the cache salt and payload log key on
 	KeyPrefix string          // display id, for logs and usage attribution
 	Groups    map[string]bool // Model Group names; empty = ungrouped (grants nothing by itself)
 	Allow     map[string]bool // models this key may call on top of its groups'
@@ -28,13 +28,15 @@ type KeyRecord struct {
 	LogPayloads bool
 	// Geography pins this key to one geography's gateways; blank serves anywhere.
 	Geography string
-	// Budget is the cap the control plane set for one calendar month (nano-USD), what this key is
-	// gated on; Spent is what this store has counted against it in the current UTC month, moved by
-	// every metered request and never by a push. A new month starts at 0 with nothing reset: the
-	// store keeps one counter per month and reads the current one. This box's balance for the key
-	// is Budget − Spent.
-	Budget int64
-	Spent  int64
+	// Budget is the cap the control plane set (nano-USD), what this key is gated on; Spent is what
+	// this store has counted against it, moved by every metered request and never by a push. What
+	// Spent counts is BudgetWindow's: WindowMonth (or blank) is the current UTC month — a new month
+	// starts at 0 with nothing reset, the store keeps one counter per month and reads the current
+	// one; WindowTotal is everything since the key was pushed, so a spent key stays spent. This
+	// box's balance for the key is Budget − Spent.
+	Budget       int64
+	Spent        int64
+	BudgetWindow string
 	// Limits caps the key's requests and tokens per reset window; none = uncapped.
 	Limits []Limit
 }
@@ -45,7 +47,7 @@ type GroupRecord struct {
 	Models map[string]bool // models the group grants
 }
 
-// TeamRecord is team:<Central Team id>: what is the team's and holds for every key it owns, so a
+// TeamRecord is team:<Grove Team id>: what is the team's and holds for every key it owns, so a
 // team suspended is one record, not one field on each of its keys. Verdicts and
 // settings only — nothing here counts; the cap and its spend stay on the key.
 type TeamRecord struct {
@@ -72,6 +74,15 @@ func (k KeyRecord) Exhausted() bool { return k.Limited || k.Spent >= k.Budget }
 // MonthOf names the month a spend counts in, "2006-01" in UTC: the field the store keeps a key's
 // Spent under, and what the control plane's monthly cap is for.
 func MonthOf(t time.Time) string { return t.UTC().Format("2006-01") }
+
+// The budget windows a key's cap may be gated over. Blank reads as the month.
+const (
+	WindowMonth = "month"
+	WindowTotal = "total"
+)
+
+// IsBudgetWindow reports whether w names a window this binary can gate.
+func IsBudgetWindow(w string) bool { return w == "" || w == WindowMonth || w == WindowTotal }
 
 // DayOf names the day a request's usage counts in, "2006-01-02" in UTC: the bucket the store keeps
 // a key's live counters under, and the day the control plane records them on.

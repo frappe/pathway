@@ -18,7 +18,7 @@ plane from before teams wrote onto it — until the cleanup release, when it is 
 | Gate | Status | Why in this position |
 |---|---|---|
 | key is `active` | 401 | Checked first: a revoked key is 401 even when it is also over quota, because the key is the thing that is wrong |
-| key has credit | 402 | `limited` is a pushed flag (the control plane's verdict on the team); `spent >= budget` is this Redis's own counter for the month against the key's monthly cap, 0 until the control plane sets one. Either → 402 |
+| key has credit | 402 | `limited` is a pushed flag (the control plane's verdict on the team); `spent >= budget` is this Redis's own counter against the key's cap — this UTC month's, or everything since the push when the key's `budget_window` is `total` — 0 until the control plane sets one. Either → 402 |
 | `CanUse(model)` | 403 | |
 
 `CanUse` is the whole access rule and fails closed:
