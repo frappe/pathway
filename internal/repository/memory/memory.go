@@ -23,7 +23,8 @@ type Store struct {
 
 	Keys map[string]domain.KeyRecord
 	// SpentMonth is the month each key's Spent counts (domain.MonthOf), the memory twin of the
-	// real store's spent:<month> field. A key not listed counts the current one.
+	// real store's spent:<month> field. A key not listed counts the current one; a key capped for
+	// life (BudgetWindow total) never turns over.
 	SpentMonth map[string]string
 	Groups     map[string]domain.GroupRecord
 	Teams      map[string]domain.TeamRecord
@@ -93,7 +94,7 @@ func (s *Store) putKey(rec repository.KeyUpsert) {
 		Status: rec.Status, Team: rec.Team, KeyPrefix: rec.Prefix, Groups: domain.ModelSet(rec.Groups),
 		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
-		Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent,
+		Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent, BudgetWindow: rec.BudgetWindow,
 		Limits: limits,
 	}
 }
@@ -106,8 +107,12 @@ func (s *Store) putTeam(rec repository.TeamUpsert) {
 }
 
 // rollMonth matches the real store reading this month's field: a key last touched in an earlier
-// month starts this one at 0. Called with the lock held, on a key the store knows.
+// month starts this one at 0, a total key keeps counting. Called with the lock held, on a key the
+// store knows.
 func (s *Store) rollMonth(id string) {
+	if s.Keys[id].BudgetWindow == domain.WindowTotal {
+		return
+	}
 	month := domain.MonthOf(time.Now())
 	if was, ok := s.SpentMonth[id]; ok && was != month {
 		rec := s.Keys[id]

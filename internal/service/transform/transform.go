@@ -21,7 +21,7 @@ type Context struct {
 	// UpstreamModel is what the chosen route says this upstream answers to, pushed by the control
 	// plane. Blank means send the caller's `model` unchanged, which is every route we run ourselves.
 	UpstreamModel string
-	// Team is the Central Team this request is billed to — the tenant boundary cachesalt keys on.
+	// Team is the Grove Team this request is billed to — the tenant boundary cachesalt keys on.
 	Team string
 	// Provider is true when the hop leaves our network for a vendor.
 	Provider bool

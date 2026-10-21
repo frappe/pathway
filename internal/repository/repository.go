@@ -201,8 +201,10 @@ type KeyUpsert struct {
 	Limited     bool
 	LogPayloads bool
 	Geography   string
-	Budget      int64  // the key's cap, nano-USD
-	Limits      string // comma list of metric:window:value
+	Budget      int64 // the key's cap, nano-USD
+	// BudgetWindow is what Spent counts against the cap: domain.WindowMonth (blank) or WindowTotal.
+	BudgetWindow string
+	Limits       string // comma list of metric:window:value
 }
 
 type GroupUpsert struct {
@@ -211,7 +213,7 @@ type GroupUpsert struct {
 }
 
 type TeamUpsert struct {
-	Team        string // Central Team doc name — the record id
+	Team        string // Grove Team doc name — the record id
 	Limited     bool
 	LogPayloads bool
 	Limits      string // comma list of metric:window:value; what its keys run under by default
