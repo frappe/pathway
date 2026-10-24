@@ -268,36 +268,37 @@ func TestProviderKeyStatsReadBack(t *testing.T) {
 }
 
 // A credential turned away on every key — unauthorised, unpaid or forbidden — is the gateway's
-// answer, in its own words: the vendor's text and headers never reach the client, the access
-// line says which refusal it was, and the key's stats count it under that class.
+// answer, one line that says neither the vendor's text nor which refusal it was; only the access
+// line and the key's stats know the class.
 func TestEveryKeyRefusedIsTheGatewaysAnswer(t *testing.T) {
-	for status, want := range map[int]struct{ class, message string }{
-		401: {"unauthorized", "upstream credential rejected"},
-		402: {"unpaid", "upstream account unpaid"},
-		403: {"forbidden", "upstream credential lacks permission"},
-	} {
+	for status, class := range map[int]string{401: "unauthorized", 402: "unpaid", 403: "forbidden"} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			f, vendor := keyedFixture(t, map[string]int{"A": status, "B": status}, "A", "B")
 			access := captureAccess(t, f)
 			resp := vendor.chat(f)
 
-			if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), want.message) {
+			if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "upstream unavailable") {
 				t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 			}
-			if strings.Contains(resp.Body.String(), "refused") || resp.Header().Get("Retry-After") != "" {
+			for _, told := range []string{"refused", "credential", "unpaid", "permission"} {
+				if strings.Contains(resp.Body.String(), told) {
+					t.Errorf("the client was told %q: %s", told, resp.Body)
+				}
+			}
+			if resp.Header().Get("Retry-After") != "" {
 				t.Errorf("the vendor's answer reached the client: %s %v", resp.Body, resp.Header())
 			}
 			if len(vendor.keys) != 2 {
 				t.Errorf("keys dialled = %v, want each once", vendor.keys)
 			}
 			for _, key := range []string{"A", "B"} {
-				if counts := f.keyCounts(t, key); counts[want.class] != 1 || counts["rejected"] != 1 || counts["ok"] != 0 {
-					t.Errorf("stats %s = %v, want one %s", key, counts, want.class)
+				if counts := f.keyCounts(t, key); counts[class] != 1 || counts["rejected"] != 1 || counts["ok"] != 0 {
+					t.Errorf("stats %s = %v, want one %s", key, counts, class)
 				}
 			}
 			lines := accessLines(t, access)
 			last := lines[len(lines)-1]
-			if last["status"] != 502. || last["upstream_status"] != float64(status) || last["reason"] != "credential "+want.class {
+			if last["status"] != 502. || last["upstream_status"] != float64(status) || last["reason"] != "credential "+class {
 				t.Errorf("access line = %v", last)
 			}
 		})
@@ -326,7 +327,7 @@ func TestAnEngineRefusingItsKeyIsTheGatewaysAnswer(t *testing.T) {
 	})
 	resp := f.post("/openai/v1/chat/completions", `{"model":"qwen3-4b","messages":[]}`)
 
-	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "upstream credential rejected") {
+	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "upstream unavailable") {
 		t.Errorf("status = %d, body = %s", resp.Code, resp.Body)
 	}
 	if strings.Contains(resp.Body.String(), "bad api key") || len(f.store.KeyStats) != 0 {
@@ -366,7 +367,7 @@ func TestAnExhaustedAccountUnderA400IsTheGatewaysAnswer(t *testing.T) {
 	vendor.bodies = map[string]string{"A": creditBody, "B": creditBody}
 	resp := vendor.chat(f)
 
-	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "upstream account unpaid") {
+	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "upstream unavailable") {
 		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
 	}
 	if strings.Contains(resp.Body.String(), "Billing") || len(vendor.keys) != 2 {

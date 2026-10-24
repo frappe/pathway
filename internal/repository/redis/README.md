@@ -11,8 +11,8 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
 | `lim:<key prefix>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see [Rate limiting](../../service/admission/README.md#rate-limiting) |
-| `usage:<key prefix>:<YYYY-MM-DD>` | hash, one per key per UTC day it was served | the gateway; set aside by `GET /grove-admin/usage` |
-| `drained:<drain id>:<key prefix>:<YYYY-MM-DD>` | hash, kept `usage_retention` once acked | `GET /grove-admin/usage` renames a live counter here |
+| `usage:<key prefix>:<YYYY-MM-DD>` | hash, one per key per UTC day it was served | the gateway; set aside by `GET /grove-admin/usage`, or by the push that moves the key to another team |
+| `drained:<drain id>:<key prefix>:<YYYY-MM-DD>` | hash, kept `usage_retention` once acked; `team` only on one a push set aside: the team charged for it | `GET /grove-admin/usage` renames a live counter here; so does a key push that changes the key's team, which closes its books under a box-made drain id |
 | `drain:unacked` | set of `<drain id>:<key prefix>:<YYYY-MM-DD>` | every counter set aside and not yet acked |
 | `adjust:<id>` | string, 7 days | `POST /grove-admin/spend-adjust` — ids already applied |
 | `accrued:<request id>` | string, 7 days | the spool's replay — requests already landed from it |
@@ -155,8 +155,8 @@ exhausted account hides under both — OpenAI's 429 `insufficient_quota`, Anthro
 balance" — and reads as the 402 it is (`domain.ClassifyUpstream`). A second 429 exhaustion is the
 client's answer, headers and body as the vendor sent them. A 401/402/403 the ring cannot move off —
 every key refused, a single key, an engine's own — never is: the client gets the gateway's **502**
-`api_error`, `upstream credential rejected` / `upstream account unpaid` /
-`upstream credential lacks permission`, the access line says `reason="credential unauthorized|unpaid|forbidden"`
+`api_error` `upstream unavailable`, which refusal it was told to nobody outside; the access line
+says `reason="credential unauthorized|unpaid|forbidden"`
 with the vendor's status in `upstream_status`, and the error log keeps the vendor's own words with
 the key id (`upstream refused the credential`). Nothing else is retried: a 502 on one key is a 502
 on the next. A held attempt leaks nothing to the client; the request is billed once whatever it

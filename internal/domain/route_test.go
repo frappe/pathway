@@ -296,13 +296,11 @@ func TestKeyStatusClass(t *testing.T) {
 	}
 }
 
-// A refusal of the gateway's credential has a name per status and a message that blames nobody
-// on the caller's side; anything else is no refusal.
+// A refusal of the gateway's credential has a class per status; anything else is no refusal.
 func TestRefusedCredential(t *testing.T) {
-	for status, class := range map[int]string{401: "unauthorized", 402: "unpaid", 403: "forbidden"} {
-		refusal, ok := RefusedCredential(status)
-		if !ok || refusal.Class != class || refusal.Message == "" {
-			t.Errorf("RefusedCredential(%d) = %+v, %v", status, refusal, ok)
+	for status, want := range map[int]string{401: "unauthorized", 402: "unpaid", 403: "forbidden"} {
+		if class, ok := RefusedCredential(status); !ok || class != want {
+			t.Errorf("RefusedCredential(%d) = %q, %v", status, class, ok)
 		}
 	}
 	for _, status := range []int{200, 400, 404, 429, 500} {
