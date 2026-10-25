@@ -89,11 +89,11 @@ func TestUsageSurvivesABodyPastTheCarryLimit(t *testing.T) {
 	for name, padding := range map[string]int{"under": carryLimit / 2, "over": carryLimit * 2} {
 		body := `{"choices":[{"text":"` + strings.Repeat("a", padding) +
 			`"}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`
-		tee := newUsageTee(io.NopCloser(strings.NewReader(body)), false)
-		if _, err := io.Copy(io.Discard, tee); err != nil {
+		reader := newUsageReader(io.NopCloser(strings.NewReader(body)), domain.UsageAdapterFor(domain.DialectOpenAI), false)
+		if _, err := io.Copy(io.Discard, reader); err != nil {
 			t.Fatal(err)
 		}
-		if u, ok := domain.ParseUsage([]byte(tee.Usage())); !ok || u.Total != 9 {
+		if u, ok := reader.Usage(); !ok || u.Total != 9 {
 			t.Errorf("%s the limit: got %+v ok=%v, want Total=9", name, u, ok)
 		}
 	}
@@ -126,23 +126,26 @@ func TestUsageSurvivesAClientHangup(t *testing.T) {
 			ModelSwap{}, &out)
 	}()
 
-	if !strings.Contains(out.Usage, `"total_tokens":9`) {
-		t.Errorf("usage lost to the hangup: %q", out.Usage)
+	if !out.UsageFound || out.Usage.Total != 9 {
+		t.Errorf("usage lost to the hangup: %+v found=%v", out.Usage, out.UsageFound)
 	}
 }
 
-// An Anthropic stream reports the prompt on its first event and the output on its last, so both
-// lines reach the caller. A response with one usage line has no start.
-func TestTheFirstAndLastUsageLinesAreBothKept(t *testing.T) {
+// Every usage a stream reports is merged: an Anthropic stream carries the prompt on its first
+// event and the output on its last. A document carries one.
+func TestEveryUsageLineOfAStreamIsMerged(t *testing.T) {
 	stream := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":66,"output_tokens":1}}}` + "\n\n" +
 		"event: content_block_delta\n" +
 		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
 		"event: message_delta\n" +
 		`data: {"type":"message_delta","usage":{"output_tokens":26}}` + "\n\n"
-	for name, tc := range map[string]struct{ contentType, body, start, last string }{
-		"split": {"text/event-stream; charset=utf-8", stream, `"input_tokens":66`, `"output_tokens":26`},
-		"whole": {"application/json", `{"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`, "", `"total_tokens":9`},
+	for name, tc := range map[string]struct {
+		contentType, body, dialect string
+		want                       domain.Usage
+	}{
+		"split": {"text/event-stream; charset=utf-8", stream, domain.DialectAnthropic, domain.Usage{Prompt: 66, Completion: 26, Total: 92}},
+		"whole": {"application/json", `{"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`, domain.DialectOpenAI, domain.Usage{Prompt: 7, Completion: 2, Total: 9}},
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", tc.contentType)
@@ -150,10 +153,89 @@ func TestTheFirstAndLastUsageLinesAreBothKept(t *testing.T) {
 		}))
 		t.Cleanup(server.Close)
 
+		out, _ := forwardOn(New(Options{}, quiet()), server.URL, tc.dialect)
+		if !out.UsageFound || out.Usage != tc.want || !out.UsageExpected {
+			t.Errorf("%s: got %+v found=%v expected=%v", name, out.Usage, out.UsageFound, out.UsageExpected)
+		}
+	}
+}
+
+// A vendor that splits its counts over three frames is still read whole: the larger of each.
+func TestAStreamSplitThreeWaysMergesToTheMax(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"usage":{"prompt_tokens":7}}`+"\n\n"+
+			`data: {"choices":[{"delta":{"content":"w"}}],"usage":null}`+"\n\n"+
+			`data: {"usage":{"completion_tokens":2}}`+"\n\n"+
+			`data: {"usage":{"total_tokens":9}}`+"\n\n"+"data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+
+	out := forward(New(Options{}, quiet()), server.URL, false)
+	if want := (domain.Usage{Prompt: 7, Completion: 2, Total: 9}); !out.UsageFound || out.Usage != want {
+		t.Errorf("got %+v found=%v, want %+v", out.Usage, out.UsageFound, want)
+	}
+}
+
+// Only an answer of the kind that carries usage is a miss without it: audio or an error is not.
+func TestOnlyAJSONOrEventStreamAnswerIsExpectedToCarryUsage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status      int
+		contentType string
+		expected    bool
+	}{
+		"json":    {http.StatusOK, "application/json; charset=utf-8", true},
+		"stream":  {http.StatusOK, "text/event-stream", true},
+		"audio":   {http.StatusOK, "audio/mpeg", false},
+		"error":   {http.StatusBadRequest, "application/json", false},
+		"nothing": {http.StatusNoContent, "", false},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if tc.contentType != "" {
+				w.Header().Set("Content-Type", tc.contentType)
+			}
+			w.WriteHeader(tc.status)
+			_, _ = io.WriteString(w, `{"text":"hi"}`)
+		}))
+		t.Cleanup(server.Close)
+
 		out := forward(New(Options{}, quiet()), server.URL, false)
-		if !strings.Contains(out.Usage, tc.last) || (tc.start == "") != (out.UsageStart == "") ||
-			!strings.Contains(out.UsageStart, tc.start) {
-			t.Errorf("%s: start %q, last %q", name, out.UsageStart, out.Usage)
+		if out.UsageExpected != tc.expected || out.UsageFound {
+			t.Errorf("%s: expected=%v found=%v", name, out.UsageExpected, out.UsageFound)
+		}
+	}
+}
+
+// A document the client walked away from was generated and billed whole before its first byte,
+// so the rest is read for its usage. A stream is billed by what arrived, and not read on.
+func TestADocumentTheClientWalkedAwayFromIsStillReadForItsUsage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		contentType, first, second string
+		want                       int
+	}{
+		"document": {"application/json", `{"choices":[{"text":"` + strings.Repeat("a", 64<<10) + `"}],`,
+			`"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`, 9},
+		"stream": {"text/event-stream", `data: {"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}` + "\n\n",
+			`data: {"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}` + "\n\n", 8},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", tc.contentType)
+			_, _ = io.WriteString(w, tc.first)
+			w.(http.Flusher).Flush()
+			time.Sleep(50 * time.Millisecond)
+			_, _ = io.WriteString(w, tc.second)
+		}))
+		t.Cleanup(server.Close)
+
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		r = r.WithContext(context.WithValue(r.Context(), http.ServerContextKey, &http.Server{}))
+		var out Outcome
+		func() {
+			defer func() { _ = recover() }()
+			New(Options{}, quiet()).Forward(deadClient{httptest.NewRecorder()}, r, server.URL, false, ModelSwap{}, &out)
+		}()
+		if !out.UsageFound || out.Usage.Total != tc.want {
+			t.Errorf("%s: got %+v found=%v, want Total=%d", name, out.Usage, out.UsageFound, tc.want)
 		}
 	}
 }
@@ -191,9 +273,8 @@ func TestUsageIsReadOutOfABodyPrintedOverManyLines(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	out := forward(New(Options{}, quiet()), server.URL, false)
-	u, ok := domain.ParseUsage([]byte(out.Usage))
-	if !ok || u.Prompt != 2328 || u.Completion != 16 || u.CacheWrite != 2325 || out.UsageStart != "" {
-		t.Errorf("got %+v ok=%v start=%q", u, ok, out.UsageStart)
+	if u, ok := out.Usage, out.UsageFound; !ok || u.Prompt != 2328 || u.Completion != 16 || u.CacheWrite != 2325 {
+		t.Errorf("got %+v ok=%v", u, ok)
 	}
 }
 
@@ -201,12 +282,12 @@ func TestUsageIsReadOutOfABodyPrintedOverManyLines(t *testing.T) {
 func TestUsageIsReadOutOfTheTailOfALongPrintedBody(t *testing.T) {
 	body := "{\n  \"choices\": [\n    {\n      \"text\": \"" + strings.Repeat("a\\n", carryLimit) + "\"\n    }\n  ],\n" +
 		"  \"usage\": {\n    \"prompt_tokens\": 7,\n    \"completion_tokens\": 2,\n    \"total_tokens\": 9\n  }\n}\n"
-	tee := newUsageTee(io.NopCloser(strings.NewReader(body)), false)
-	if _, err := io.Copy(io.Discard, tee); err != nil {
+	reader := newUsageReader(io.NopCloser(strings.NewReader(body)), domain.UsageAdapterFor(domain.DialectOpenAI), false)
+	if _, err := io.Copy(io.Discard, reader); err != nil {
 		t.Fatal(err)
 	}
-	if u, ok := domain.ParseUsage([]byte(tee.Usage())); !ok || u.Total != 9 || len(tee.Usage()) > carryLimit {
-		t.Errorf("got %+v ok=%v from %d bytes", u, ok, len(tee.Usage()))
+	if u, ok := reader.Usage(); !ok || u.Total != 9 {
+		t.Errorf("got %+v ok=%v", u, ok)
 	}
 }
 
@@ -306,9 +387,8 @@ func TestACutStreamKeepsItsLastWholeUsageFrame(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	out := forward(New(Options{}, quiet()), server.URL, false)
-	if out.Cut != domain.CutUpstream || !strings.Contains(out.Usage, `"total_tokens":9`) ||
-		!strings.Contains(out.UsageStart, `"total_tokens":8`) {
-		t.Errorf("cut %q, start %q, last %q", out.Cut, out.UsageStart, out.Usage)
+	if out.Cut != domain.CutUpstream || !out.UsageFound || out.Usage.Total != 9 {
+		t.Errorf("cut %q, usage %+v found=%v", out.Cut, out.Usage, out.UsageFound)
 	}
 }
 
@@ -346,8 +426,13 @@ func TestOnlyTheRelayedHeadersReachTheClient(t *testing.T) {
 }
 
 // forwardOn is forward on a surface, keeping what the client received.
+// forwardOn is a hop on a surface, at the path that surface owns: the answer's shape follows the path.
 func forwardOn(p *Proxy, target, dialect string) (Outcome, *httptest.ResponseRecorder) {
-	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	path := "/v1/chat/completions"
+	if dialect == domain.DialectAnthropic {
+		path = "/v1/messages"
+	}
+	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 	r = r.WithContext(respond.WithDialect(r.Context(), dialect))
 	w := httptest.NewRecorder()
 	var out Outcome
@@ -451,14 +536,15 @@ func TestAnUpstreamConnectionThatDiesQuietlyIsPingedOut(t *testing.T) {
 func TestAnAbandonedStreamEndsInAnErrorEvent(t *testing.T) {
 	const limit = 100 * time.Millisecond
 	first := `data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}` + "\n\n"
+	firstAnthropic := `data: {"type":"message_start","message":{"usage":{"input_tokens":3,"output_tokens":1}}}` + "\n\n"
 	for name, tc := range map[string]struct {
 		dialect, sent, cut, want string
 		silent                   bool
 	}{
 		"silent, openai": {domain.DialectOpenAI, first, domain.CutUpstreamIdle,
 			first + `data: {"error":{"message":"upstream went silent","type":"api_error"}}` + "\n\n", true},
-		"silent, anthropic": {domain.DialectAnthropic, first, domain.CutUpstreamIdle,
-			first + "event: error\ndata: " + `{"error":{"message":"upstream went silent","type":"api_error"},"type":"error"}` + "\n\n", true},
+		"silent, anthropic": {domain.DialectAnthropic, firstAnthropic, domain.CutUpstreamIdle,
+			firstAnthropic + "event: error\ndata: " + `{"error":{"message":"upstream went silent","type":"api_error"},"type":"error"}` + "\n\n", true},
 		"broke off mid-line": {domain.DialectOpenAI, first + `data: {"cho`, domain.CutUpstream,
 			first + `data: {"cho` + "\n\n" + `data: {"error":{"message":"upstream broke off the stream","type":"api_error"}}` + "\n\n", false},
 	} {
@@ -482,8 +568,8 @@ func TestAnAbandonedStreamEndsInAnErrorEvent(t *testing.T) {
 		if out.Cut != tc.cut {
 			t.Errorf("%s: cut %q, want %q", name, out.Cut, tc.cut)
 		}
-		if !strings.Contains(out.Usage, `"prompt_tokens":3`) {
-			t.Errorf("%s: usage lost: %q", name, out.Usage)
+		if !out.UsageFound || out.Usage.Prompt != 3 {
+			t.Errorf("%s: usage lost: %+v found=%v", name, out.Usage, out.UsageFound)
 		}
 	}
 }

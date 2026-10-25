@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/frappe/pathway/internal/domain"
@@ -36,10 +37,25 @@ func priced(t *testing.T, id string, rates map[string]int64) *domain.Pricing {
 const openAIUsage = `{"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,` +
 	`"prompt_tokens_details":{"cached_tokens":80}}}`
 
+// usageOf is a vendor's body as the proxy's reader hands it to metering, read by the dialect its
+// shape says it is: only Anthropic names the cache buckets apart.
+func usageOf(t *testing.T, raw string) domain.Usage {
+	t.Helper()
+	dialect := domain.DialectOpenAI
+	if strings.Contains(raw, "cache_read_input_tokens") || strings.Contains(raw, "cache_creation_input_tokens") {
+		dialect = domain.DialectAnthropic
+	}
+	u, ok := domain.UsageAdapterFor(dialect).Document([]byte(raw))
+	if !ok {
+		t.Fatalf("no usage in %s", raw)
+	}
+	return u
+}
+
 // Every metric is written flat and twinned per model and per deployment in the same hash, so one
 // drain carries the aggregate and the breakdown together.
 func TestUsageFieldsTwinsEveryMetric(t *testing.T) {
-	fields, _ := UsageFields(Report{Model: "qwen3-4b", Deployment: "MD-00007", Usage: openAIUsage})
+	fields, _ := UsageFields(Report{Model: "qwen3-4b", Deployment: "MD-00007", Usage: usageOf(t, openAIUsage), UsageFound: true})
 
 	for field, want := range map[string]int64{
 		"request_count":                1,
@@ -69,7 +85,7 @@ func TestUsageFieldsTwinsEveryMetric(t *testing.T) {
 func TestZeroMetricsAreNotWritten(t *testing.T) {
 	fields, _ := UsageFields(Report{
 		Model: "qwen3-4b",
-		Usage: `{"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10}}`,
+		Usage: usageOf(t, `{"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10}}`), UsageFound: true,
 	})
 	if _, present := fields["completion_tokens"]; present {
 		t.Error("a zero completion count was written")
@@ -82,7 +98,7 @@ func TestZeroMetricsAreNotWritten(t *testing.T) {
 // m:<metric>:<deployment> shares a namespace with m:<metric>:<model>. When a Model is named the
 // same as its Model Deployment, writing both would bill that request twice.
 func TestAModelNamedLikeItsDeploymentIsNotDoubleCounted(t *testing.T) {
-	fields, _ := UsageFields(Report{Model: "same", Deployment: "same", Usage: openAIUsage})
+	fields, _ := UsageFields(Report{Model: "same", Deployment: "same", Usage: usageOf(t, openAIUsage), UsageFound: true})
 	if got := fields["m:total_tokens:same"]; got != 120 {
 		t.Errorf("m:total_tokens:same = %d, want 120", got)
 	}
@@ -91,12 +107,16 @@ func TestAModelNamedLikeItsDeploymentIsNotDoubleCounted(t *testing.T) {
 // A request that produced no usage frame still counts as a request. Dropping it would make the
 // request count disagree with the access log for every streaming client that hung up early.
 func TestARequestWithNoUsageStillCounts(t *testing.T) {
-	fields, _ := UsageFields(Report{Model: "qwen3-4b", Usage: ""})
+	fields, _ := UsageFields(Report{Model: "qwen3-4b", UsageExpected: true})
 	if fields["request_count"] != 1 {
 		t.Errorf("request_count = %d, want 1", fields["request_count"])
 	}
 	if _, present := fields["total_tokens"]; present {
 		t.Error("tokens were invented for a request that reported none")
+	}
+	// The miss is a warn line in error.log, not a counter: nothing else lands for it.
+	if len(fields) != 2 {
+		t.Errorf("fields = %v, want only the request counted", fields)
 	}
 }
 
@@ -105,7 +125,7 @@ func TestARequestWithNoUsageStillCounts(t *testing.T) {
 func TestUsageFieldsEmitsThePricedCounters(t *testing.T) {
 	anthropic := `{"usage":{"input_tokens":50,"output_tokens":7,"cache_read_input_tokens":30,` +
 		`"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":15,"ephemeral_1h_input_tokens":5}}}`
-	fields, trusted := UsageFields(Report{Model: "claude", Deployment: "anthropic", Usage: anthropic})
+	fields, trusted := UsageFields(Report{Model: "claude", Deployment: "anthropic", Usage: usageOf(t, anthropic), UsageFound: true})
 	if !trusted {
 		t.Error("a consistent response was flagged")
 	}
@@ -125,7 +145,7 @@ func TestUsageFieldsEmitsThePricedCounters(t *testing.T) {
 
 // A duration-shaped transcription reports seconds, not tokens: shown, and nothing priced moves.
 func TestUsageFieldsMetersAudioSeconds(t *testing.T) {
-	fields, _ := UsageFields(Report{Model: "whisper", Usage: `{"usage":{"type":"duration","seconds":12}}`})
+	fields, _ := UsageFields(Report{Model: "whisper", Usage: usageOf(t, `{"usage":{"type":"duration","seconds":12}}`), UsageFound: true})
 	if fields["audio_seconds"] != 12 || fields["m:audio_seconds:whisper"] != 12 {
 		t.Errorf("audio_seconds = %d", fields["audio_seconds"])
 	}
@@ -162,7 +182,7 @@ func TestUsageFieldsCountsAudioInsideThePrompt(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fields, _ := UsageFields(Report{Model: "m", Usage: tc.usage})
+			fields, _ := UsageFields(Report{Model: "m", Usage: usageOf(t, tc.usage), UsageFound: true})
 			for field, want := range tc.want {
 				if fields[field] != want {
 					t.Errorf("%s = %d, want %d", field, fields[field], want)
@@ -181,7 +201,7 @@ func TestAudioOutputIsChargedApartFromTheCompletion(t *testing.T) {
 	usage := `{"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,` +
 		`"completion_tokens_details":{"audio_tokens":5}}}`
 	pricing := priced(t, "a1", map[string]int64{"completion_tokens": 15e9, "completion_audio_tokens": 80e9})
-	fields, _ := UsageFields(Report{Model: "gpt-audio", Usage: usage, Pricing: pricing})
+	fields, _ := UsageFields(Report{Model: "gpt-audio", Usage: usageOf(t, usage), UsageFound: true, Pricing: pricing})
 	if cost := PricedFields(fields, pricing); cost != 15*15000+5*80000 {
 		t.Errorf("cost = %d, want 625000", cost)
 	}
@@ -235,7 +255,7 @@ func TestALongRequestKeepsItsOneRatePartsWithTheBaseCounters(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			pricing := priced(t, "p", tc.rates)
-			fields, trusted := UsageFields(Report{Model: "m", Usage: tc.usage, Pricing: pricing})
+			fields, trusted := UsageFields(Report{Model: "m", Usage: usageOf(t, tc.usage), UsageFound: true, Pricing: pricing})
 			if cost := PricedFields(fields, pricing); !trusted || cost != tc.cost {
 				t.Errorf("trusted %v, cost = %d, want %d", trusted, cost, tc.cost)
 			}
@@ -253,7 +273,7 @@ func TestALongRequestKeepsItsOneRatePartsWithTheBaseCounters(t *testing.T) {
 func TestCacheBucketsBeyondThePromptBillAsPlain(t *testing.T) {
 	overflow := `{"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,` +
 		`"prompt_tokens_details":{"cached_tokens":50}}}`
-	fields, trusted := UsageFields(Report{Model: "qwen3-4b", Usage: overflow})
+	fields, trusted := UsageFields(Report{Model: "qwen3-4b", Usage: usageOf(t, overflow), UsageFound: true})
 	if trusted {
 		t.Error("an inconsistent response was trusted")
 	}
@@ -274,7 +294,7 @@ func TestRecordAccruesCostAndSpend(t *testing.T) {
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
 
 	svc.Record(context.Background(), Report{
-		Prefix: "abc", Model: "qwen3-4b", Usage: openAIUsage, MeterID: "k1", Budget: 10_000_000, UpstreamStatus: "200",
+		Prefix: "abc", Model: "qwen3-4b", Usage: usageOf(t, openAIUsage), UsageFound: true, MeterID: "k1", Budget: 10_000_000, UpstreamStatus: "200",
 		// $3/Mtok plain, $0.30/Mtok cached, $15/Mtok completion, in nano-USD per Mtok.
 		Pricing: priced(t, "mp1", map[string]int64{"prompt_tokens": 3e9, "cached_tokens": 3e8, "completion_tokens": 15e9}),
 	})
@@ -306,7 +326,7 @@ func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 	store := memory.New()
 	store.Keys["k1"] = domain.KeyRecord{}
 	svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
-	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: openAIUsage, MeterID: "k1", UpstreamStatus: "200"})
+	svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", Usage: usageOf(t, openAIUsage), UsageFound: true, MeterID: "k1", UpstreamStatus: "200"})
 
 	usage := store.UsageOf("abc")
 	if _, present := usage["cost"]; present {
@@ -315,15 +335,6 @@ func TestAnUnpricedRequestStillAccrues(t *testing.T) {
 	spent, reported := usage["key_spent"]
 	if usage["total_tokens"] != 120 || !reported || spent != 0 {
 		t.Errorf("usage = %v", usage)
-	}
-}
-
-// The usage frame arrives SSE-wrapped on a streaming response and bare on a non-streaming one.
-// Both have to parse, or every streaming request bills as zero.
-func TestAStreamingFrameParses(t *testing.T) {
-	streamed, _ := UsageFields(Report{Model: "qwen3-4b", Usage: "data: " + openAIUsage})
-	if streamed["total_tokens"] != 120 {
-		t.Errorf("total_tokens = %d from an SSE frame, want 120", streamed["total_tokens"])
 	}
 }
 
@@ -383,7 +394,7 @@ func TestOnlyAServedRequestAccrues(t *testing.T) {
 	} {
 		store := memory.New()
 		svc := New(store.Repositories().Usage, store.Repositories().Limits, store.Repositories().Health, quiet())
-		svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", UpstreamStatus: tc.status, Cut: tc.cut, Usage: openAIUsage})
+		svc.Record(context.Background(), Report{Prefix: "abc", Model: "m", UpstreamStatus: tc.status, Cut: tc.cut, Usage: usageOf(t, openAIUsage), UsageFound: true})
 		if got := store.UsageOf("abc")["request_count"]; got != tc.want {
 			t.Errorf("status %q cut %q: request_count = %d, want %d", tc.status, tc.cut, got, tc.want)
 		}
@@ -431,7 +442,7 @@ func TestAPromptAbove272kIsCountedAndChargedApart(t *testing.T) {
 		"prompt_tokens": 2.5e9, "cached_tokens": 0.25e9, "completion_tokens": 15e9,
 		"prompt_tokens_above_272k": 5e9, "cached_tokens_above_272k": 0.5e9, "completion_tokens_above_272k": 22.5e9,
 	})
-	fields, _ := UsageFields(Report{Model: "gpt", Usage: longUsage, Pricing: pricing})
+	fields, _ := UsageFields(Report{Model: "gpt", Usage: usageOf(t, longUsage), UsageFound: true, Pricing: pricing})
 	if cost := PricedFields(fields, pricing); cost != 262_500_000 {
 		t.Errorf("cost = %d, want 262500000", cost)
 	}
@@ -461,7 +472,7 @@ func TestAbove272kIsChargedAtTheBaseRatesWithoutItsOwn(t *testing.T) {
 	pricing := priced(t, "base", map[string]int64{
 		"prompt_tokens": 2.5e9, "cached_tokens": 0.25e9, "completion_tokens": 15e9,
 	})
-	fields, _ := UsageFields(Report{Model: "gpt", Usage: longUsage, Pricing: pricing})
+	fields, _ := UsageFields(Report{Model: "gpt", Usage: usageOf(t, longUsage), UsageFound: true, Pricing: pricing})
 	if cost := PricedFields(fields, pricing); cost != 135_000_000 {
 		t.Errorf("cost = %d, want 135000000", cost)
 	}
@@ -474,7 +485,7 @@ func TestAbove272kIsChargedAtTheBaseRatesWithoutItsOwn(t *testing.T) {
 	if _, present := fields["prompt_tokens"]; present {
 		t.Error("prompt_tokens written for a prompt above 272k")
 	}
-	unpriced, _ := UsageFields(Report{Model: "gpt", Usage: longUsage})
+	unpriced, _ := UsageFields(Report{Model: "gpt", Usage: usageOf(t, longUsage), UsageFound: true})
 	if unpriced["prompt_tokens"] != 300000 || unpriced["cached_tokens"] != 280000 || unpriced["prompt_tokens_above_272k"] != 0 {
 		t.Errorf("unpriced counters = %v", unpriced)
 	}
@@ -483,34 +494,12 @@ func TestAbove272kIsChargedAtTheBaseRatesWithoutItsOwn(t *testing.T) {
 // Strictly past: a prompt of exactly 272k is counted under the base counters.
 func TestAPromptOfExactly272kIsNotAbove(t *testing.T) {
 	usage := `{"usage":{"prompt_tokens":272000,"completion_tokens":10,"total_tokens":272010}}`
-	fields, _ := UsageFields(Report{Model: "gpt", Usage: usage, Pricing: priced(t, "p", nil)})
+	fields, _ := UsageFields(Report{Model: "gpt", Usage: usageOf(t, usage), UsageFound: true, Pricing: priced(t, "p", nil)})
 	if fields["prompt_tokens"] != 272000 || fields["completion_tokens"] != 10 {
 		t.Errorf("counters = %v", fields)
 	}
 	if _, present := fields["prompt_tokens_above_272k"]; present {
 		t.Error("counted above 272k at exactly 272k")
-	}
-}
-
-// The first usage line carries what the last one left out; one with nothing to read is ignored.
-func TestUsageFieldsMergesTheFirstUsageLine(t *testing.T) {
-	start := `data: {"type":"message_start","message":{"usage":{"input_tokens":66,"cache_read_input_tokens":2,` +
-		`"cache_creation_input_tokens":5,"cache_creation":{"ephemeral_1h_input_tokens":3},"output_tokens":1}}}`
-	last := `data: {"type":"message_delta","usage":{"output_tokens":26}}`
-	fields, _ := UsageFields(Report{Model: "claude", UsageStart: start, Usage: last})
-	for field, want := range map[string]int64{
-		"prompt_tokens": 73, "completion_tokens": 26, "total_tokens": 99,
-		"cached_tokens": 2, "cache_write_tokens": 2, "cache_write_1h_tokens": 3,
-	} {
-		if fields[field] != want {
-			t.Errorf("%s = %d, want %d", field, fields[field], want)
-		}
-	}
-
-	null := `data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}`
-	fields, _ = UsageFields(Report{Model: "gpt", UsageStart: null, Usage: "data: " + openAIUsage})
-	if fields["prompt_tokens"] != 100 || fields["total_tokens"] != 120 {
-		t.Errorf("a null first line moved the counts: %v", fields)
 	}
 }
 
@@ -523,7 +512,7 @@ func TestAPromptAbove272kCountsItsCacheWritesApart(t *testing.T) {
 		"prompt_tokens_above_272k": 5e9, "cached_tokens_above_272k": 0.5e9,
 		"cache_write_tokens_above_272k": 6.25e9, "completion_tokens_above_272k": 22.5e9,
 	})
-	fields, trusted := UsageFields(Report{Model: "gpt", Usage: usage, Pricing: pricing})
+	fields, trusted := UsageFields(Report{Model: "gpt", Usage: usageOf(t, usage), UsageFound: true, Pricing: pricing})
 	if cost := PricedFields(fields, pricing); !trusted || cost != 722_500_000 {
 		t.Errorf("trusted %v, cost = %d, want 722500000", trusted, cost)
 	}
@@ -560,7 +549,7 @@ func TestThePushedTableDecidesTheBrackets(t *testing.T) {
 	}
 	usage := `{"usage":{"input_tokens":100000,"cache_read_input_tokens":450000,"cache_creation_input_tokens":50000,` +
 		`"cache_creation":{"ephemeral_1h_input_tokens":20000},"output_tokens":10}}`
-	fields, trusted := UsageFields(Report{Model: "claude", Usage: usage, Pricing: pricing})
+	fields, trusted := UsageFields(Report{Model: "claude", Usage: usageOf(t, usage), UsageFound: true, Pricing: pricing})
 	if !trusted {
 		t.Fatal("not trusted")
 	}
@@ -599,7 +588,7 @@ func TestAPushedThresholdReplacesTheDefault(t *testing.T) {
 			{Name: "prompt_tokens_above_200k", Divisor: 1_000_000, Base: "prompt_tokens", MinPromptTokens: 200000},
 		}}
 	usage := `{"usage":{"prompt_tokens":250000,"completion_tokens":10,"total_tokens":250010}}`
-	fields, _ := UsageFields(Report{Model: "gpt", Usage: usage, Pricing: pricing})
+	fields, _ := UsageFields(Report{Model: "gpt", Usage: usageOf(t, usage), UsageFound: true, Pricing: pricing})
 	if fields["prompt_tokens_above_200k"] != 250000 || fields["completion_tokens"] != 10 {
 		t.Errorf("counters = %v", fields)
 	}

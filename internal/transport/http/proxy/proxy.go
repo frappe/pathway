@@ -25,11 +25,14 @@ import (
 
 // Outcome is what the proxy learned, for metering and passive ejection.
 type Outcome struct {
-	Status int    // the upstream's status; 0 means the hop never produced one
-	Usage  string // the captured usage line, empty if the response carried none
-	// UsageStart is the first usage line of a response that carried more than one: where an
-	// Anthropic stream reports its prompt.
-	UsageStart string
+	Status int // the upstream's status; 0 means the hop never produced one
+	// Usage is what the response reported, merged across its frames; UsageFound whether it
+	// reported anything. UsageExpected marks a 2xx JSON or event-stream answer, the kind that
+	// carries usage: one of those that found none is a miss worth a warning, where a binary body,
+	// an upgrade or an error never carried any.
+	Usage         domain.Usage
+	UsageFound    bool
+	UsageExpected bool
 	// UpstreamRID is the upstream's own request id off x-request-id or request-id: what a ticket
 	// to a vendor quotes. Blank on our engines, which run without request-id headers.
 	UpstreamRID string
@@ -124,18 +127,21 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 		return
 	}
 
-	// The hop has a context of its own under the client's, so an upstream gone silent can be cut
-	// while the client is still there, and the two told apart afterwards.
-	hop, cancel := context.WithCancelCause(r.Context())
+	// The hop has a context of its own, so an upstream gone silent can be cut while the client is
+	// still there, and the two told apart afterwards. A client that leaves cuts the hop too — until
+	// a document's headers are in: the upstream generated and billed that answer whole before it
+	// sent a byte, so the rest is read for its usage (see usageReader.Close). A stream stays cut.
+	hop, cancel := context.WithCancelCause(context.WithoutCancel(r.Context()))
 	defer cancel(nil)
+	leave := context.AfterFunc(r.Context(), func() { cancel(context.Canceled) })
+	defer leave()
 
-	var tee *usageTee
+	var usage *usageReader
 	defer func() {
-		if tee != nil {
-			outcome.Usage = tee.Usage()
-			outcome.UsageStart = tee.UsageStart()
+		if usage != nil {
+			outcome.Usage, outcome.UsageFound = usage.Usage()
 		}
-		outcome.Cut = cutBy(hop, r.Context(), tee)
+		outcome.Cut = cutBy(hop, r.Context(), usage)
 	}()
 
 	reverse := &httputil.ReverseProxy{
@@ -146,7 +152,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 			// SNI and virtual hosts: the target's name, not the one the client asked us for.
 			pr.Out.Host = base.Host
-			// The tee reads the body as it passes, so the upstream is never asked to compress it.
+			// The usage reader reads the body as it passes, so the upstream is never asked to compress it.
 			pr.Out.Header.Del("Accept-Encoding")
 			// ReverseProxy drops inbound X-Forwarded-* whenever Rewrite is set, so a rewrite cannot
 			// carry a spoofed header. Ours are not the client's — upstreamauth just wrote them from
@@ -175,22 +181,28 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			}
 			keepRelayed(resp.Header)
 			// A 101 hands the connection to ReverseProxy, which needs the body to stay an
-			// io.ReadWriteCloser to write back to the engine. The tee is read-only and would fail
-			// the handshake — and a hijacked stream has no usage frame to scrape anyway.
+			// io.ReadWriteCloser to write back to the engine. The usage reader is read-only and would
+			// fail the handshake — and a hijacked stream has no usage frame to read anyway.
 			if resp.StatusCode == http.StatusSwitchingProtocols {
 				return nil
 			}
 			idle := newIdleBody(resp.Body, p.readTimeout(), func() { cancel(errUpstreamIdle) })
-			tee = newUsageTee(idle, isEventStream(resp))
-			resp.Body = tee
+			stream := isEventStream(resp)
+			if !stream {
+				// The answer is whole on the upstream's side: a client leaving no longer cuts it.
+				leave()
+			}
+			outcome.UsageExpected = carriesUsage(resp)
+			usage = newUsageReader(idle, domain.UsageAdapterFor(usageDialect(r)), stream)
+			resp.Body = usage
 			if swap.active() {
-				// The tee stays innermost so usage is scraped off the raw upstream bytes. The two
-				// ids differ in length, so the declared length cannot survive the rewrite.
+				// The usage reader stays innermost so usage is read off the raw upstream bytes. The
+				// two ids differ in length, so the declared length cannot survive the rewrite.
 				resp.Header.Del("Content-Length")
 				resp.ContentLength = -1
-				resp.Body = newModelSwapReader(tee, swap)
+				resp.Body = newModelSwapReader(usage, swap)
 			}
-			if isEventStream(resp) {
+			if stream {
 				// Outermost, and the declared length dropped: the closing event adds bytes.
 				resp.Header.Del("Content-Length")
 				resp.ContentLength = -1
@@ -253,16 +265,36 @@ func keepRelayed(header http.Header) {
 // cutBy names who ended a response that did not finish, blank for one that did. In this order: a
 // silent upstream is cancelled by us, and a client that left cancels everything under it, so
 // either can also look like a body that broke off.
-func cutBy(hop, client context.Context, tee *usageTee) string {
+func cutBy(hop, client context.Context, usage *usageReader) string {
 	switch {
 	case context.Cause(hop) == errUpstreamIdle:
 		return domain.CutUpstreamIdle
 	case client.Err() != nil:
 		return domain.CutClientLeft
-	case tee != nil && tee.failed:
+	case usage != nil && usage.failed:
 		return domain.CutUpstream
 	}
 	return ""
+}
+
+// usageDialect is the shape the answer comes in: the dialect that owns the path, else the surface
+// the request arrived on — nothing translates between them, so the upstream answers in it.
+func usageDialect(r *http.Request) string {
+	if dialect := domain.PathDialect(r.URL.Path); dialect != "" {
+		return dialect
+	}
+	return respond.Dialect(r.Context())
+}
+
+// carriesUsage reports whether an answer is of the kind that reports usage: a success whose body
+// is JSON or an event stream. Audio, an image, an upgrade or an error never carry any, and one
+// without is no miss.
+func carriesUsage(resp *http.Response) bool {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	return mediaType == "application/json" || mediaType == "text/event-stream"
 }
 
 func (p *Proxy) readTimeout() time.Duration {

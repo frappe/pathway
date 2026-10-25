@@ -22,11 +22,12 @@ type Report struct {
 	// Deployment is which placement actually served it. On a direct route the gateway already
 	// knows; on an ingress route only the ingress does, and it says so in a response header.
 	Deployment string
-	// Usage is the raw JSON captured from the response — the final streaming frame or the whole
-	// non-streaming body. May be empty.
-	Usage string
-	// UsageStart is the first usage line of a response that carried more than one. May be empty.
-	UsageStart string
+	// Usage is what the response reported, merged across its frames, and UsageFound whether it
+	// reported anything. UsageExpected marks an answer of the kind that carries usage; one that
+	// carried none is warned about in error.log, so a vendor that stopped reporting is seen.
+	Usage         domain.Usage
+	UsageFound    bool
+	UsageExpected bool
 	// What it cost: the pricing that charges it (nil = unpriced), and the cap the key's balance
 	// is reported against.
 	Pricing *domain.Pricing
@@ -82,6 +83,10 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 		return
 	}
 	fields, trusted := UsageFields(rep)
+	if rep.UsageExpected && !rep.UsageFound {
+		s.log.Warn("response carried no usage; billed as zero", "request", rep.RequestID, "model", rep.Model,
+			"target", rep.Target, "status", rep.UpstreamStatus, "cut", rep.Cut)
+	}
 	if !trusted {
 		if _, seen := s.warned.LoadOrStore(rep.Model, true); !seen {
 			s.log.Warn("cache buckets exceed the prompt; counted as plain", "model", rep.Model)
@@ -138,14 +143,10 @@ func UsageFields(rep Report) (fields map[string]int64, trusted bool) {
 	}
 
 	bump("request_count", 1)
-	u, ok := domain.ParseUsage([]byte(rep.Usage))
-	// A first line with nothing to read (OpenAI's "usage":null chunks) is ignored.
-	if start, split := domain.ParseUsage([]byte(rep.UsageStart)); split {
-		u, ok = domain.MergeUsage(start, u), true
-	}
-	if !ok {
+	if !rep.UsageFound {
 		return fields, true
 	}
+	u := rep.Usage
 	trusted = u.Cached+u.CacheWrite <= u.Prompt
 	if !trusted {
 		u.Cached, u.CacheWrite, u.CacheWrite1h = 0, 0, 0
