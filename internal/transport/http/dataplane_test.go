@@ -32,8 +32,10 @@ import (
 // what landed in the store. Every one of these was untestable while nginx owned the bytes.
 
 const (
-	secret      = "gr_demo"
-	usageObject = `"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,` +
+	secret = "gr_demo"
+	// anthropicUsageObject is the same count in the shape a /v1/messages upstream answers in.
+	anthropicUsageObject = `"usage":{"input_tokens":100,"output_tokens":20}`
+	usageObject          = `"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,` +
 		`"prompt_tokens_details":{"cached_tokens":80}}`
 )
 

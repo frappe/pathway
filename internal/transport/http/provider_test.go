@@ -19,7 +19,7 @@ import (
 // vendor: what matters is the request as it leaves us, not who answers it.
 func providerFixture(t *testing.T) *fixture {
 	t.Helper()
-	return providerFixtureAnswering(t, jsonEngine(`{`+usageObject+`}`))
+	return providerFixtureAnswering(t, jsonEngine(`{`+anthropicUsageObject+`}`))
 }
 
 func providerFixtureAnswering(t *testing.T, engineHandler http.HandlerFunc) *fixture {
@@ -132,7 +132,7 @@ func TestProviderUsageIsRecordedAgainstTheGroveID(t *testing.T) {
 // modelmap in reverse: the vendor answers under its own spelling, and the client gets back the id
 // it asked for — the rewrite must not be visible from outside.
 func TestAProviderResponseSpeaksTheGroveModelID(t *testing.T) {
-	f := providerFixtureAnswering(t, jsonEngine(`{"id":"msg_1","model":"claude-sonnet-4-5-20250929",`+usageObject+`}`))
+	f := providerFixtureAnswering(t, jsonEngine(`{"id":"msg_1","model":"claude-sonnet-4-5-20250929",`+anthropicUsageObject+`}`))
 	resp := f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
 
 	if !strings.Contains(resp.Body.String(), `"model":"anthropic/claude-4-5"`) ||
@@ -147,7 +147,7 @@ func TestAProviderStreamSpeaksTheGroveModelIDInEveryFrame(t *testing.T) {
 	frames := []string{
 		`data: {"type":"message_start","message":{"model":"claude-sonnet-4-5-20250929"}}`,
 		`data: {"type":"content_block_delta","delta":{"text":"Hi"}}`,
-		`data: {"type":"message_delta","model":"claude-sonnet-4-5-20250929",` + usageObject + `}`,
+		`data: {"type":"message_delta","model":"claude-sonnet-4-5-20250929",` + anthropicUsageObject + `}`,
 	}
 	f := providerFixtureAnswering(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

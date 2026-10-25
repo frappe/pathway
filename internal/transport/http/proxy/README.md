@@ -27,7 +27,7 @@ under traffic it is never idle, so the 90s idle close never reaches it.
 ## Streaming
 
 The response is never buffered. `FlushInterval: -1` pushes each write straight through, and the
-usage scraper (`proxy/usagetee.go`) reads the bytes it is already copying and writes nothing back —
+usage scraper (`proxy/usagereader.go`) reads the bytes it is already copying and writes nothing back —
 so the client sees exactly the stream the engine produced, at the engine's own pace.
 
 One exception, at the end only. When an event stream breaks off — the upstream went silent for
