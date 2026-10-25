@@ -231,7 +231,9 @@ One goroutine per request, as net/http gives it. What is shared between them:
   `Reconfigure`, so in-flight requests finish on the transport they started with.
 - **The drain flag** — `atomic.Bool`.
 - **Redis** — `go-redis` pools connections; every multi-key read is a pipeline or one script, and the
-  usage write is a transaction so a drain never sees half a request.
+  usage write is a transaction so a drain never sees half a request. A key push that moves the key
+  to another team closes its books in the same transaction: the live buckets are set aside stamped
+  with the team charged, so a request is wholly the old team's or wholly the new one's.
 
 Nothing takes a lock across an I/O call, and no request-scoped value is shared between requests.
 

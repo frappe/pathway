@@ -47,6 +47,9 @@ type Store struct {
 	// every spend adjustment id already applied.
 	Drained map[string]map[string]map[string]int64
 	Unacked map[string]bool
+	// Stamps is the team charged for a set-aside pair, "<id>:<bucket>" → team, only for pairs a
+	// hand-over set aside: the memory twin of the `team` field handOverScript writes.
+	Stamps map[string]string
 	// Accrued is the request ids a replay has landed, the memory twin of accrued:<id>.
 	Accrued  map[string]bool
 	Retained map[string]time.Duration
@@ -66,8 +69,8 @@ func New() *Store {
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
 		Limits: map[string]int64{}, Hashes: map[string]string{}, Fail: map[string]bool{},
-		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{}, Accrued: map[string]bool{},
-		Retained: map[string]time.Duration{}, Adjusted: map[string]bool{},
+		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{}, Stamps: map[string]string{},
+		Accrued: map[string]bool{}, Retained: map[string]time.Duration{}, Adjusted: map[string]bool{},
 	}
 }
 
@@ -152,6 +155,8 @@ func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, boo
 	return holder, true, nil
 }
 
+// Upsert matches the real one: a key held under another team has its live buckets set aside,
+// stamped with that team, before the record is written.
 func (k keys) Upsert(_ context.Context, records []repository.KeyUpsert) error {
 	k.s.mu.Lock()
 	defer k.s.mu.Unlock()
@@ -162,9 +167,34 @@ func (k keys) Upsert(_ context.Context, records []repository.KeyUpsert) error {
 		if rec.MeterID == "" {
 			continue
 		}
+		if held := k.s.Keys[rec.MeterID].Team; held != "" && held != rec.Team {
+			k.s.closeBooks(rec.Prefix, held)
+		}
 		k.s.putKey(rec)
 	}
 	return nil
+}
+
+// closeBooks sets every live bucket of prefix aside under a fresh drain id, stamped with team.
+// Caller holds mu.
+func (s *Store) closeBooks(prefix, team string) {
+	id := repository.NewDrainID(time.Now())
+	for bucket := range s.Usage {
+		if p, _ := repository.SplitBucket(bucket); p == prefix {
+			s.setAside(id, bucket)
+			s.Stamps[id+":"+bucket] = team
+		}
+	}
+}
+
+// setAside moves one live bucket under id and marks the pair unacknowledged. Caller holds mu.
+func (s *Store) setAside(id, bucket string) {
+	if s.Drained[id] == nil {
+		s.Drained[id] = map[string]map[string]int64{}
+	}
+	s.Drained[id][bucket] = s.Usage[bucket]
+	s.Unacked[id+":"+bucket] = true
+	delete(s.Usage, bucket)
 }
 
 func (k keys) Delete(_ context.Context, ids []string) (int, error) {
@@ -538,16 +568,10 @@ func (u usage) Drain(_ context.Context, newID string, keys []string) (repository
 		return nil, err
 	}
 	want := wantedBuckets(keys)
-	for bucket, fields := range u.s.Usage {
-		if !want(bucket) {
-			continue
+	for bucket := range u.s.Usage {
+		if want(bucket) {
+			u.s.setAside(newID, bucket)
 		}
-		if u.s.Drained[newID] == nil {
-			u.s.Drained[newID] = map[string]map[string]int64{}
-		}
-		u.s.Drained[newID][bucket] = fields
-		u.s.Unacked[newID+":"+bucket] = true
-		delete(u.s.Usage, bucket)
 	}
 	return u.unacked(want), nil
 }
@@ -561,7 +585,11 @@ func (u usage) unacked(want func(string) bool) repository.Drains {
 			continue
 		}
 		prefix, day := repository.SplitBucket(bucket)
-		out.Put(id, prefix, day, counters(u.s.Drained[id][bucket]))
+		snapshot := counters(u.s.Drained[id][bucket])
+		if team, stamped := u.s.Stamps[member]; stamped {
+			snapshot["team"] = team
+		}
+		out.Put(id, prefix, day, snapshot)
 	}
 	return out
 }

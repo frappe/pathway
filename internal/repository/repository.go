@@ -5,6 +5,8 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"time"
 
 	"github.com/frappe/pathway/internal/domain"
@@ -138,6 +140,14 @@ func (d Drains) Put(id, prefix, day string, counters map[string]string) {
 
 // Acks is drain id → key prefix → the days the control plane recorded.
 type Acks map[string]map[string][]string
+
+// NewDrainID is sortable by when the drain started, and unique across boxes on one store. It
+// carries no ':', which is what lets the first ':' of "<id>:<bucket>" split it.
+func NewDrainID(now time.Time) string {
+	suffix := make([]byte, 4)
+	_, _ = rand.Read(suffix)
+	return now.UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(suffix)
+}
 
 // UsageBucket names the live counter a request lands in: its key's prefix and the UTC day it was
 // served, off the same clock as the key's spend, so the control plane's day and month are the

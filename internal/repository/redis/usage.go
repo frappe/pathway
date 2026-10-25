@@ -16,7 +16,10 @@ import (
 // (repository.UsageBucket), holding both the flat metrics and their per-model and per-deployment
 // twins, so a single drain carries the aggregate and the breakdown together. The day is named off
 // the same clock as the field the key's spend lands under (spentField), and the control plane
-// records the counters on it: its day and month are this store's own.
+// records the counters on it: its day and month are this store's own. A drain sets a bucket aside
+// under drained:<drain id>:<bucket>; so does the push that moves the key to another team, which
+// stamps the set-aside with the team charged for it (`team`), so the control plane's books split
+// exactly where the key changed hands.
 type usage struct{ rdb *redis.Client }
 
 // accrueBody lands one request in one call: the counters, then the key's spend under the field its
@@ -179,14 +182,30 @@ func (u usage) hashes(ctx context.Context, keyPrefix string, names []string) ([]
 // time it may be a fresh counter that belongs to the next drain.
 //
 // KEYS[1] usage:<bucket>, KEYS[2] drained:<id>:<bucket>, KEYS[3] drain:unacked; ARGV[1] "<id>:<bucket>"
-var setAsideScript = redis.NewScript(`
+const setAsideBody = `
 if redis.call('EXISTS', KEYS[1]) == 0 or redis.call('EXISTS', KEYS[2]) == 1 then
   return 0
 end
 redis.call('RENAME', KEYS[1], KEYS[2])
 redis.call('SADD', KEYS[3], ARGV[1])
-return 1
-`)
+`
+
+var setAsideScript = redis.NewScript(setAsideBody + `return 1`)
+
+// handOverScript is setAside with the team the bucket was charged to stamped on it: the push that
+// moves a key to another team closes its books, and the control plane lands them under that team
+// rather than the key's new one. A stamp lands only with the counters it belongs to.
+//
+// KEYS as setAsideScript; ARGV[1] "<id>:<bucket>", ARGV[2] the team
+var handOverScript = redis.NewScript(setAsideBody + `
+redis.call('HSET', KEYS[2], 'team', ARGV[2])
+return 1`)
+
+// closeBook queues one bucket's hand-over on p, under drain id for team.
+func closeBook(ctx context.Context, p redis.Pipeliner, id, bucket, team string) {
+	member := id + ":" + bucket
+	handOverScript.Eval(ctx, p, []string{"usage:" + bucket, "drained:" + member, unackedKey}, member, team)
+}
 
 // ackScript keeps each acknowledged pair for ARGV[1] seconds, then lets it expire. A pair not in
 // drain:unacked moves nothing.
@@ -227,10 +246,16 @@ func (u usage) Drain(ctx context.Context, newID string, keys []string) (reposito
 }
 
 func (u usage) scanLive(ctx context.Context) ([]string, error) {
+	return liveBuckets(ctx, u.rdb, "*")
+}
+
+// liveBuckets is every live counter whose bucket matches the glob, as SCAN names them (a key can
+// come twice; setAside refuses the second).
+func liveBuckets(ctx context.Context, rdb *redis.Client, match string) ([]string, error) {
 	var live []string
 	var cursor uint64
 	for {
-		found, next, err := u.rdb.Scan(ctx, cursor, "usage:*", 1000).Result()
+		found, next, err := rdb.Scan(ctx, cursor, "usage:"+match, 1000).Result()
 		if err != nil {
 			return nil, err
 		}

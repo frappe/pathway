@@ -31,6 +31,7 @@ func Run(t *testing.T, open func(t *testing.T) repository.Store) {
 		{"ProviderKeysTakeClears", providerKeysTakeClears},
 		{"AdmitTakesTheLastSlotOnce", admitTakesTheLastSlotOnce},
 		{"ADrainIsResentUntilAcked", aDrainIsResentUntilAcked},
+		{"AKeyThatChangesHandsClosesItsBooks", aKeyThatChangesHandsClosesItsBooks},
 		{"SpentIsEachKeysOwnCounter", spentIsEachKeysOwnCounter},
 		{"AReplayLandsOnce", aReplayLandsOnce},
 	}
@@ -195,6 +196,43 @@ func aDrainIsResentUntilAcked(t *testing.T, store repository.Store) {
 	third, err := store.Usage.Drain(ctx, "d3", nil)
 	if err != nil || requests(third, "d1") != 0 || requests(third, "d2") != 1 {
 		t.Fatalf("after ack Drain = %v, %v, want d2 only", third, err)
+	}
+}
+
+// The push that moves a key to another team sets its live buckets aside, stamped with the team
+// that was charged for them; what lands after is the new team's, unstamped. A push that keeps the
+// team, and the first push of a key, set nothing aside.
+func aKeyThatChangesHandsClosesItsBooks(t *testing.T, store repository.Store) {
+	push := func(team string) {
+		must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{{MeterID: "k1", Prefix: "abc", Team: team, Status: "active"}}))
+	}
+	push("trial")
+	must(t, store.Usage.Accrue(ctx, accrual("r1")))
+	push("trial")
+	must(t, store.Usage.Accrue(ctx, accrual("r2")))
+	push("customer")
+	must(t, store.Usage.Accrue(ctx, accrual("r3")))
+
+	drained, err := store.Usage.Drain(ctx, "d1", nil)
+	must(t, err)
+	var closed []string
+	for id := range drained {
+		if id != "d1" {
+			closed = append(closed, id)
+		}
+	}
+	if len(closed) != 1 || requests(drained, closed[0]) != 2 || requests(drained, "d1") != 1 {
+		t.Fatalf("Drain = %v, want the trial's two requests under one box-made id and the customer's one under d1", drained)
+	}
+	for _, counters := range drained[closed[0]]["abc"] {
+		if counters["team"] != "trial" {
+			t.Fatalf("set-aside counters = %v, want team trial", counters)
+		}
+	}
+	for _, counters := range drained["d1"]["abc"] {
+		if _, stamped := counters["team"]; stamped {
+			t.Fatalf("live counters = %v, want no team stamp", counters)
+		}
 	}
 }
 

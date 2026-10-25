@@ -113,7 +113,7 @@ func TestUsageDrainsUntilAcked(t *testing.T) {
 // Drain ids sort by when they started and do not collide.
 func TestDrainIDs(t *testing.T) {
 	at := time.Date(2026, 9, 26, 10, 4, 5, 0, time.UTC)
-	a, b := NewDrainID(at), NewDrainID(at)
+	a, b := repository.NewDrainID(at), repository.NewDrainID(at)
 	if a[:17] != "20260926T100405Z-" || len(a) != 25 || a == b {
 		t.Errorf("ids = %q %q", a, b)
 	}

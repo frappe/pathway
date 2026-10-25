@@ -191,13 +191,31 @@ func writeKey(ctx context.Context, p redis.Pipeliner, rec repository.KeyUpsert) 
 	p.HDel(ctx, redisKey, staleKeyFields...)
 }
 
+// Upsert lands each record whole. A key that changed hands — held here under a team the push
+// does not name — has its live buckets set aside in the same transaction, stamped with the team
+// that was charged for them: a request lands wholly in the old team's bucket or wholly in a
+// fresh one under the new record, so the control plane's books split exactly where the key moved.
 func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error {
-	for _, rec := range records {
+	held, err := k.teamsOf(ctx, records)
+	if err != nil {
+		return err
+	}
+	for i, rec := range records {
 		if rec.MeterID == "" {
 			continue
 		}
-		_, err := k.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		var closing []string
+		if held[i] != "" && held[i] != rec.Team {
+			if closing, err = liveBuckets(ctx, k.rdb, rec.Prefix+":*"); err != nil {
+				return err
+			}
+		}
+		id := repository.NewDrainID(time.Now())
+		_, err = k.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
 			writeKey(ctx, p, rec)
+			for _, bucket := range closing {
+				closeBook(ctx, p, id, bucket, held[i])
+			}
 			return nil
 		})
 		if err != nil {
@@ -205,6 +223,25 @@ func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error 
 		}
 	}
 	return nil
+}
+
+// teamsOf is the team each record's key is held under on this store, "" for one not held: one
+// round trip however many records.
+func (k keys) teamsOf(ctx context.Context, records []repository.KeyUpsert) ([]string, error) {
+	cmds, err := k.rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for _, rec := range records {
+			p.HGet(ctx, "key:"+rec.MeterID, "team")
+		}
+		return nil
+	})
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	teams := make([]string, len(cmds))
+	for i, cmd := range cmds {
+		teams[i], _ = cmd.(*redis.StringCmd).Result()
+	}
+	return teams, nil
 }
 
 func (k keys) Delete(ctx context.Context, ids []string) (int, error) {
