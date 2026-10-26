@@ -110,9 +110,15 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
 					slog.String("engine", or(state.Outcome.Deployment, "-")),
 					slog.Int("upstream_status", state.Outcome.Status),
+					slog.Int("upstream_ms", state.Outcome.UpstreamMS),
+					slog.Int("upstream_attempts", state.Outcome.UpstreamAttempts),
+					slog.String("retry_after", or(state.Outcome.RetryAfter, "-")),
+					slog.String("remaining_requests", or(state.Outcome.RemainingRequests, "-")),
+					slog.String("remaining_tokens", or(state.Outcome.RemainingTokens, "-")),
 					slog.String("reason", or(state.DeniedReason, state.Outcome.Reason)),
 					slog.String("cut", or(state.Outcome.Cut, "-")),
 				)
+				attrs = append(attrs, timing(state, recorder.firstByte)...)
 				if len(state.Meta) > 0 {
 					attrs = append(attrs, metaGroup(state.Meta))
 				}
@@ -688,6 +694,38 @@ func (s *statusRecorder) Write(p []byte) (int, error) {
 	n, err := s.ResponseWriter.Write(p)
 	s.written += int64(n)
 	return n, err
+}
+
+// timing is where the request's time went, for the access line and the attempt line: each stage's
+// own time, from when the request reached it to when it reached the next, the last running to
+// now; then the hop's legs. clientFirstByte is blank on an attempt line, whose answer the client
+// never received.
+func timing(state *State, clientFirstByte time.Time) []slog.Attr {
+	type mark struct {
+		name string
+		at   time.Time
+	}
+	marks := make([]mark, 0, len(state.Entered))
+	for name, at := range state.Entered {
+		marks = append(marks, mark{name, at})
+	}
+	slices.SortFunc(marks, func(a, b mark) int { return a.at.Compare(b.at) })
+	var attrs []slog.Attr
+	if len(marks) > 0 {
+		now, stages := time.Now(), make([]any, 0, len(marks))
+		for i, m := range marks {
+			end := now
+			if i+1 < len(marks) {
+				end = marks[i+1].at
+			}
+			stages = append(stages, slog.Float64(m.name, end.Sub(m.at).Seconds()))
+		}
+		attrs = append(attrs, slog.Group("stage", stages...))
+	}
+	if state.Outcome.Hop != nil {
+		attrs = append(attrs, state.Outcome.Hop.Attrs(clientFirstByte))
+	}
+	return attrs
 }
 
 // ttft is seconds to the first body byte, 0 when nothing was ever written.

@@ -17,6 +17,10 @@ import (
 // the request: nothing outlives the handler and no two requests share one.
 type State struct {
 	Started time.Time
+	// Entered is when each stage was reached, the last entry winning on a re-run: the stage that
+	// ran the ones below again (retry, fallback) then owns the attempts it discarded. Stamped by
+	// Chain, read out as `stage` on the access line.
+	Entered map[string]time.Time
 	// RequestID is minted at the edge, before anything can refuse: every line and header for this
 	// request carries it, a health probe and a 401 included.
 	RequestID string
