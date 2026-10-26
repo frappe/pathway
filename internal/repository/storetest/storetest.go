@@ -31,7 +31,9 @@ func Run(t *testing.T, open func(t *testing.T) repository.Store) {
 		{"ProviderKeysTakeClears", providerKeysTakeClears},
 		{"AdmitTakesTheLastSlotOnce", admitTakesTheLastSlotOnce},
 		{"ADrainIsResentUntilAcked", aDrainIsResentUntilAcked},
+		{"AKeyThatChangesHandsClosesItsBooks", aKeyThatChangesHandsClosesItsBooks},
 		{"SpentIsEachKeysOwnCounter", spentIsEachKeysOwnCounter},
+		{"AKeyCountsItsSpendPerWindow", aKeyCountsItsSpendPerWindow},
 		{"AReplayLandsOnce", aReplayLandsOnce},
 	}
 	for _, c := range cases {
@@ -198,6 +200,43 @@ func aDrainIsResentUntilAcked(t *testing.T, store repository.Store) {
 	}
 }
 
+// The push that moves a key to another team sets its live buckets aside, stamped with the team
+// that was charged for them; what lands after is the new team's, unstamped. A push that keeps the
+// team, and the first push of a key, set nothing aside.
+func aKeyThatChangesHandsClosesItsBooks(t *testing.T, store repository.Store) {
+	push := func(team string) {
+		must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{{MeterID: "k1", Prefix: "abc", Team: team, Status: "active"}}))
+	}
+	push("trial")
+	must(t, store.Usage.Accrue(ctx, accrual("r1")))
+	push("trial")
+	must(t, store.Usage.Accrue(ctx, accrual("r2")))
+	push("customer")
+	must(t, store.Usage.Accrue(ctx, accrual("r3")))
+
+	drained, err := store.Usage.Drain(ctx, "d1", nil)
+	must(t, err)
+	var closed []string
+	for id := range drained {
+		if id != "d1" {
+			closed = append(closed, id)
+		}
+	}
+	if len(closed) != 1 || requests(drained, closed[0]) != 2 || requests(drained, "d1") != 1 {
+		t.Fatalf("Drain = %v, want the trial's two requests under one box-made id and the customer's one under d1", drained)
+	}
+	for _, counters := range drained[closed[0]]["abc"] {
+		if counters["team"] != "trial" {
+			t.Fatalf("set-aside counters = %v, want team trial", counters)
+		}
+	}
+	for _, counters := range drained["d1"]["abc"] {
+		if _, stamped := counters["team"]; stamped {
+			t.Fatalf("live counters = %v, want no team stamp", counters)
+		}
+	}
+}
+
 func spentIsEachKeysOwnCounter(t *testing.T, store repository.Store) {
 	must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{
 		{MeterID: "k1", Prefix: "abc", Status: "active"}, {MeterID: "k2", Prefix: "def", Status: "active"},
@@ -211,6 +250,39 @@ func spentIsEachKeysOwnCounter(t *testing.T, store repository.Store) {
 	}
 	if none, err := store.Keys.Spent(ctx, nil); err != nil || len(none) != 0 {
 		t.Fatalf("Spent of nothing = %v, %v", none, err)
+	}
+}
+
+// A push that moves a key's budget window reads that window's field: a total key spent for good
+// starts the month at 0, and finds its total again when moved back. Spent answers the same field.
+func aKeyCountsItsSpendPerWindow(t *testing.T, store repository.Store) {
+	total := repository.KeyUpsert{MeterID: "k1", Prefix: "abc", Status: "active", Budget: 500, BudgetWindow: domain.WindowTotal}
+	month := total
+	month.BudgetWindow = domain.WindowMonth
+	must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{total}))
+	if _, _, _, err := store.Keys.AdjustSpent(ctx, "k1", "w1", 500); err != nil {
+		t.Fatal(err)
+	}
+	if holder, _, err := store.Keys.Resolve(ctx, "k1"); err != nil || !holder.Key.Exhausted() {
+		t.Fatalf("total key at its cap = %+v, %v; want exhausted", holder.Key, err)
+	}
+	must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{month}))
+	holder, _, err := store.Keys.Resolve(ctx, "k1")
+	if err != nil || holder.Key.Spent != 0 || holder.Key.Exhausted() {
+		t.Fatalf("moved to the month = %+v, %v; want 0 spent", holder.Key, err)
+	}
+	if spent, err := store.Keys.Spent(ctx, []string{"k1"}); err != nil || spent["k1"] != 0 {
+		t.Fatalf("Spent on the month = %v, %v; want 0", spent, err)
+	}
+	if _, _, _, err := store.Keys.AdjustSpent(ctx, "k1", "w2", 100); err != nil {
+		t.Fatal(err)
+	}
+	must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{total}))
+	if holder, _, err := store.Keys.Resolve(ctx, "k1"); err != nil || holder.Key.Spent != 500 {
+		t.Fatalf("moved back to total = %+v, %v; want its 500 again", holder.Key, err)
+	}
+	if spent, err := store.Keys.Spent(ctx, []string{"k1"}); err != nil || spent["k1"] != 500 {
+		t.Fatalf("Spent back on total = %v, %v; want 500", spent, err)
 	}
 }
 

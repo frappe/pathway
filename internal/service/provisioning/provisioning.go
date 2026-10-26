@@ -4,8 +4,6 @@ package provisioning
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
 	"maps"
 	"slices"
@@ -92,7 +90,7 @@ func (s *Service) staleModels(ctx context.Context, keep map[string][]domain.Rout
 // counter not yet acknowledged. Nothing is deleted until AckUsage, so a key the control plane fails
 // to record comes back under its own id on its next pull.
 func (s *Service) DrainUsage(ctx context.Context, keys []string) (repository.Drains, error) {
-	return s.store.Usage.Drain(ctx, NewDrainID(time.Now()), keys)
+	return s.store.Usage.Drain(ctx, repository.NewDrainID(time.Now()), keys)
 }
 
 // AckUsage says these (drain, prefix, day) counters are recorded: kept for retention, then expired.
@@ -110,13 +108,6 @@ func (s *Service) AdjustSpent(ctx context.Context, meterID, id string, delta int
 // not held here is left out.
 func (s *Service) Spent(ctx context.Context, ids []string) (map[string]int64, error) {
 	return s.store.Keys.Spent(ctx, ids)
-}
-
-// NewDrainID is sortable by when the drain started, and unique across boxes on one store.
-func NewDrainID(now time.Time) string {
-	suffix := make([]byte, 4)
-	_, _ = rand.Read(suffix)
-	return now.UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(suffix)
 }
 
 // StateHashes is what this box holds, per section/bucket — the control plane diffs its desired

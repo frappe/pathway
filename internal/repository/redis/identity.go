@@ -13,7 +13,7 @@ import (
 	"github.com/frappe/pathway/internal/repository"
 )
 
-// key:<sha256(secret)>, team:<Central Team> and model_group:<Model Group name>. The key carries
+// key:<sha256(secret)>, team:<Grove Team> and model_group:<Model Group name>. The key carries
 // its own policy — what it may call, where, how fast, and the cap it spends against — because a
 // key lives in one geography and so on one store, which is what lets that store gate the cap
 // exactly. The team is its own record so a verdict on the team is one write, not one per key; the
@@ -66,7 +66,7 @@ func (k keys) Resolve(ctx context.Context, meterID string) (repository.Holder, b
 	if len(key) == 0 {
 		return repository.Holder{}, false, nil
 	}
-	rec, err := keyRecord(key, spentField(time.Now()))
+	rec, err := keyRecord(key, time.Now())
 	if err != nil {
 		return repository.Holder{}, false, err
 	}
@@ -97,33 +97,41 @@ func hashOf(reply any) map[string]string {
 	return h
 }
 
-// spentField names the hash field a key's spend lands under for the month of now. A month not yet
-// written reads 0, so a new month needs no reset. Earlier months' fields stay behind, ~20 bytes a
-// key a month, and nothing reads them.
-// ponytail: fields accumulate one per key per month; HDEL the previous month on first write if it ever matters.
-func spentField(now time.Time) string { return "spent:" + domain.MonthOf(now) }
+// spentFieldFor names the hash field a key's spend lands under. For a key capped by the month it
+// is the month of now: a month not yet written reads 0, so a new month needs no reset, and earlier
+// months' fields stay behind, ~20 bytes a key a month, with nothing reading them. For a key capped
+// for life (domain.WindowTotal) it is the one field spent:total, which never turns over.
+// ponytail: month fields accumulate one per key per month; HDEL the previous month on first write if it ever matters.
+func spentFieldFor(window string, now time.Time) string {
+	if window == domain.WindowTotal {
+		return "spent:total"
+	}
+	return "spent:" + domain.MonthOf(now)
+}
 
-// keyRecord reads a record as HGETALL answered it; spent is the field this month's spend is under.
-func keyRecord(h map[string]string, spent string) (domain.KeyRecord, error) {
+// keyRecord reads a record as HGETALL answered it, its Spent off the field its own window names.
+func keyRecord(h map[string]string, now time.Time) (domain.KeyRecord, error) {
 	// A push is refused unless every limit reads, so one that does not was written by a newer
 	// binary. Serving that key uncapped would hide it.
 	limits, err := domain.ParseLimits(h["limits"])
 	if err != nil {
 		return domain.KeyRecord{}, err
 	}
+	window := strings.TrimSpace(h["budget_window"])
 	return domain.KeyRecord{
-		Status:      h["status"],
-		Team:        h["team"],
-		KeyPrefix:   h["prefix"],
-		Groups:      domain.ModelSet(h["group"]),
-		Allow:       domain.ModelSet(h["allow"]),
-		Deny:        domain.ModelSet(h["deny"]),
-		Limited:     strings.TrimSpace(h["limited"]) == "1",
-		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
-		Geography:   strings.TrimSpace(h["geography"]),
-		Budget:      int64Field(h, "budget"),
-		Spent:       int64Field(h, spent),
-		Limits:      limits,
+		Status:       h["status"],
+		Team:         h["team"],
+		KeyPrefix:    h["prefix"],
+		Groups:       domain.ModelSet(h["group"]),
+		Allow:        domain.ModelSet(h["allow"]),
+		Deny:         domain.ModelSet(h["deny"]),
+		Limited:      strings.TrimSpace(h["limited"]) == "1",
+		LogPayloads:  strings.TrimSpace(h["log_payloads"]) == "1",
+		Geography:    strings.TrimSpace(h["geography"]),
+		Budget:       int64Field(h, "budget"),
+		Spent:        int64Field(h, spentFieldFor(window, now)),
+		BudgetWindow: window,
+		Limits:       limits,
 	}, nil
 }
 
@@ -154,17 +162,18 @@ func writeTeam(ctx context.Context, p redis.Pipeliner, rec repository.TeamUpsert
 // counters, and an HSET here never clears a field it does not name.
 func keyFields(rec repository.KeyUpsert) map[string]any {
 	return map[string]any{
-		"status":       rec.Status,
-		"team":         rec.Team,
-		"prefix":       rec.Prefix,
-		"group":        rec.Groups, // comma list of group names
-		"allow":        rec.Allow,
-		"deny":         rec.Deny,
-		"limited":      flag(rec.Limited),
-		"log_payloads": flag(rec.LogPayloads),
-		"geography":    rec.Geography,
-		"budget":       strconv.FormatInt(rec.Budget, 10),
-		"limits":       rec.Limits, // always written: blank is what clears a removed limit
+		"status":        rec.Status,
+		"team":          rec.Team,
+		"prefix":        rec.Prefix,
+		"group":         rec.Groups, // comma list of group names
+		"allow":         rec.Allow,
+		"deny":          rec.Deny,
+		"limited":       flag(rec.Limited),
+		"log_payloads":  flag(rec.LogPayloads),
+		"geography":     rec.Geography,
+		"budget":        strconv.FormatInt(rec.Budget, 10),
+		"budget_window": rec.BudgetWindow, // always written: blank (the month) is what clears a dropped total
+		"limits":        rec.Limits,       // always written: blank is what clears a removed limit
 	}
 }
 
@@ -182,13 +191,31 @@ func writeKey(ctx context.Context, p redis.Pipeliner, rec repository.KeyUpsert) 
 	p.HDel(ctx, redisKey, staleKeyFields...)
 }
 
+// Upsert lands each record whole. A key that changed hands — held here under a team the push
+// does not name — has its live buckets set aside in the same transaction, stamped with the team
+// that was charged for them: a request lands wholly in the old team's bucket or wholly in a
+// fresh one under the new record, so the control plane's books split exactly where the key moved.
 func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error {
-	for _, rec := range records {
+	held, err := k.teamsOf(ctx, records)
+	if err != nil {
+		return err
+	}
+	for i, rec := range records {
 		if rec.MeterID == "" {
 			continue
 		}
-		_, err := k.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		var closing []string
+		if held[i] != "" && held[i] != rec.Team {
+			if closing, err = liveBuckets(ctx, k.rdb, rec.Prefix+":*"); err != nil {
+				return err
+			}
+		}
+		id := repository.NewDrainID(time.Now())
+		_, err = k.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
 			writeKey(ctx, p, rec)
+			for _, bucket := range closing {
+				closeBook(ctx, p, id, bucket, held[i])
+			}
 			return nil
 		})
 		if err != nil {
@@ -196,6 +223,25 @@ func (k keys) Upsert(ctx context.Context, records []repository.KeyUpsert) error 
 		}
 	}
 	return nil
+}
+
+// teamsOf is the team each record's key is held under on this store, "" for one not held: one
+// round trip however many records.
+func (k keys) teamsOf(ctx context.Context, records []repository.KeyUpsert) ([]string, error) {
+	cmds, err := k.rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for _, rec := range records {
+			p.HGet(ctx, "key:"+rec.MeterID, "team")
+		}
+		return nil
+	})
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	teams := make([]string, len(cmds))
+	for i, cmd := range cmds {
+		teams[i], _ = cmd.(*redis.StringCmd).Result()
+	}
+	return teams, nil
 }
 
 func (k keys) Delete(ctx context.Context, ids []string) (int, error) {
@@ -208,20 +254,25 @@ func int64Field(h map[string]string, field string) int64 {
 	return n
 }
 
-// adjustScript moves one key's spend for the month once per adjustment id. Replies {spent, code}:
-// code 1 applied, 0 already applied, -1 no such key. The id is kept a week: a retry comes within
-// minutes, and the control plane names each adjustment after its own row, so ids never recur.
+// adjustScript moves one key's spend once per adjustment id, under the field the key's own window
+// names. Replies {spent, code}: code 1 applied, 0 already applied, -1 no such key. The id is kept
+// a week: a retry comes within minutes, and the control plane names each adjustment after its own
+// row, so ids never recur.
 //
 // KEYS[1] adjust:<id>, KEYS[2] key:<meter id>; ARGV[1] delta, ARGV[2] seconds to keep the id,
-// ARGV[3] the key's spent field for the month
+// ARGV[3] the month's spent field (a total key's spend lands under spent:total instead)
 var adjustScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[2]) == 0 then
   return {'0', -1}
 end
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  return {redis.call('HGET', KEYS[2], ARGV[3]) or '0', 0}
+local field = ARGV[3]
+if redis.call('HGET', KEYS[2], 'budget_window') == 'total' then
+  field = 'spent:total'
 end
-local spent = redis.call('HINCRBY', KEYS[2], ARGV[3], ARGV[1])
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return {redis.call('HGET', KEYS[2], field) or '0', 0}
+end
+local spent = redis.call('HINCRBY', KEYS[2], field, ARGV[1])
 redis.call('SET', KEYS[1], '1', 'EX', ARGV[2])
 return {tostring(spent), 1}
 `)
@@ -230,7 +281,7 @@ const adjustKeep = 7 * 24 * 60 * 60
 
 func (k keys) AdjustSpent(ctx context.Context, meterID, id string, delta int64) (int64, bool, bool, error) {
 	res, err := adjustScript.Run(ctx, k.rdb, []string{"adjust:" + id, "key:" + meterID},
-		strconv.FormatInt(delta, 10), adjustKeep, spentField(time.Now())).Slice()
+		strconv.FormatInt(delta, 10), adjustKeep, spentFieldFor(domain.WindowMonth, time.Now())).Slice()
 	if err != nil || len(res) != 2 {
 		return 0, false, false, err
 	}
@@ -240,12 +291,13 @@ func (k keys) AdjustSpent(ctx context.Context, meterID, id string, delta int64) 
 	return spent, code == 1, code != -1, nil
 }
 
-// Spent reads every id's counter in one round trip: status tells a key this store holds from one
-// it does not, and a month's field never written reads 0.
+// Spent reads every id's counter in one round trip, each off the field its window names: status
+// tells a key this store holds from one it does not, and a field never written reads 0.
 func (k keys) Spent(ctx context.Context, ids []string) (map[string]int64, error) {
-	field := spentField(time.Now())
+	now := time.Now()
+	month, total := spentFieldFor(domain.WindowMonth, now), spentFieldFor(domain.WindowTotal, now)
 	cmds, err := pipelined(ctx, k.rdb, len(ids), func(p redis.Pipeliner, i int) {
-		p.HMGet(ctx, "key:"+ids[i], "status", field)
+		p.HMGet(ctx, "key:"+ids[i], "status", "budget_window", month, total)
 	})
 	if err != nil {
 		return nil, err
@@ -253,10 +305,14 @@ func (k keys) Spent(ctx context.Context, ids []string) (map[string]int64, error)
 	out := map[string]int64{}
 	for i, cmd := range cmds {
 		vals := cmd.(*redis.SliceCmd).Val()
-		if len(vals) != 2 || vals[0] == nil {
+		if len(vals) != 4 || vals[0] == nil {
 			continue
 		}
-		text, _ := vals[1].(string)
+		window, _ := vals[1].(string)
+		text, _ := vals[2].(string)
+		if strings.TrimSpace(window) == domain.WindowTotal {
+			text, _ = vals[3].(string)
+		}
 		out[ids[i]], _ = strconv.ParseInt(text, 10, 64)
 	}
 	return out, nil

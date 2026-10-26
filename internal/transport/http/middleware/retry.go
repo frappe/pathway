@@ -26,7 +26,8 @@ func init() {
 // to its end before it is classed, since an exhausted account hides under both
 // (domain.ClassifyUpstream). Nothing else is retried here: a 502 on one key is a 502 on the next.
 // A 401/402/403 the ring cannot move off — or an engine's — never reaches the client as the
-// upstream wrote it: the gateway answers 502 in its own words and logs what the upstream said.
+// upstream wrote it, nor which refusal it was: the gateway answers 502 `upstream unavailable`,
+// and what the upstream said goes to the error log and the key's stats.
 // Every attempt, held or answered, is counted against its key, and a held one leaves its own
 // line on the access log.
 func newRetry(deps Deps) (Middleware, error) {
@@ -45,8 +46,8 @@ func newRetry(deps Deps) (Middleware, error) {
 					peek:     func(status int) bool { return provider && vendorPeeks(status) },
 					classify: domain.ClassifyUpstream,
 					again: func(status int) bool {
-						if refusal, ok := domain.RefusedCredential(status); ok {
-							state.Outcome.Reason = "credential " + refusal.Class
+						if class, ok := domain.RefusedCredential(status); ok {
+							state.Outcome.Reason = "credential " + class
 						}
 						if !replayable || r.Context().Err() != nil || !domain.IsKeyFailure(status) {
 							return false
@@ -55,14 +56,13 @@ func newRetry(deps Deps) (Middleware, error) {
 						return winner.ID != ""
 					},
 					replace: func(status int) bool {
-						refusal, ok := domain.RefusedCredential(status)
-						if !ok {
+						if _, ok := domain.RefusedCredential(status); !ok {
 							return false
 						}
 						// The upstream's headers came with its answer; ours go with ours.
 						clear(w.Header())
 						maps.Copy(w.Header(), marks.response)
-						respond.ErrorFor(w, r, http.StatusBadGateway, refusal.Message)
+						respond.ErrorFor(w, r, http.StatusBadGateway, "upstream unavailable")
 						return true
 					},
 				}

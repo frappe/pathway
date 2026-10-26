@@ -103,7 +103,7 @@ func TestSpentIsThisMonthsOnRealRedis(t *testing.T) {
 	if err := client.Store().Usage.Accrue(ctx, liveAccrual("abc", "aa", 250)); err != nil {
 		t.Fatalf("Accrue: %v", err)
 	}
-	if got := client.rdb.HGet(ctx, "key:aa", spentField(time.Now())).Val(); got != "250" {
+	if got := client.rdb.HGet(ctx, "key:aa", spentFieldFor(domain.WindowMonth, time.Now())).Val(); got != "250" {
 		t.Errorf("this month's spent = %q, want 250", got)
 	}
 	if got := client.rdb.HGet(ctx, "key:aa", "spent:2000-01").Val(); got != "800" {
@@ -115,7 +115,7 @@ func TestSpentIsThisMonthsOnRealRedis(t *testing.T) {
 func TestAccrueKeepsBigTotalsExact(t *testing.T) {
 	client, _ := liveStore(t)
 	ctx := context.Background()
-	client.rdb.HSet(ctx, "key:aa", spentField(time.Now()), "123456789012345678")
+	client.rdb.HSet(ctx, "key:aa", spentFieldFor(domain.WindowMonth, time.Now()), "123456789012345678")
 	a := liveAccrual("abc", "aa", 1)
 	a.Budget = 223456789012345678
 	if err := client.Store().Usage.Accrue(ctx, a); err != nil {
@@ -294,7 +294,7 @@ func TestSpentIsWhatAccrueCountedOnRealRedis(t *testing.T) {
 func TestAdjustSpentOnRealRedis(t *testing.T) {
 	client, _ := liveStore(t)
 	ctx := context.Background()
-	client.rdb.HSet(ctx, "key:aa", spentField(time.Now()), "3000")
+	client.rdb.HSet(ctx, "key:aa", spentFieldFor(domain.WindowMonth, time.Now()), "3000")
 	keys := client.Store().Keys
 
 	if spent, applied, found, err := keys.AdjustSpent(ctx, "aa", "CD-1", -1000); spent != 2000 || !applied || !found || err != nil {
@@ -340,5 +340,51 @@ func TestReplayLandsOncePerRequestAgainstRealRedis(t *testing.T) {
 	}
 	if ttl, _ := client.rdb.TTL(ctx, "accrued:rid-live-1").Result(); ttl <= 0 {
 		t.Errorf("marker ttl = %v, want a week", ttl)
+	}
+}
+
+// A key capped for life lands and reads its spend under spent:total whatever the month: a push
+// naming the window moves the key off the month's field, and a push dropping it moves it back.
+func TestATotalKeySpendsUnderOneField(t *testing.T) {
+	client, state := liveStore(t)
+	ctx := context.Background()
+	client.rdb.HSet(ctx, "key:aa", "spent:2000-01", "800", "spent:total", "900")
+	bucket := domain.BucketOf("aa")
+	push := func(window string) {
+		t.Helper()
+		if _, err := state.Apply(ctx, repository.StatePush{Keys: map[string]repository.KeyBucket{bucket: {
+			Hash: "kh-" + window, Records: []repository.KeyUpsert{{
+				MeterID: "aa", Prefix: "abc", Status: "active", Budget: 1_000, BudgetWindow: window,
+			}},
+		}}}); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+	}
+	push(domain.WindowTotal)
+	if holder, _, _ := client.Store().Keys.Resolve(ctx, "aa"); holder.Key.Spent != 900 || holder.Key.BudgetWindow != "total" {
+		t.Errorf("Resolve = spent %d window %q, want 900 total", holder.Key.Spent, holder.Key.BudgetWindow)
+	}
+	if err := client.Store().Usage.Accrue(ctx, liveAccrual("abc", "aa", 250)); err != nil {
+		t.Fatalf("Accrue: %v", err)
+	}
+	if got := client.rdb.HGet(ctx, "key:aa", "spent:total").Val(); got != "1150" {
+		t.Errorf("spent:total = %q, want 1150", got)
+	}
+	if client.rdb.HExists(ctx, "key:aa", spentFieldFor(domain.WindowMonth, time.Now())).Val() {
+		t.Error("a total key moved this month's field")
+	}
+	if spent, _ := client.Store().Keys.Spent(ctx, []string{"aa"}); spent["aa"] != 1150 {
+		t.Errorf("Spent = %v, want aa 1150", spent)
+	}
+	if got, _, _, _ := client.Store().Keys.AdjustSpent(ctx, "aa", "a1", -50); got != 1100 {
+		t.Errorf("AdjustSpent = %d, want 1100", got)
+	}
+	h, _ := client.rdb.HGetAll(ctx, "usage:"+todays("abc")).Result()
+	if h["key_spent"] != "1150" || h["key_balance"] != "-150" {
+		t.Errorf("drain view = spent %q balance %q, want 1150 and -150", h["key_spent"], h["key_balance"])
+	}
+	push("")
+	if holder, _, _ := client.Store().Keys.Resolve(ctx, "aa"); holder.Key.Spent != 0 || holder.Key.BudgetWindow != "" {
+		t.Errorf("after the window was dropped: spent %d window %q, want 0 and blank", holder.Key.Spent, holder.Key.BudgetWindow)
 	}
 }

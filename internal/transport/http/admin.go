@@ -21,7 +21,7 @@ import (
 type adminKey struct {
 	KeyHash string `json:"key_hash"` // sha256(secret) hex — the record id
 	Prefix  string `json:"prefix"`
-	Team    string `json:"team"`   // Central Team doc name — the tenant boundary
+	Team    string `json:"team"`   // Grove Team doc name — the tenant boundary
 	Status  string `json:"status"` // active | revoked
 	Group   string `json:"group"`  // comma list of group names; "" = ungrouped
 	Allow   string `json:"allow"`  // comma list: this key's adds on top of its groups'
@@ -30,8 +30,12 @@ type adminKey struct {
 	// LogPayloads opts this key's prompts and outputs into the payload log. Absent decodes false — off.
 	LogPayloads bool   `json:"log_payloads"`
 	Geography   string `json:"geography"` // blank = unpinned
-	// Budget is the key's monthly cap in nano-USD, what it is gated on. Absent: 0, refused.
+	// Budget is the key's cap in nano-USD, what it is gated on. Absent: 0, refused.
 	Budget int64 `json:"budget"`
+	// BudgetWindow is what the key's spend is counted over for that cap: "month" (or absent: the
+	// current UTC month, a new month starts at 0) or "total" (everything since the key was pushed,
+	// so a spent key stays spent). Anything else is refused the way a bad limit is.
+	BudgetWindow string `json:"budget_window"`
 	// Limits is the key's rate limits, a comma list of metric:window:value; "" = none.
 	Limits string `json:"limits"`
 }
@@ -42,10 +46,13 @@ func (k adminKey) upsert() (repository.KeyUpsert, error) {
 	if _, err := domain.ParseLimits(k.Limits); err != nil {
 		return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
 	}
+	if !domain.IsBudgetWindow(k.BudgetWindow) {
+		return repository.KeyUpsert{}, fmt.Errorf("key %s: budget_window %q is not month or total", k.Prefix, k.BudgetWindow)
+	}
 	return repository.KeyUpsert{
 		MeterID: k.KeyHash, Prefix: k.Prefix, Team: k.Team, Status: k.Status, Groups: k.Group,
 		Allow: k.Allow, Deny: k.Deny, Limited: k.Limited, LogPayloads: k.LogPayloads,
-		Geography: k.Geography, Budget: k.Budget, Limits: k.Limits,
+		Geography: k.Geography, Budget: k.Budget, BudgetWindow: k.BudgetWindow, Limits: k.Limits,
 	}, nil
 }
 
@@ -69,7 +76,7 @@ type adminGroup struct {
 }
 
 type adminTeam struct {
-	Team    string `json:"team"` // Central Team doc name — the record id
+	Team    string `json:"team"` // Grove Team doc name — the record id
 	Limited bool   `json:"limited"`
 	// LogPayloads opts the team's keys' prompts and outputs into the payload log. Absent: off.
 	LogPayloads bool `json:"log_payloads"`

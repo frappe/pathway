@@ -6,13 +6,13 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | Key | Type | Written by |
 |---|---|---|
 | `key:<sha256(secret)>` | hash | state push, `keys` section; `spent:<YYYY-MM>` by the gateway |
-| `team:<Central Team>` | hash | state push, `teams` section |
+| `team:<Grove Team>` | hash | state push, `teams` section |
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
 | `lim:<key prefix>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see [Rate limiting](../../service/admission/README.md#rate-limiting) |
-| `usage:<key prefix>:<YYYY-MM-DD>` | hash, one per key per UTC day it was served | the gateway; set aside by `GET /grove-admin/usage` |
-| `drained:<drain id>:<key prefix>:<YYYY-MM-DD>` | hash, kept `usage_retention` once acked | `GET /grove-admin/usage` renames a live counter here |
+| `usage:<key prefix>:<YYYY-MM-DD>` | hash, one per key per UTC day it was served | the gateway; set aside by `GET /grove-admin/usage`, or by the push that moves the key to another team |
+| `drained:<drain id>:<key prefix>:<YYYY-MM-DD>` | hash, kept `usage_retention` once acked; `team` only on one a push set aside: the team charged for it | `GET /grove-admin/usage` renames a live counter here; so does a key push that changes the key's team, which closes its books under a box-made drain id |
 | `drain:unacked` | set of `<drain id>:<key prefix>:<YYYY-MM-DD>` | every counter set aside and not yet acked |
 | `adjust:<id>` | string, 7 days | `POST /grove-admin/spend-adjust` — ids already applied |
 | `accrued:<request id>` | string, 7 days | the spool's replay — requests already landed from it |
@@ -29,8 +29,8 @@ would stay missing until its section changed; only gateway-owned keys expire
 
 ```
 key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
-                           geography  budget  spent:<YYYY-MM>  limits
-team:<Central Team>        limited  log_payloads  limits
+                           geography  budget  budget_window  spent:<YYYY-MM>  spent:total  limits
+team:<Grove Team>          limited  log_payloads  limits
 model_group:<Model Group>  models
 usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
@@ -44,18 +44,23 @@ usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  tota
 
 `group` / `allow` / `deny` / `models` are comma lists; blank parses to a map that answers false
 to everything, which is the fail-closed default. `group` holds every group the key is in, so a
-name containing a comma would split — Grove refuses one. `team` is the Central Team the key bills
+name containing a comma would split — Grove refuses one. `team` is the Grove Team the key bills
 to: the cache-salt namespace, the payload log's join field, and the record whose `limited`,
 `log_payloads` and default `limits` are applied onto the key at resolve. The same three
 fields on the key record are what a control plane from before teams wrote, read only while the
 store holds no team record.
 
-`budget` / `spent:<YYYY-MM>` are the credit gate. `budget` is the key's monthly cap, nano-USD, 0
+`budget` / `spent:<YYYY-MM>` are the credit gate. `budget` is the key's cap, nano-USD, 0
 until Grove sets one; Grove keeps Σ caps within the team's tier limit. `spent:<YYYY-MM>` is this
 Redis's own counter for the UTC month: every metered request moves this month's field, a push
 never does (the push is an HSET of the fields it names), and only `spend-adjust` corrects it. A new
 month is a field not yet written, which reads 0, so nothing resets and nothing runs at midnight;
-earlier months' fields stay behind (about 20 bytes a key a month) and nothing reads them. This
+earlier months' fields stay behind (about 20 bytes a key a month) and nothing reads them.
+`budget_window` picks the field: `month` (or blank) is the above; `total` lands and reads every
+spend under the one field `spent:total`, which never turns over, so a key capped for life (a trial
+key) stays spent once spent. The accrue and adjust scripts read the window off the record, so a
+spooled line replayed after a push lands where the key now counts; a push naming a window this
+binary cannot gate is refused whole (400). This
 box's balance for the key is `budget − spent`; Grove keeps the team's own from the pulled usage and
 audits the two every pull. `spent >= budget` → 402 `credit balance
 exhausted` (`billing_error` on the Anthropic surface), at `quota` before the body is read, and
@@ -150,8 +155,8 @@ exhausted account hides under both — OpenAI's 429 `insufficient_quota`, Anthro
 balance" — and reads as the 402 it is (`domain.ClassifyUpstream`). A second 429 exhaustion is the
 client's answer, headers and body as the vendor sent them. A 401/402/403 the ring cannot move off —
 every key refused, a single key, an engine's own — never is: the client gets the gateway's **502**
-`api_error`, `upstream credential rejected` / `upstream account unpaid` /
-`upstream credential lacks permission`, the access line says `reason="credential unauthorized|unpaid|forbidden"`
+`api_error` `upstream unavailable`, which refusal it was told to nobody outside; the access line
+says `reason="credential unauthorized|unpaid|forbidden"`
 with the vendor's status in `upstream_status`, and the error log keeps the vendor's own words with
 the key id (`upstream refused the credential`). Nothing else is retried: a 502 on one key is a 502
 on the next. A held attempt leaks nothing to the client; the request is billed once whatever it

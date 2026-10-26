@@ -8,6 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/repository"
 )
 
@@ -15,17 +16,21 @@ import (
 // (repository.UsageBucket), holding both the flat metrics and their per-model and per-deployment
 // twins, so a single drain carries the aggregate and the breakdown together. The day is named off
 // the same clock as the field the key's spend lands under (spentField), and the control plane
-// records the counters on it: its day and month are this store's own.
+// records the counters on it: its day and month are this store's own. A drain sets a bucket aside
+// under drained:<drain id>:<bucket>; so does the push that moves the key to another team, which
+// stamps the set-aside with the team charged for it (`team`), so the control plane's books split
+// exactly where the key changed hands.
 type usage struct{ rdb *redis.Client }
 
-// accrueBody lands one request in one call: the counters, then the key's spend for the month and
-// the balance view the drain carries. One script rather than a pipeline because key_spent needs
+// accrueBody lands one request in one call: the counters, then the key's spend under the field its
+// window names and the balance view the drain carries. One script rather than a pipeline because key_spent needs
 // the incremented total, and a drain landing between two calls would split one request across two
 // pulls. The spend moves only on a key the control plane has pushed: writing to an absent hash
 // would fabricate a record that grants nothing. Values travel as strings — a Lua number is a
 // double, and would round a nano-USD total past 14 digits on its way back into a command.
 //
-// ARGV[1] cost, ARGV[2] budget, ARGV[3] the key's spent field for the month, ARGV[4..] field, value, ...
+// ARGV[1] cost, ARGV[2] budget, ARGV[3] the month's spent field (a total key's spend lands under
+// spent:total instead), ARGV[4..] field, value, ...
 const accrueBody = `
 local function accrue(usage, key)
   for i = 4, #ARGV, 2 do
@@ -34,8 +39,12 @@ local function accrue(usage, key)
   if key == nil or redis.call('EXISTS', key) == 0 then
     return 0
   end
-  redis.call('HINCRBY', key, ARGV[3], ARGV[1])
-  local spent = redis.call('HGET', key, ARGV[3])
+  local field = ARGV[3]
+  if redis.call('HGET', key, 'budget_window') == 'total' then
+    field = 'spent:total'
+  end
+  redis.call('HINCRBY', key, field, ARGV[1])
+  local spent = redis.call('HGET', key, field)
   redis.call('HSET', usage, 'key_spent', spent, 'key_balance', ARGV[2])
   if spent ~= '0' then
     redis.call('HINCRBY', usage, 'key_balance', '-' .. spent)
@@ -59,10 +68,11 @@ end
 accrue(KEYS[2], KEYS[3])
 return 1`)
 
-// accrueArgs stamps the spend with the month it lands in, off the now that named the bucket. A
+// accrueArgs stamps the spend with the month it lands in, off the now that named the bucket; the
+// script reads the key's own window and lands a total key's spend under spent:total instead. A
 // spooled accrual replayed after the day turned counts in the new one, day and month alike.
 func accrueArgs(a repository.Accrual, now time.Time) []any {
-	args := []any{a.Cost, a.Budget, spentField(now)}
+	args := []any{a.Cost, a.Budget, spentFieldFor(domain.WindowMonth, now)}
 	for field, n := range a.Fields {
 		args = append(args, field, strconv.FormatInt(n, 10))
 	}
@@ -172,14 +182,30 @@ func (u usage) hashes(ctx context.Context, keyPrefix string, names []string) ([]
 // time it may be a fresh counter that belongs to the next drain.
 //
 // KEYS[1] usage:<bucket>, KEYS[2] drained:<id>:<bucket>, KEYS[3] drain:unacked; ARGV[1] "<id>:<bucket>"
-var setAsideScript = redis.NewScript(`
+const setAsideBody = `
 if redis.call('EXISTS', KEYS[1]) == 0 or redis.call('EXISTS', KEYS[2]) == 1 then
   return 0
 end
 redis.call('RENAME', KEYS[1], KEYS[2])
 redis.call('SADD', KEYS[3], ARGV[1])
-return 1
-`)
+`
+
+var setAsideScript = redis.NewScript(setAsideBody + `return 1`)
+
+// handOverScript is setAside with the team the bucket was charged to stamped on it: the push that
+// moves a key to another team closes its books, and the control plane lands them under that team
+// rather than the key's new one. A stamp lands only with the counters it belongs to.
+//
+// KEYS as setAsideScript; ARGV[1] "<id>:<bucket>", ARGV[2] the team
+var handOverScript = redis.NewScript(setAsideBody + `
+redis.call('HSET', KEYS[2], 'team', ARGV[2])
+return 1`)
+
+// closeBook queues one bucket's hand-over on p, under drain id for team.
+func closeBook(ctx context.Context, p redis.Pipeliner, id, bucket, team string) {
+	member := id + ":" + bucket
+	handOverScript.Eval(ctx, p, []string{"usage:" + bucket, "drained:" + member, unackedKey}, member, team)
+}
 
 // ackScript keeps each acknowledged pair for ARGV[1] seconds, then lets it expire. A pair not in
 // drain:unacked moves nothing.
@@ -220,10 +246,16 @@ func (u usage) Drain(ctx context.Context, newID string, keys []string) (reposito
 }
 
 func (u usage) scanLive(ctx context.Context) ([]string, error) {
+	return liveBuckets(ctx, u.rdb, "*")
+}
+
+// liveBuckets is every live counter whose bucket matches the glob, as SCAN names them (a key can
+// come twice; setAside refuses the second).
+func liveBuckets(ctx context.Context, rdb *redis.Client, match string) ([]string, error) {
 	var live []string
 	var cursor uint64
 	for {
-		found, next, err := u.rdb.Scan(ctx, cursor, "usage:*", 1000).Result()
+		found, next, err := rdb.Scan(ctx, cursor, "usage:"+match, 1000).Result()
 		if err != nil {
 			return nil, err
 		}

@@ -22,15 +22,18 @@ type Store struct {
 	mu sync.Mutex
 
 	Keys map[string]domain.KeyRecord
-	// SpentMonth is the month each key's Spent counts (domain.MonthOf), the memory twin of the
-	// real store's spent:<month> field. A key not listed counts the current one.
-	SpentMonth map[string]string
-	Groups     map[string]domain.GroupRecord
-	Teams      map[string]domain.TeamRecord
-	Routes     map[string][]domain.Route
-	Sticky     map[string]string
-	InFlight   map[string]map[string]bool // engine → request ids
-	Failures   map[string]int
+	// Field is the spent field each key's Spent counts — spent:total, or spent:<YYYY-MM> — and
+	// Shelved what the key holds under its other fields: the memory twin of the real store keeping
+	// one field per window and month and reading the one the window names now. A key not listed
+	// counts the field its window names.
+	Field    map[string]string
+	Shelved  map[string]map[string]int64
+	Groups   map[string]domain.GroupRecord
+	Teams    map[string]domain.TeamRecord
+	Routes   map[string][]domain.Route
+	Sticky   map[string]string
+	InFlight map[string]map[string]bool // engine → request ids
+	Failures map[string]int
 	// KeyStats is what each vendor credential answered, the memory twin of pk:<id>.
 	KeyStats map[string]domain.KeyStats
 	// Usage is every live counter, bucket ("<key prefix>:<YYYY-MM-DD>", repository.UsageBucket) →
@@ -46,6 +49,9 @@ type Store struct {
 	// every spend adjustment id already applied.
 	Drained map[string]map[string]map[string]int64
 	Unacked map[string]bool
+	// Stamps is the team charged for a set-aside pair, "<id>:<bucket>" → team, only for pairs a
+	// hand-over set aside: the memory twin of the `team` field handOverScript writes.
+	Stamps map[string]string
 	// Accrued is the request ids a replay has landed, the memory twin of accrued:<id>.
 	Accrued  map[string]bool
 	Retained map[string]time.Duration
@@ -60,13 +66,14 @@ var errStore = errors.New("store unavailable")
 
 func New() *Store {
 	return &Store{
-		Keys: map[string]domain.KeyRecord{}, SpentMonth: map[string]string{}, Groups: map[string]domain.GroupRecord{},
-		Teams: map[string]domain.TeamRecord{}, Routes: map[string][]domain.Route{},
+		Keys: map[string]domain.KeyRecord{}, Field: map[string]string{}, Shelved: map[string]map[string]int64{},
+		Groups: map[string]domain.GroupRecord{},
+		Teams:  map[string]domain.TeamRecord{}, Routes: map[string][]domain.Route{},
 		Sticky: map[string]string{}, InFlight: map[string]map[string]bool{},
 		Failures: map[string]int{}, KeyStats: map[string]domain.KeyStats{}, Usage: map[string]map[string]int64{},
 		Limits: map[string]int64{}, Hashes: map[string]string{}, Fail: map[string]bool{},
-		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{}, Accrued: map[string]bool{},
-		Retained: map[string]time.Duration{}, Adjusted: map[string]bool{},
+		Drained: map[string]map[string]map[string]int64{}, Unacked: map[string]bool{}, Stamps: map[string]string{},
+		Accrued: map[string]bool{}, Retained: map[string]time.Duration{}, Adjusted: map[string]bool{},
 	}
 }
 
@@ -93,7 +100,7 @@ func (s *Store) putKey(rec repository.KeyUpsert) {
 		Status: rec.Status, Team: rec.Team, KeyPrefix: rec.Prefix, Groups: domain.ModelSet(rec.Groups),
 		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
-		Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent,
+		Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent, BudgetWindow: rec.BudgetWindow,
 		Limits: limits,
 	}
 }
@@ -105,16 +112,30 @@ func (s *Store) putTeam(rec repository.TeamUpsert) {
 	}
 }
 
-// rollMonth matches the real store reading this month's field: a key last touched in an earlier
-// month starts this one at 0. Called with the lock held, on a key the store knows.
-func (s *Store) rollMonth(id string) {
-	month := domain.MonthOf(time.Now())
-	if was, ok := s.SpentMonth[id]; ok && was != month {
-		rec := s.Keys[id]
-		rec.Spent = 0
+// rollField matches the real store reading the field the key's window names now: a month key in
+// a new month, or a key whose window a push moved, shelves what it counted and picks that field
+// up — 0 unless it was written, so a total key spent for good reads 0 on the month and its total
+// again when moved back. Called with the lock held, on a key the store knows.
+func (s *Store) rollField(id string) {
+	rec := s.Keys[id]
+	want := spentFieldFor(rec.BudgetWindow, time.Now())
+	if have, ok := s.Field[id]; ok && have != want {
+		if s.Shelved[id] == nil {
+			s.Shelved[id] = map[string]int64{}
+		}
+		s.Shelved[id][have] = rec.Spent
+		rec.Spent = s.Shelved[id][want]
+		delete(s.Shelved[id], want)
 		s.Keys[id] = rec
 	}
-	s.SpentMonth[id] = month
+	s.Field[id] = want
+}
+
+func spentFieldFor(window string, now time.Time) string {
+	if window == domain.WindowTotal {
+		return "spent:total"
+	}
+	return "spent:" + domain.MonthOf(now)
 }
 
 type keys struct{ s *Store }
@@ -130,7 +151,7 @@ func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, boo
 	if _, ok := k.s.Keys[meterID]; !ok {
 		return repository.Holder{}, false, nil
 	}
-	k.s.rollMonth(meterID)
+	k.s.rollField(meterID)
 	rec := k.s.Keys[meterID]
 	holder := repository.Holder{Key: rec, Groups: map[string]domain.GroupRecord{}}
 	if team, ok := k.s.Teams[rec.Team]; ok && rec.Team != "" {
@@ -147,6 +168,8 @@ func (k keys) Resolve(_ context.Context, meterID string) (repository.Holder, boo
 	return holder, true, nil
 }
 
+// Upsert matches the real one: a key held under another team has its live buckets set aside,
+// stamped with that team, before the record is written.
 func (k keys) Upsert(_ context.Context, records []repository.KeyUpsert) error {
 	k.s.mu.Lock()
 	defer k.s.mu.Unlock()
@@ -157,9 +180,34 @@ func (k keys) Upsert(_ context.Context, records []repository.KeyUpsert) error {
 		if rec.MeterID == "" {
 			continue
 		}
+		if held := k.s.Keys[rec.MeterID].Team; held != "" && held != rec.Team {
+			k.s.closeBooks(rec.Prefix, held)
+		}
 		k.s.putKey(rec)
 	}
 	return nil
+}
+
+// closeBooks sets every live bucket of prefix aside under a fresh drain id, stamped with team.
+// Caller holds mu.
+func (s *Store) closeBooks(prefix, team string) {
+	id := repository.NewDrainID(time.Now())
+	for bucket := range s.Usage {
+		if p, _ := repository.SplitBucket(bucket); p == prefix {
+			s.setAside(id, bucket)
+			s.Stamps[id+":"+bucket] = team
+		}
+	}
+}
+
+// setAside moves one live bucket under id and marks the pair unacknowledged. Caller holds mu.
+func (s *Store) setAside(id, bucket string) {
+	if s.Drained[id] == nil {
+		s.Drained[id] = map[string]map[string]int64{}
+	}
+	s.Drained[id][bucket] = s.Usage[bucket]
+	s.Unacked[id+":"+bucket] = true
+	delete(s.Usage, bucket)
 }
 
 func (k keys) Delete(_ context.Context, ids []string) (int, error) {
@@ -168,8 +216,8 @@ func (k keys) Delete(_ context.Context, ids []string) (int, error) {
 	return deleteFrom(ids, func(id string) { delete(k.s.Keys, id) }), k.s.failed("keys")
 }
 
-// Spent matches the real one: this month's counter of each key the store holds, nothing for one
-// never pushed.
+// Spent matches the real one: what each key the store holds counts under its window, nothing for
+// one never pushed.
 func (k keys) Spent(_ context.Context, ids []string) (map[string]int64, error) {
 	k.s.mu.Lock()
 	defer k.s.mu.Unlock()
@@ -179,7 +227,7 @@ func (k keys) Spent(_ context.Context, ids []string) (map[string]int64, error) {
 	out := map[string]int64{}
 	for _, id := range ids {
 		if _, ok := k.s.Keys[id]; ok {
-			k.s.rollMonth(id)
+			k.s.rollField(id)
 			out[id] = k.s.Keys[id].Spent
 		}
 	}
@@ -196,7 +244,7 @@ func (k keys) AdjustSpent(_ context.Context, meterID, id string, delta int64) (i
 	if _, found := k.s.Keys[meterID]; !found {
 		return 0, false, false, nil
 	}
-	k.s.rollMonth(meterID)
+	k.s.rollField(meterID)
 	rec := k.s.Keys[meterID]
 	if k.s.Adjusted[id] {
 		return rec.Spent, false, true, nil
@@ -516,7 +564,7 @@ func (u usage) accrue(a repository.Accrual) {
 	if _, known := u.s.Keys[a.Key]; a.Key == "" || !known {
 		return
 	}
-	u.s.rollMonth(a.Key)
+	u.s.rollField(a.Key)
 	rec := u.s.Keys[a.Key]
 	rec.Spent += a.Cost
 	u.s.Keys[a.Key] = rec
@@ -533,16 +581,10 @@ func (u usage) Drain(_ context.Context, newID string, keys []string) (repository
 		return nil, err
 	}
 	want := wantedBuckets(keys)
-	for bucket, fields := range u.s.Usage {
-		if !want(bucket) {
-			continue
+	for bucket := range u.s.Usage {
+		if want(bucket) {
+			u.s.setAside(newID, bucket)
 		}
-		if u.s.Drained[newID] == nil {
-			u.s.Drained[newID] = map[string]map[string]int64{}
-		}
-		u.s.Drained[newID][bucket] = fields
-		u.s.Unacked[newID+":"+bucket] = true
-		delete(u.s.Usage, bucket)
 	}
 	return u.unacked(want), nil
 }
@@ -556,7 +598,11 @@ func (u usage) unacked(want func(string) bool) repository.Drains {
 			continue
 		}
 		prefix, day := repository.SplitBucket(bucket)
-		out.Put(id, prefix, day, counters(u.s.Drained[id][bucket]))
+		snapshot := counters(u.s.Drained[id][bucket])
+		if team, stamped := u.s.Stamps[member]; stamped {
+			snapshot["team"] = team
+		}
+		out.Put(id, prefix, day, snapshot)
 	}
 	return out
 }

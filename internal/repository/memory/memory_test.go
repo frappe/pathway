@@ -50,7 +50,7 @@ func TestSpentStartsEachMonthAtZero(t *testing.T) {
 	store := New()
 	store.Keys["k1"] = domain.KeyRecord{Budget: 1_000, Spent: 900}
 	store.Keys["k2"] = domain.KeyRecord{Budget: 1_000, Spent: 900}
-	store.SpentMonth["k1"], store.SpentMonth["k2"] = "2000-01", "2000-01"
+	store.Field["k1"], store.Field["k2"] = "spent:2000-01", "spent:2000-01"
 	repos := store.Repositories()
 	ctx := context.Background()
 
@@ -341,4 +341,24 @@ func bucketMate(t *testing.T, id string) string {
 	}
 	t.Fatal("no bucket mate found")
 	return ""
+}
+
+// A key capped for life counts under one field with no month in it, so the month turn that resets
+// the others passes it by, and once spent it stays spent.
+func TestATotalKeyNeverRollsTheMonth(t *testing.T) {
+	store := New()
+	store.Keys["k1"] = domain.KeyRecord{Budget: 1_000, Spent: 900, BudgetWindow: domain.WindowTotal}
+	store.Field["k1"] = "spent:total"
+	repos := store.Repositories()
+	ctx := context.Background()
+
+	if holder, _, _ := repos.Keys.Resolve(ctx, "k1"); holder.Key.Spent != 900 {
+		t.Errorf("read after the flip = %d, want 900 kept", holder.Key.Spent)
+	}
+	if err := repos.Usage.Accrue(ctx, accrual("abc", "k1", 250)); err != nil {
+		t.Fatalf("Accrue: %v", err)
+	}
+	if rec := store.Keys["k1"]; rec.Spent != 1150 || !rec.Exhausted() {
+		t.Errorf("spent = %d exhausted = %v, want 1150 and spent for good", rec.Spent, rec.Exhausted())
+	}
 }
