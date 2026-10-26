@@ -13,8 +13,10 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +32,21 @@ type Outcome struct {
 	// UsageStart is the first usage line of a response that carried more than one: where an
 	// Anthropic stream reports its prompt.
 	UsageStart string
-	// UpstreamRID is the upstream's own request id off x-request-id or request-id: what a ticket
-	// to a vendor quotes. Blank on our engines, which run without request-id headers.
+	// UpstreamRID is the upstream's own request id, off whichever of upstreamRIDHeaders it sent:
+	// what a ticket to a vendor quotes. Blank on our engines, which run without request-id headers.
 	UpstreamRID string
+	// UpstreamMS is the hop as the vendor timed it, off openai-processing-ms: what of ttft was the
+	// vendor's, the rest being the wire and the gateway. 0 from a vendor that sends none.
+	UpstreamMS int
+	// UpstreamAttempts is how many times Baseten ran the request on its side, off
+	// X-Baseten-Model-Prediction-Attempts: more than 1 is where a slow ttft went. 0 from anyone else.
+	UpstreamAttempts int
+	// RetryAfter is the vendor's Retry-After as sent, seconds, on a refusal that carried one.
+	RetryAfter string
+	// RemainingRequests and RemainingTokens are the vendor's rate-limit headroom when it refused,
+	// off x-ratelimit-remaining-* or anthropic-ratelimit-*-remaining: which of the two ran out on
+	// a 429. Blank on an answer, where they would only say how close the key is, on every line.
+	RemainingRequests, RemainingTokens string
 	// Deployment is the placement an ingress chose, off its response header. On a direct route the
 	// gateway already knows; this is the only way usage reaches a placement it never picked.
 	Deployment string
@@ -43,6 +57,9 @@ type Outcome struct {
 	// Cut names who ended a response that did not finish: one of domain's Cut values. Blank on a
 	// response that finished, and on a hop that never produced one.
 	Cut string
+	// Hop is when each event of the dial and the exchange happened, for the access line. Nil
+	// when the target could not even be parsed.
+	Hop *Hop
 }
 
 // statusClientClosed is what the access line shows for a client that left before the upstream
@@ -128,9 +145,12 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	// while the client is still there, and the two told apart afterwards.
 	hop, cancel := context.WithCancelCause(r.Context())
 	defer cancel(nil)
+	events := &Hop{}
+	outcome.Hop = events
 
 	var tee *usageTee
 	defer func() {
+		events.mark(hopDone)
 		if tee != nil {
 			outcome.Usage = tee.Usage()
 			outcome.UsageStart = tee.UsageStart()
@@ -166,11 +186,16 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			outcome.Status = resp.StatusCode
 			outcome.Deployment = resp.Header.Get("X-Grove-Engine")
 			outcome.Reason = resp.Header.Get("X-Grove-Reason")
-			// A vendor's id is kept for the access line; an engine or ingress only echoes ours.
+			// A vendor's id and its own account of the hop are kept for the access line; an engine
+			// or ingress only echoes our id and has none of the rest.
 			if external {
-				outcome.UpstreamRID = resp.Header.Get("X-Request-Id")
-				if outcome.UpstreamRID == "" {
-					outcome.UpstreamRID = resp.Header.Get("Request-Id")
+				outcome.UpstreamRID = first(resp.Header, upstreamRIDHeaders...)
+				outcome.UpstreamMS, _ = strconv.Atoi(resp.Header.Get("Openai-Processing-Ms"))
+				outcome.UpstreamAttempts, _ = strconv.Atoi(resp.Header.Get("X-Baseten-Model-Prediction-Attempts"))
+				if resp.StatusCode >= http.StatusBadRequest {
+					outcome.RetryAfter = resp.Header.Get("Retry-After")
+					outcome.RemainingRequests = first(resp.Header, "X-Ratelimit-Remaining-Requests", "Anthropic-Ratelimit-Requests-Remaining")
+					outcome.RemainingTokens = first(resp.Header, "X-Ratelimit-Remaining-Tokens", "Anthropic-Ratelimit-Tokens-Remaining")
 				}
 			}
 			keepRelayed(resp.Header)
@@ -227,7 +252,23 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 		},
 	}
 
-	reverse.ServeHTTP(w, r.WithContext(hop))
+	// ReverseProxy clones the outbound request off this context and composes its own trace with
+	// the one already there, so the hop's events are reported without touching Rewrite.
+	reverse.ServeHTTP(w, r.WithContext(httptrace.WithClientTrace(hop, events.trace())))
+}
+
+// upstreamRIDHeaders is where each vendor puts its own request id, first match wins: OpenAI and
+// most of the field use X-Request-Id, Anthropic Request-Id, Baseten X-Baseten-Request-Id.
+var upstreamRIDHeaders = []string{"X-Request-Id", "Request-Id", "X-Baseten-Request-Id"}
+
+// first is the first of `names` the header carries, blank when none.
+func first(header http.Header, names ...string) string {
+	for _, name := range names {
+		if value := header.Get(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // relayed is what a client is shown of an upstream's response headers: what it needs to read the

@@ -18,6 +18,13 @@ A dial and a TLS handshake are paid only by the first request to a host after:
 Each of those is a full handshake: no TLS session cache is set. Neither number is a tunable; both
 are set in `proxy.transportFor`.
 
+Each hop's events — connect, TLS handshake, request written, first response byte, body done — are
+stamped off `net/http/httptrace` into `Outcome.Hop` and reach the access line as `hop`. The trace
+rides the hop's context, which ReverseProxy clones into the outbound request and composes with
+its own. Two callbacks can fire after `Forward` has returned (a dial outlives a cancelled request;
+a body is still being written when the server answers early), so `Hop` is locked and held by
+pointer.
+
 An HTTP/2 connection that has delivered nothing for 15s is pinged, and closed if no answer comes
 within another 90s (`PingAfter` and `PingTimeout` in `proxy.Options`). A quiet one that answers is
 pinged again every 15s; one that does not gets the single ping, which TCP keeps retransmitting, so

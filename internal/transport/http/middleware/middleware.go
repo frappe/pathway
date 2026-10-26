@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/frappe/pathway/internal/repository"
 	"github.com/frappe/pathway/internal/service/admission"
@@ -128,12 +129,28 @@ func Chain(deps Deps, names []string) (Middleware, error) {
 	}
 	return func(next http.Handler) http.Handler {
 		// Applied in reverse so the first name is the outermost wrapper, which is the order the
-		// list reads in.
+		// list reads in. Every stage is reached through a stamp, and so is whatever the chain
+		// ends in, so the access line can say how long each held the request before handing down.
+		next = entered("handler", next)
 		for i := len(built) - 1; i >= 0; i-- {
-			next = built[i](next)
+			next = entered(names[i], built[i](next))
 		}
 		return next
 	}, nil
+}
+
+// entered stamps when a stage was reached. Nothing to stamp on until accesslog has attached a
+// State: From hands the stages above it a throwaway.
+func entered(name string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if state := From(r); !state.Started.IsZero() {
+			if state.Entered == nil {
+				state.Entered = map[string]time.Time{}
+			}
+			state.Entered[name] = time.Now()
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func sortedLocked() []string {

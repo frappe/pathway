@@ -102,7 +102,7 @@ func serveAttempt(next http.Handler, writer *attemptWriter, r *http.Request) {
 // it ended, and what the request moved to — another `key` or another `model`. Joined to the
 // request's own line by rid. Written before the attempt's marks come off.
 func logAttempt(deps Deps, r *http.Request, state *State, started time.Time, reason, moved, to string) {
-	deps.AccessLog().LogAttrs(r.Context(), slog.LevelInfo, "attempt",
+	attrs := []slog.Attr{
 		slog.String("rid", state.RequestID),
 		slog.Int("attempt", state.Attempts),
 		slog.String("model", or(state.ServingModel(), "-")),
@@ -112,12 +112,19 @@ func logAttempt(deps Deps, r *http.Request, state *State, started time.Time, rea
 		slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
 		slog.String("engine", or(state.Outcome.Deployment, "-")),
 		slog.Int("upstream_status", state.Outcome.Status),
+		slog.Int("upstream_ms", state.Outcome.UpstreamMS),
+		slog.Int("upstream_attempts", state.Outcome.UpstreamAttempts),
+		slog.String("retry_after", or(state.Outcome.RetryAfter, "-")),
+		slog.String("remaining_requests", or(state.Outcome.RemainingRequests, "-")),
+		slog.String("remaining_tokens", or(state.Outcome.RemainingTokens, "-")),
 		slog.String("reason", reason),
 		slog.String("cut", or(state.Outcome.Cut, "-")),
 		slog.Float64("rt", time.Since(started).Seconds()),
 		slog.String("moved", moved),
 		slog.String("to", to),
-	)
+	}
+	attrs = append(attrs, timing(state, time.Time{})...)
+	deps.AccessLog().LogAttrs(r.Context(), slog.LevelInfo, "attempt", attrs...)
 }
 
 // logRefusal is the error log's record of a credential an upstream turned away, with what it

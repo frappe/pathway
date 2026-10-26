@@ -129,6 +129,9 @@ func TestUsageSurvivesAClientHangup(t *testing.T) {
 	if !strings.Contains(out.Usage, `"total_tokens":9`) {
 		t.Errorf("usage lost to the hangup: %q", out.Usage)
 	}
+	if at, _ := out.Hop.legs(); at[hopDone].IsZero() {
+		t.Error("the hop's end was not stamped through the unwind")
+	}
 }
 
 // An Anthropic stream reports the prompt on its first event and the output on its last, so both
@@ -485,5 +488,120 @@ func TestAnAbandonedStreamEndsInAnErrorEvent(t *testing.T) {
 		if !strings.Contains(out.Usage, `"prompt_tokens":3`) {
 			t.Errorf("%s: usage lost: %q", name, out.Usage)
 		}
+	}
+}
+
+// A vendor's request id is read under whichever name that vendor sends it. An engine echoes our
+// own id under those names, which is not a vendor's, so an internal hop keeps none.
+func TestTheUpstreamRequestIDIsReadUnderEachVendorsName(t *testing.T) {
+	for _, name := range upstreamRIDHeaders {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(name, "theirs")
+			_, _ = io.WriteString(w, `{}`)
+		}))
+		t.Cleanup(server.Close)
+		if out := forward(New(Options{}, quiet()), server.URL, true); out.UpstreamRID != "theirs" {
+			t.Errorf("%s: upstream rid = %q, want the vendor's", name, out.UpstreamRID)
+		}
+		if out := forward(New(Options{}, quiet()), server.URL, false); out.UpstreamRID != "" {
+			t.Errorf("%s: an engine's echo kept as a vendor's id: %q", name, out.UpstreamRID)
+		}
+	}
+}
+
+// What a vendor says of the hop in its headers is kept for the access line: its own timing, its
+// own retries, and on a refusal its back-off and the headroom that ran out. Headroom on an answer
+// is not kept, it would say the same thing on every line. An engine has none of this to say.
+func TestAVendorsAccountOfTheHopIsKeptForTheAccessLine(t *testing.T) {
+	status := http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for name, value := range map[string]string{
+			"Openai-Processing-Ms": "123", "X-Baseten-Model-Prediction-Attempts": "2", "Retry-After": "7",
+			"X-Ratelimit-Remaining-Requests": "0", "Anthropic-Ratelimit-Tokens-Remaining": "15000",
+		} {
+			w.Header().Set(name, value)
+		}
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(server.Close)
+	p := New(Options{}, quiet())
+
+	out := forward(p, server.URL, true)
+	if out.UpstreamMS != 123 || out.UpstreamAttempts != 2 || out.RetryAfter != "" || out.RemainingRequests != "" || out.RemainingTokens != "" {
+		t.Errorf("on an answer: %+v", out)
+	}
+	status = http.StatusTooManyRequests
+	out = forward(p, server.URL, true)
+	if out.UpstreamMS != 123 || out.RetryAfter != "7" || out.RemainingRequests != "0" || out.RemainingTokens != "15000" {
+		t.Errorf("on a refusal: %+v", out)
+	}
+	if out := forward(p, server.URL, false); out.UpstreamMS != 0 || out.UpstreamAttempts != 0 || out.RetryAfter != "" || out.RemainingTokens != "" {
+		t.Errorf("an engine's headers kept as a vendor's: %+v", out)
+	}
+}
+
+// legs is the hop's stamps, read under its lock: a late callback may still be writing.
+func (h *Hop) legs() ([hopDone + 1]time.Time, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.at, h.reused
+}
+
+// The hop's events are stamped as the transport reports them: a dial on the first request to a
+// host and none on the second, which rides the pooled connection; the upstream's silence before
+// its first byte; the body after it. A TLS hop has its handshake.
+func TestTheHopsEventsAreStamped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {}\n\n")
+		w.(http.Flusher).Flush()
+		time.Sleep(30 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	p := New(Options{}, quiet())
+
+	at, reused := forward(p, server.URL, false).Hop.legs()
+	if reused || at[hopConnectDone].IsZero() || at[hopGotConn].IsZero() || at[hopWroteRequest].IsZero() {
+		t.Errorf("first hop: reused=%v, stamps=%v; want a dial", reused, at)
+	}
+	if wait := at[hopFirstByte].Sub(at[hopWroteRequest]); wait < 50*time.Millisecond {
+		t.Errorf("wait = %v, want the upstream's 50ms silence", wait)
+	}
+	if stream := at[hopDone].Sub(at[hopFirstByte]); stream < 30*time.Millisecond {
+		t.Errorf("stream = %v, want the 30ms body", stream)
+	}
+
+	// The transport returns the connection to its pool on its own goroutine once the body is read.
+	time.Sleep(10 * time.Millisecond)
+	if at, reused := forward(p, server.URL, false).Hop.legs(); !reused || !at[hopConnectStart].IsZero() {
+		t.Errorf("second hop: reused=%v, connect=%v; want the pooled connection", reused, at[hopConnectStart])
+	}
+
+	engine := tlsEngine(t)
+	if at, _ := forward(New(Options{VerifyUpstream: false}, quiet()), engine.URL, false).Hop.legs(); at[hopTLSDone].IsZero() || at[hopTLSDone].Before(at[hopTLSStart]) {
+		t.Errorf("tls hop: start=%v done=%v; want a handshake", at[hopTLSStart], at[hopTLSDone])
+	}
+}
+
+// A server that answers before reading the body leaves the transport still writing it when Forward
+// returns; its WroteRequest then lands on a Hop the access line may be reading. Under -race this is
+// the test that fails if Hop loses its lock.
+func TestAnEarlyAnswerRacesNothingOnTheHop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(server.Close)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(strings.Repeat("x", 1<<20)))
+	var out Outcome
+	New(Options{}, quiet()).Forward(httptest.NewRecorder(), r, server.URL, false, ModelSwap{}, &out)
+	if out.Hop == nil {
+		t.Fatal("no hop on a served request")
+	}
+	if attrs := out.Hop.Attrs(time.Now()); attrs.Key != "hop" {
+		t.Errorf("attrs = %v", attrs)
 	}
 }
