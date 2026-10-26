@@ -50,7 +50,7 @@ func TestSpentStartsEachMonthAtZero(t *testing.T) {
 	store := New()
 	store.Keys["k1"] = domain.KeyRecord{Budget: 1_000, Spent: 900}
 	store.Keys["k2"] = domain.KeyRecord{Budget: 1_000, Spent: 900}
-	store.SpentMonth["k1"], store.SpentMonth["k2"] = "2000-01", "2000-01"
+	store.Field["k1"], store.Field["k2"] = "spent:2000-01", "spent:2000-01"
 	repos := store.Repositories()
 	ctx := context.Background()
 
@@ -343,12 +343,12 @@ func bucketMate(t *testing.T, id string) string {
 	return ""
 }
 
-// A key capped for life keeps its spend across the month turn that resets the others, and once
-// spent stays spent.
+// A key capped for life counts under one field with no month in it, so the month turn that resets
+// the others passes it by, and once spent it stays spent.
 func TestATotalKeyNeverRollsTheMonth(t *testing.T) {
 	store := New()
 	store.Keys["k1"] = domain.KeyRecord{Budget: 1_000, Spent: 900, BudgetWindow: domain.WindowTotal}
-	store.SpentMonth["k1"] = "2000-01"
+	store.Field["k1"] = "spent:total"
 	repos := store.Repositories()
 	ctx := context.Background()
 
