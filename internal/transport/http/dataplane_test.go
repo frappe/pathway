@@ -192,7 +192,7 @@ func TestTheEngineSeesTheRewrittenRequest(t *testing.T) {
 	if uuid.Validate(f.seen.requestID) != nil {
 		t.Errorf("engine X-Request-Id = %q, want a uuid", f.seen.requestID)
 	}
-	if got := resp.Header().Values("Request-Id"); len(got) != 1 || got[0] != f.seen.requestID {
+	if got := resp.Header().Values("X-Request-Id"); len(got) != 1 || got[0] != f.seen.requestID {
 		t.Errorf("client got rid %v, engine got %q — the correlation is broken", got, f.seen.requestID)
 	}
 	if f.seen.forwardedFor == "" {

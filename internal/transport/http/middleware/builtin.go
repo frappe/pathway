@@ -71,9 +71,9 @@ func newAccessLog(deps Deps) (Middleware, error) {
 				return
 			}
 			r, state := newState(r)
-			// Answered as Request-Id, and set before any stage can refuse, so a denial carries it
-			// as well as a completion. X-Request-Id is the hop's name for it, not the answer's.
-			w.Header().Set("Request-Id", state.RequestID)
+			// Set before any stage can refuse, so a denial carries it as well as a completion. One
+			// name everywhere — the answer, the hop, the engine's log — so one grep finds it.
+			w.Header().Set("X-Request-Id", state.RequestID)
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 			meta, metaErr := domain.ParseMetadata(r.Header.Get("X-Grove-Metadata"))
 			state.Meta = meta
@@ -553,7 +553,7 @@ func newPick(deps Deps) (Middleware, error) {
 			// attributable too.
 			if rid := r.Header.Get("X-Request-Id"); rid != "" {
 				state.RequestID = rid
-				w.Header().Set("Request-Id", rid)
+				w.Header().Set("X-Request-Id", rid)
 			}
 			state.Model = r.Header.Get("X-Grove-Model")
 			if state.Model == "" {

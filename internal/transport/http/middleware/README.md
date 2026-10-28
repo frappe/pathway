@@ -137,10 +137,10 @@ costs its size.
 
 Every request — admitted or refused, a health probe, a scrape, an admin call — gets a `uuid v7`
 where the access line starts: time-ordered, opaque, canonical and overriding whatever the client
-sent. It is answered as `Request-Id`, so an Anthropic SDK's `_request_id` is ours whatever the
-route. On the hop it travels as `X-Request-Id`: an ingress adopts the gateway's id rather than
-minting one, and vLLM adopts `X-Request-Id` as its own request id, so one grep for it crosses the
-gateway log, the ingress log and the engine log.
+sent. It is answered as `X-Request-Id` and travels the hop under the same name: an ingress adopts
+the gateway's id rather than minting one, and vLLM adopts `X-Request-Id` as its own request id, so
+one grep for it crosses the gateway log, the ingress log and the engine log. Anthropic's SDK reads
+`Request-Id`, which is never answered; its `_request_id` is blank.
 
 Where it went — key, model, deployment, engine, upstream — is on the access line under `rid`, not
 in the id. So is how it ended, as `cut`: `-` for a response that finished, else who ended it —
