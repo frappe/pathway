@@ -12,12 +12,13 @@ import (
 	"github.com/frappe/pathway/internal/config"
 )
 
-// ridHeaders returns the id a response carries, failing unless both names carry the same one.
+// ridHeaders returns the id a response carries, failing unless X-Request-Id carries exactly one
+// uuid and nothing is answered under Anthropic's name for it.
 func ridHeaders(t *testing.T, h http.Header) string {
 	t.Helper()
 	x, r := h.Values("X-Request-Id"), h.Values("Request-Id")
-	if len(x) != 1 || len(r) != 1 || x[0] != r[0] || uuid.Validate(x[0]) != nil {
-		t.Fatalf("X-Request-Id=%v Request-Id=%v, want one uuid under both names", x, r)
+	if len(x) != 1 || len(r) != 0 || uuid.Validate(x[0]) != nil {
+		t.Fatalf("X-Request-Id=%v Request-Id=%v, want one uuid under X-Request-Id alone", x, r)
 	}
 	return x[0]
 }

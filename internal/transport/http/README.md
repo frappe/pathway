@@ -20,7 +20,7 @@ What a client sees on an answer:
 
 | Header | Whose | When |
 |---|---|---|
-| `X-Request-Id`, `Request-Id` | the gateway's | every answer. One id under both names; the second is what Anthropic's SDK reads |
+| `X-Request-Id` | the gateway's | every answer, and the hop, under the one name. Anthropic's SDK reads `Request-Id`, which is not answered |
 | `X-Grove-Fallback` | the gateway's | only when a fallback model served: that model's key |
 | `X-Grove-Changed` | the gateway's | only when the gateway changed what the model does for the vendor that answered: `reasoning_effort=none`, `thinking=disabled`, or a dropped field as `temperature=default` or `service_tier=default`, comma-separated (see [vendor_quirks.md](../../service/vendor/vendor_quirks.md)) |
 | `Retry-After` | the gateway's on its own 429 and 503, else the upstream's, relayed | when either says when to come back |
