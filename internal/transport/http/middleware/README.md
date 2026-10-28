@@ -137,8 +137,8 @@ costs its size.
 
 Every request — admitted or refused, a health probe, a scrape, an admin call — gets a `uuid v7`
 where the access line starts: time-ordered, opaque, canonical and overriding whatever the client
-sent. It is answered under both `X-Request-Id` and `Request-Id`, so an OpenAI SDK's and an Anthropic
-SDK's `_request_id` are both ours whatever the route. An ingress adopts the gateway's id rather than
+sent. It is answered as `Request-Id`, so an Anthropic SDK's `_request_id` is ours whatever the
+route. On the hop it travels as `X-Request-Id`: an ingress adopts the gateway's id rather than
 minting one, and vLLM adopts `X-Request-Id` as its own request id, so one grep for it crosses the
 gateway log, the ingress log and the engine log.
 

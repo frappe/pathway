@@ -12,14 +12,15 @@ import (
 	"github.com/frappe/pathway/internal/config"
 )
 
-// ridHeaders returns the id a response carries, failing unless both names carry the same one.
+// ridHeaders returns the id a response carries, failing unless Request-Id carries exactly one uuid
+// and X-Request-Id — the hop's name for it — is absent.
 func ridHeaders(t *testing.T, h http.Header) string {
 	t.Helper()
 	x, r := h.Values("X-Request-Id"), h.Values("Request-Id")
-	if len(x) != 1 || len(r) != 1 || x[0] != r[0] || uuid.Validate(x[0]) != nil {
-		t.Fatalf("X-Request-Id=%v Request-Id=%v, want one uuid under both names", x, r)
+	if len(x) != 0 || len(r) != 1 || uuid.Validate(r[0]) != nil {
+		t.Fatalf("X-Request-Id=%v Request-Id=%v, want one uuid under Request-Id alone", x, r)
 	}
-	return x[0]
+	return r[0]
 }
 
 // Every response carries an id — a refusal, a health probe and the model list included — because it

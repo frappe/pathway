@@ -278,8 +278,8 @@ func TestAnEngineStillServesItsOwnExtraEndpoints(t *testing.T) {
 }
 
 // The request id is ours on both sides of a vendor hop. Ours never leaves our network — a vendor
-// ignores it and mints its own — and the vendor's never reaches the client: ReverseProxy would add
-// it as a second X-Request-Id, or hand an Anthropic SDK the vendor's request-id in place of ours.
+// ignores it and mints its own — and the vendor's never reaches the client: ReverseProxy would hand
+// an SDK the vendor's request-id in place of ours, or leak it as an X-Request-Id we never answer.
 // It is kept on the access line instead, as the key a ticket to the vendor quotes.
 func TestAProviderRequestIDStaysOurs(t *testing.T) {
 	f := providerFixtureAnswering(t, func(w http.ResponseWriter, r *http.Request) {
@@ -296,12 +296,12 @@ func TestAProviderRequestIDStaysOurs(t *testing.T) {
 	if f.seen.requestID != "" {
 		t.Errorf("our request id reached the vendor: %q", f.seen.requestID)
 	}
-	ours := resp.Header().Values("X-Request-Id")
+	ours := resp.Header().Values("Request-Id")
 	if len(ours) != 1 || uuid.Validate(ours[0]) != nil || ours[0] == "req_vendor" {
-		t.Errorf("X-Request-Id = %v, want exactly our one id", ours)
+		t.Errorf("Request-Id = %v, want exactly our one id", ours)
 	}
-	if got := resp.Header().Values("Request-Id"); len(got) != 1 || got[0] != ours[0] {
-		t.Errorf("Request-Id = %v, want ours (%v) for the Anthropic SDK", got, ours)
+	if got := resp.Header().Values("X-Request-Id"); len(got) != 0 {
+		t.Errorf("X-Request-Id = %v, want none: the vendor's must not leak", got)
 	}
 	line := jsonLine(t, access)
 	if line["rid"] != ours[0] || line["upstream_rid"] != "req_vendor" {
