@@ -141,7 +141,7 @@ func TestAChainedRequestLogsExactlyOnce(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("got %d access lines, want exactly 1: %v", len(lines), lines)
 	}
-	if lines[0]["key"] != "abc123" || lines[0]["model"] != "qwen3-4b" {
+	if lines[0]["key"] != "abc123" || lines[0]["team"] != "test-team" || lines[0]["model"] != "qwen3-4b" {
 		t.Errorf("line = %v — the outer accesslog must still see what the chain resolved", lines[0])
 	}
 	if _, present := lines[0]["ttft"]; !present {

@@ -84,7 +84,7 @@ box needs `GROVE_PAYLOAD_LOG`, and the key needs `log_payloads` (pushed on `key:
 team, read per request, so turning it takes effect on the next one). One JSON line per request, written when the
 request ends — a client that hung up mid-stream still gets one, with what it had received:
 
-`rid` (joins the access line), `key`, `user`, `model`, `fallback` (the model whose output this is,
+`rid` (joins the access line), `key`, `team`, `model`, `fallback` (the model whose output this is,
 when not the one asked for; else `-`), `path` (after the base's `/openai` or `/anthropic` strip),
 `status`, `prompt`, `output`, `output_encoding` (only when `base64`), `prompt_bytes`,
 `output_bytes`.
@@ -142,8 +142,8 @@ the gateway's id rather than minting one, and vLLM adopts `X-Request-Id` as its 
 one grep for it crosses the gateway log, the ingress log and the engine log. Anthropic's SDK reads
 `Request-Id`, which is never answered; its `_request_id` is blank.
 
-Where it went — key, model, deployment, engine, upstream — is on the access line under `rid`, not
-in the id. So is how it ended, as `cut`: `-` for a response that finished, else who ended it —
+Where it went — key, team, model, deployment, engine, upstream — is on the access line under
+`rid`, not in the id. So is how it ended, as `cut`: `-` for a response that finished, else who ended it —
 `client_left`, `upstream_idle` (silent for the read timeout) or `upstream` (its body broke off).
 An upstream that ends a stream early but cleanly cannot be told from one that finished, and reads
 `-`. On a provider route the vendor's own id is `upstream_rid` on that line and never reaches

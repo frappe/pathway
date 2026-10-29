@@ -101,6 +101,7 @@ func newAccessLog(deps Deps) (Middleware, error) {
 				attrs = append(attrs,
 					slog.Int("attempts", state.Attempts),
 					slog.String("key", or(state.Identity.Prefix(), "-")),
+					slog.String("team", or(state.Identity.Key.Team, "-")),
 					slog.String("model", or(state.Model, "-")),
 					slog.String("fallback", or(state.Fallback, "-")),
 					slog.String("rid", state.RequestID),
