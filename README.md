@@ -30,7 +30,7 @@ never registered, so no handler on that box could read a key store even if one w
 7. Answers each base's `/v1/models` and the root `/v1/credits` itself, and `/metrics/node` behind basic auth.
 8. Upgrades its own binary and reloads its own configuration without dropping a connection.
 
-Requirements: Redis (loopback, or the Network's shared store), a certificate on disk, and an admin token. It refuses to start
+Requirements: Go 1.24.1 or later to build (sonic/loader does not link on 1.24.0), Redis (loopback, or the Network's shared store), a certificate on disk, and an admin token. It refuses to start
 without the last one, and refuses to start as an ingress without a data token.
 
 **Reading order** if you are new to it: *Where it sits* → *Design* → *The request path*, then

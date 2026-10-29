@@ -307,7 +307,7 @@ func newBody(deps Deps) (Middleware, error) {
 			// to go. What else the body says is the engine's to reject.
 			state.Raw = raw
 			var decoded transform.Body
-			if len(raw) > 0 && json.Unmarshal(raw, &decoded) != nil {
+			if len(raw) > 0 && domain.JSON.Unmarshal(raw, &decoded) != nil {
 				deny(w, r, domain.Deny(http.StatusBadRequest, "request body is not a JSON object"))
 				return
 			}
@@ -391,7 +391,7 @@ func pickRequest(r *http.Request, state *State, model, session string) routing.R
 		Path:      r.URL.Path,
 		Dialect:   respond.Dialect(r.Context()),
 		// Off the client's own bytes: the decoded body is the transforms' to change.
-		Tools:     domain.SentTools(state.Raw),
+		Tools:     domain.SentTools(state.Body),
 		RequestID: state.RequestID,
 	}
 }
@@ -465,7 +465,7 @@ func newTransform(deps Deps) (Middleware, error) {
 				w.Header().Set("X-Grove-Changed", strings.Join(changes, ", "))
 			}
 			if changed {
-				encoded, err := json.Marshal(state.Body)
+				encoded, err := domain.JSON.Marshal(state.Body)
 				if err != nil {
 					deny(w, r, domain.Deny(http.StatusInternalServerError, "gateway error"))
 					return
