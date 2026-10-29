@@ -47,19 +47,17 @@ var partInputs = map[string]string{
 	"document":  "file",
 }
 
-// SentInputs is what a chat or messages body carries that partInputs knows of, in the words a
-// model's inputs are declared in. A body it cannot read sends nothing it knows of: that one is the
-// upstream's to refuse.
+// SentInputs is what a chat or messages body, decoded to its top-level fields, carries that
+// partInputs knows of, in the words a model's inputs are declared in. A `messages` it cannot read
+// sends nothing it knows of: that one is the upstream's to refuse.
 // ponytail: copies each message's content once; a token scan if big bodies fall back often.
-func SentInputs(body []byte) []string {
-	var request struct {
-		Messages []struct {
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
+func SentInputs(body map[string]json.RawMessage) []string {
+	var messages []struct {
+		Content json.RawMessage `json:"content"`
 	}
-	_ = json.Unmarshal(body, &request)
+	_ = JSON.Unmarshal(body["messages"], &messages)
 	var sent []string
-	for _, message := range request.Messages {
+	for _, message := range messages {
 		sent = partsInputs(message.Content, sent)
 	}
 	return sent
@@ -78,7 +76,7 @@ func partsInputs(content json.RawMessage, sent []string) []string {
 	}
 	// The error is not read: a string is text and decodes to no parts, and a part with a field of
 	// the wrong shape must not hide the ones beside it.
-	_ = json.Unmarshal(content, &parts)
+	_ = JSON.Unmarshal(content, &parts)
 	for _, part := range parts {
 		if input, known := partInputs[part.Type]; known && !slices.Contains(sent, input) {
 			sent = append(sent, input)
@@ -103,25 +101,24 @@ func Takes(inputs, sent []string) bool {
 	return true
 }
 
-// SentTools is every name a body asks a tool by, each once: the `type` of each entry of `tools`,
-// and each top-level field, since `web_search_options` or `mcp_servers` is how a shape asks for
-// a vendor-run tool with no `tools` entry. Read by exact key off the object, not a struct: a
-// struct decode matches `Type` for `type`, and a vendor does not. A `tools` that is not a list,
-// or an entry that is not an object or has no string type, names nothing: the upstream's to refuse.
-func SentTools(body []byte) []string {
-	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(body, &fields)
+// SentTools is every name a body, decoded to its top-level fields, asks a tool by, each once: the
+// `type` of each entry of `tools`, and each top-level field, since `web_search_options` or
+// `mcp_servers` is how a shape asks for a vendor-run tool with no `tools` entry. Read by exact key
+// off the object, not a struct: a struct decode matches `Type` for `type`, and a vendor does not.
+// A `tools` that is not a list, or an entry that is not an object or has no string type, names
+// nothing: the upstream's to refuse.
+func SentTools(body map[string]json.RawMessage) []string {
 	var sent []string
-	for field := range fields {
+	for field := range body {
 		sent = append(sent, field)
 	}
 	slices.Sort(sent)
 
 	var tools []map[string]json.RawMessage
-	_ = json.Unmarshal(fields["tools"], &tools)
+	_ = JSON.Unmarshal(body["tools"], &tools)
 	for _, tool := range tools {
 		var kind string
-		if json.Unmarshal(tool["type"], &kind) == nil && kind != "" && !slices.Contains(sent, kind) {
+		if JSON.Unmarshal(tool["type"], &kind) == nil && kind != "" && !slices.Contains(sent, kind) {
 			sent = append(sent, kind)
 		}
 	}

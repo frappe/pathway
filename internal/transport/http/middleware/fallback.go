@@ -82,7 +82,7 @@ func serveFallback(w http.ResponseWriter, r *http.Request, state *State, model s
 // list is spent.
 func nextFallback(deps Deps, r *http.Request, state *State) (routing.Decision, string) {
 	// Read off the client's own bytes: the decoded body is the transforms' to change.
-	sent := domain.SentInputs(state.Raw)
+	sent := domain.SentInputs(state.Body)
 	for len(state.Fallbacks) > 0 {
 		model := state.Fallbacks[0]
 		state.Fallbacks = state.Fallbacks[1:]
@@ -128,7 +128,7 @@ func rewriteBody(r *http.Request, state *State) {
 	if state.Fallback != "" {
 		state.Body["model"], _ = json.Marshal(state.Fallback)
 	}
-	if encoded, err := json.Marshal(state.Body); err == nil {
+	if encoded, err := domain.JSON.Marshal(state.Body); err == nil {
 		restoreBody(r, encoded)
 	}
 }
@@ -137,7 +137,7 @@ func rewriteBody(r *http.Request, state *State) {
 // not idempotent.
 func replayBody(r *http.Request, state *State) {
 	state.Body = nil
-	_ = json.Unmarshal(state.Raw, &state.Body)
+	_ = domain.JSON.Unmarshal(state.Raw, &state.Body)
 	restoreBody(r, state.Raw)
 	rewriteBody(r, state)
 }

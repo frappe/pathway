@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -77,7 +78,7 @@ func TestSentInputsAndTakes(t *testing.T) {
 		{`{"input":"hi"}`, nil, "no messages"},
 		{`not json`, nil, "unreadable is the upstream's to refuse"},
 	} {
-		if got := SentInputs([]byte(c.body)); !slices.Equal(got, c.want) {
+		if got := SentInputs(fields(c.body)); !slices.Equal(got, c.want) {
 			t.Errorf("SentInputs(%s) = %v, want %v — %s", c.body, got, c.want, c.why)
 		}
 	}
@@ -124,7 +125,7 @@ func TestSentToolsAndRefuses(t *testing.T) {
 		{``, nil, "no body"},
 		{`not json`, nil, "unreadable is the upstream's to refuse"},
 	} {
-		if got := SentTools([]byte(c.body)); !slices.Equal(got, c.want) {
+		if got := SentTools(fields(c.body)); !slices.Equal(got, c.want) {
 			t.Errorf("SentTools(%s) = %v, want %v — %s", c.body, got, c.want, c.why)
 		}
 	}
@@ -193,4 +194,12 @@ func TestABlankKindIsStillAnEngine(t *testing.T) {
 	if !ServesRoute(Route{OutputModalities: []string{"text"}}, DialectOpenAI, "/v1/rerank") {
 		t.Error("a route with no kind was treated as a vendor")
 	}
+}
+
+// fields is a test body as the body stage hands it on: decoded to its top-level fields, nil when
+// it is not JSON.
+func fields(body string) map[string]json.RawMessage {
+	var decoded map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(body), &decoded)
+	return decoded
 }
