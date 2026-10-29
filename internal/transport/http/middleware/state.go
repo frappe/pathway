@@ -60,6 +60,16 @@ type State struct {
 // ServingModel is the model this request is served by: a fallback once one took over.
 func (s *State) ServingModel() string { return or(s.Fallback, s.Model) }
 
+// servedModel is the id the upstream answered under when it is not the one the client knows the
+// serving model by — a dated snapshot, a vendor's own spelling of an alias — else `-`: only the
+// difference is worth a field.
+func servedModel(state *State) string {
+	if served := state.Outcome.ServedModel; served != "" && served != state.ServingModel() {
+		return served
+	}
+	return "-"
+}
+
 type stateKey struct{}
 
 // newState attaches a fresh State. Called once, by accesslog, which is the outermost stage that

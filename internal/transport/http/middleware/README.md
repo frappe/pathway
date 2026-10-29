@@ -150,7 +150,10 @@ An upstream that ends a stream early but cleanly cannot be told from one that fi
 the client; ours never reaches the vendor. `attempts` is how many times an upstream was dialled
 for the request — 0 when it was refused before any, more than 1 when `retry` moved it to another
 vendor key or `fallback` to another model. `model` is the one the client asked for; `fallback` is
-the model that served instead, `-` when the one asked for did.
+the model that served instead, `-` when the one asked for did. `served_model` is the id the
+upstream answered under when that is not the one the client knows the serving model by — a dated
+snapshot, a vendor's own spelling of an alias — read off its usage line; `-` when it is the same,
+or the answer named none.
 
 What the vendor said of the hop in its own headers is on the line too, and nowhere else — the
 proxy strips every upstream header a client has no use for before the response goes on.
@@ -187,7 +190,7 @@ own in the same log, `msg="attempt"`, under the same `rid`:
 |---|---|
 | `attempt` | which dial failed, from 1; `0` for a model `route` could not place, so nothing was dialled |
 | `model` | the model this attempt was on |
-| `upstream`, `deployment`, `engine`, `upstream_rid`, `upstream_status`, `upstream_ms`, `upstream_attempts`, `retry_after`, `remaining_requests`, `remaining_tokens`, `reason`, `cut` | as on the access line, for this attempt; `reason` is the pick's refusal when nothing was dialled, `upstream unavailable` or `upstream timed out` when the dial gave no status |
+| `upstream`, `deployment`, `engine`, `served_model`, `upstream_rid`, `upstream_status`, `upstream_ms`, `upstream_attempts`, `retry_after`, `remaining_requests`, `remaining_tokens`, `reason`, `cut` | as on the access line, for this attempt; `reason` is the pick's refusal when nothing was dialled, `upstream unavailable` or `upstream timed out` when the dial gave no status |
 | `upstream_key` | id of the vendor credential dialled; `-` on an engine |
 | `stage`, `hop` | as on the access line, for this attempt; `hop.respond` absent, the client never received this answer |
 | `rt` | seconds this attempt took |

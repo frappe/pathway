@@ -111,6 +111,7 @@ func logAttempt(deps Deps, r *http.Request, state *State, started time.Time, rea
 		slog.String("upstream_rid", or(state.Outcome.UpstreamRID, "-")),
 		slog.String("deployment", or(state.Decision.Route.Deployment, "-")),
 		slog.String("engine", or(state.Outcome.Deployment, "-")),
+		slog.String("served_model", servedModel(state)),
 		slog.Int("upstream_status", state.Outcome.Status),
 		slog.Int("upstream_ms", state.Outcome.UpstreamMS),
 		slog.Int("upstream_attempts", state.Outcome.UpstreamAttempts),
