@@ -21,7 +21,13 @@ record without the field under the hash of the full payload — is drift no late
 which is what happened once. Consequence: a new route field ships in the binary before Grove
 pushes it.
 
-`GET /grove-admin/state-hash` returns that stored map. Grove diffs its computed hashes against it
+`GET /grove-admin/state-hash` returns that stored map, with two stamps for an operator: `pushed_at`,
+when a push last landed on this process (any section, any endpoint), and `contact_at`, when the
+control plane last called any admin endpoint with the right token, this one included; each left out
+until it has happened since the process started. They live in memory, not the store: a fresh
+process knows nothing until the next tick, and the hashes are diffed, so nothing rides with them.
+`contact_at` is the liveness signal — a quiet fleet pushes nothing for hours — and `/healthz`
+carries it as `X-Grove-Contact-Age` in seconds. Grove diffs its computed hashes against it
 every 2 minutes and pushes only what differs — an in-sync box costs one GET. `teams` and `keys` are
 split into 256 buckets (`domain.BucketOf` = `sha256(id)[:2]`, same rule Grove uses) hashed
 independently, so one minted key or one suspended team ships one bucket, not the population. A wiped Redis has no

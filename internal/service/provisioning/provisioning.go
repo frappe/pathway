@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/frappe/pathway/internal/domain"
@@ -16,22 +17,45 @@ import (
 type Service struct {
 	store repository.Store
 	log   *slog.Logger
+	// pushed is when the last push landed, unix seconds; 0 since this process started. In
+	// memory, not the store: a fresh process honestly knows nothing until the control plane's next
+	// tick, and the hashes it stores are diffed by the control plane, so nothing may ride with them.
+	pushed atomic.Int64
 }
 
 func New(store repository.Store, log *slog.Logger) *Service {
 	return &Service{store: store, log: log}
 }
 
+// PushedAt is when the last push landed — any section, through any endpoint — zero when none has
+// since this process started. A quiet fleet pushes nothing for hours: the control plane's liveness
+// is its last contact, read elsewhere; this says when state last changed.
+func (s *Service) PushedAt() time.Time {
+	if at := s.pushed.Load(); at != 0 {
+		return time.Unix(at, 0)
+	}
+	return time.Time{}
+}
+
+// landed stamps a push that stored, and passes its error through.
+func (s *Service) landed(err error) error {
+	if err == nil {
+		s.pushed.Store(time.Now().Unix())
+	}
+	return err
+}
+
 func (s *Service) UpsertKeys(ctx context.Context, records []repository.KeyUpsert) error {
-	return s.store.Keys.Upsert(ctx, records)
+	return s.landed(s.store.Keys.Upsert(ctx, records))
 }
 
 func (s *Service) DeleteKeys(ctx context.Context, ids []string) (int, error) {
-	return s.store.Keys.Delete(ctx, ids)
+	n, err := s.store.Keys.Delete(ctx, ids)
+	return n, s.landed(err)
 }
 
 func (s *Service) UpsertGroups(ctx context.Context, records []repository.GroupUpsert) error {
-	return s.store.Groups.Upsert(ctx, records)
+	return s.landed(s.store.Groups.Upsert(ctx, records))
 }
 
 // ReplaceRoutes replaces the table per model named; an empty list retires that model, which is what
@@ -126,7 +150,8 @@ func (s *Service) ApplyState(ctx context.Context, push repository.StatePush) (re
 			return repository.StateCounts{}, err
 		}
 	}
-	return s.store.State.Apply(ctx, push)
+	counts, err := s.store.State.Apply(ctx, push)
+	return counts, s.landed(err)
 }
 
 // oneKindEach refuses a push before any of it lands when a model's rows are both a vendor's and
