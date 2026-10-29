@@ -101,7 +101,7 @@ func (s *Store) putKey(rec repository.KeyUpsert) {
 		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
 		Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent, BudgetWindow: rec.BudgetWindow,
-		Limits: limits,
+		Limits: limits, CapMessage: rec.CapMessage,
 	}
 }
 

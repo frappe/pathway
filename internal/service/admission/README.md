@@ -37,8 +37,10 @@ something the inference path would refuse.
 Two, both read off the key record before the body is, both answering 402
 `credit balance exhausted`. The control plane's: its verdict on the team, flipped as `limited` and
 pushed onto every key of the team. This box's own: `spent >= budget`, the key's monthly
-cap against this month's counter on the record (see [The records themselves](../../repository/redis/README.md#the-records-themselves)). A client cannot
-tell which one refused it.
+cap against this month's counter on the record (see [The records themselves](../../repository/redis/README.md#the-records-themselves)). The cap's 402
+says the key's `cap_message` when the control plane pushed one (a trial team's "upgrade to go on");
+the team's verdict keeps the default text. Without a message a client cannot tell which one
+refused it.
 
 ## Rate limiting
 

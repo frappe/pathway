@@ -287,3 +287,25 @@ func TestAStatePushCarriesTheKeysBudgetWindow(t *testing.T) {
 		t.Errorf("a refused push changed the window to %q", got)
 	}
 }
+
+// A key's cap message rides the push, and a push without one clears it, the way a dropped limit is.
+func TestAStatePushCarriesTheKeysCapMessage(t *testing.T) {
+	store := memory.New()
+	handler := adminFixture(t, store)
+	bucket := domain.BucketOf("aa")
+	push := func(hash, record string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"keys": {"buckets": {"%s": {"hash": "%s", "records": [%s]}}}}`, bucket, hash, record)
+		if w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", body); w.Code != http.StatusOK {
+			t.Fatalf("POST state = %d: %s", w.Code, w.Body)
+		}
+	}
+	push("kh1", `{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "budget": 5, "cap_message": "trial over, upgrade"}`)
+	if got := store.Keys["aa"].CapMessage; got != "trial over, upgrade" {
+		t.Errorf("aa cap_message = %q", got)
+	}
+	push("kh2", `{"key_hash": "aa", "prefix": "K-1", "team": "T-1", "status": "active", "budget": 5}`)
+	if got := store.Keys["aa"].CapMessage; got != "" {
+		t.Errorf("a push without a message kept %q", got)
+	}
+}

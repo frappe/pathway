@@ -34,6 +34,7 @@ func Run(t *testing.T, open func(t *testing.T) repository.Store) {
 		{"AKeyThatChangesHandsClosesItsBooks", aKeyThatChangesHandsClosesItsBooks},
 		{"SpentIsEachKeysOwnCounter", spentIsEachKeysOwnCounter},
 		{"AKeyCountsItsSpendPerWindow", aKeyCountsItsSpendPerWindow},
+		{"AKeyCarriesItsCapMessage", aKeyCarriesItsCapMessage},
 		{"AReplayLandsOnce", aReplayLandsOnce},
 	}
 	for _, c := range cases {
@@ -295,5 +296,19 @@ func aReplayLandsOnce(t *testing.T, store repository.Store) {
 	}
 	if drained, _ := store.Usage.Drain(ctx, "d1", nil); requests(drained, "d1") != 1 {
 		t.Fatalf("Drain = %v, want one request", drained)
+	}
+}
+
+// A pushed cap message reads back off the key, and a push without one clears it.
+func aKeyCarriesItsCapMessage(t *testing.T, store repository.Store) {
+	rec := repository.KeyUpsert{MeterID: "k1", Prefix: "abc", Status: "active", Budget: 5, CapMessage: "trial over"}
+	must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{rec}))
+	if holder, _, err := store.Keys.Resolve(ctx, "k1"); err != nil || holder.Key.CapMessage != "trial over" {
+		t.Fatalf("pushed = %+v, %v; want the message", holder.Key, err)
+	}
+	rec.CapMessage = ""
+	must(t, store.Keys.Upsert(ctx, []repository.KeyUpsert{rec}))
+	if holder, _, err := store.Keys.Resolve(ctx, "k1"); err != nil || holder.Key.CapMessage != "" {
+		t.Fatalf("cleared = %+v, %v; want blank", holder.Key, err)
 	}
 }

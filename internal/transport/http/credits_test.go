@@ -34,6 +34,8 @@ func TestTheCapGate(t *testing.T) {
 		{"exhausted", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 1000 }, 402, "credit balance exhausted"},
 		{"no cap pushed", func(k *domain.KeyRecord) { k.Budget = 0 }, 402, "credit balance exhausted"},
 		{"limited refuses a funded key", func(k *domain.KeyRecord) { k.Limited, k.Budget = true, 1000 }, 402, "credit balance exhausted"},
+		{"the cap says the pushed text", func(k *domain.KeyRecord) { k.Budget, k.Spent, k.CapMessage = 1000, 1000, "trial over, upgrade" }, 402, "trial over, upgrade"},
+		{"limited keeps the default over the text", func(k *domain.KeyRecord) { k.Limited, k.Budget, k.CapMessage = true, 1000, "trial over, upgrade" }, 402, "credit balance exhausted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
