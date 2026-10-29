@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -122,6 +121,7 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					attrs = append(attrs, metaGroup(state.Meta))
 				}
 				access.LogAttrs(r.Context(), slog.LevelInfo, "access", attrs...)
+				state.release()
 			}()
 
 			if metaErr != nil {
@@ -295,7 +295,7 @@ func newBody(deps Deps) (Middleware, error) {
 				return
 			}
 
-			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
+			raw, err := readBody(http.MaxBytesReader(w, r.Body, maxBytes), r.ContentLength, maxBytes, state)
 			doneReading(err)
 			if err != nil {
 				denyUnreadableBody(w, r, err)
@@ -319,7 +319,7 @@ func newBody(deps Deps) (Middleware, error) {
 				return
 			}
 			applySessionHeader(r, state)
-			restoreBody(r, raw)
+			restoreBody(r, state, raw)
 			rewriteBody(r, state)
 			serveNamed(next, w, r, state)
 		})
@@ -465,12 +465,12 @@ func newTransform(deps Deps) (Middleware, error) {
 				w.Header().Set("X-Grove-Changed", strings.Join(changes, ", "))
 			}
 			if changed {
-				encoded, err := domain.JSON.Marshal(state.Body)
+				encoded, err := encodeBody(state)
 				if err != nil {
 					deny(w, r, domain.Deny(http.StatusInternalServerError, "gateway error"))
 					return
 				}
-				restoreBody(r, encoded)
+				restoreBody(r, state, encoded)
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -647,8 +647,10 @@ func applySessionHeader(r *http.Request, state *State) {
 	}
 }
 
-func restoreBody(r *http.Request, raw []byte) {
-	r.Body = io.NopCloser(bytes.NewReader(raw))
+func restoreBody(r *http.Request, state *State, raw []byte) {
+	reader := &bodyReader{reader: bytes.NewReader(raw)}
+	state.readers = append(state.readers, reader)
+	r.Body = reader
 	r.ContentLength = int64(len(raw))
 	// A stale Content-Length header would contradict the body a transform just resized.
 	r.Header.Set("Content-Length", itoa(len(raw)))

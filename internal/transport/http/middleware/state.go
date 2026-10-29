@@ -51,6 +51,10 @@ type State struct {
 	// Outcome is what the proxy learned of the attempt that is serving this request, filled on the
 	// way back out. Blank again before another attempt.
 	Outcome proxy.Outcome
+	// What the body stage took from the pool for this request, and every reader handed on over
+	// it. The stage that made the State releases both when the request is over.
+	buffers [][]byte
+	readers []*bodyReader
 	// Denied is the status a stage refused with, for the access log. 0 means the request reached
 	// an upstream.
 	Denied       int
@@ -59,6 +63,20 @@ type State struct {
 
 // ServingModel is the model this request is served by: a fallback once one took over.
 func (s *State) ServingModel() string { return or(s.Fallback, s.Model) }
+
+func (s *State) own(buf []byte) { s.buffers = append(s.buffers, buf) }
+
+// release closes every reader over the request's buffers and returns the buffers to their pools.
+// Nothing reads Raw after this: the access line was written before it, the payload line inside.
+func (s *State) release() {
+	for _, reader := range s.readers {
+		_ = reader.Close()
+	}
+	for _, buf := range s.buffers {
+		giveBuffer(buf)
+	}
+	s.readers, s.buffers, s.Raw = nil, nil, nil
+}
 
 type stateKey struct{}
 

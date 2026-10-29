@@ -182,6 +182,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 		// Any positive interval would batch an SSE stream into chunks and make the response feel
 		// slower than the engine actually is.
 		FlushInterval: -1,
+		BufferPool:    copyBuffers{},
 		ModifyResponse: func(resp *http.Response) error {
 			outcome.Status = resp.StatusCode
 			outcome.Deployment = resp.Header.Get("X-Grove-Engine")
@@ -363,6 +364,15 @@ func (p *Proxy) transportFor(base *url.URL, external bool) http.RoundTripper {
 	p.transports[host] = transport
 	return transport
 }
+
+// copyBuffers hands ReverseProxy its copy buffer from a pool, instead of a fresh 32 KiB per
+// response.
+type copyBuffers struct{}
+
+var copyPool = sync.Pool{New: func() any { b := make([]byte, 32<<10); return &b }}
+
+func (copyBuffers) Get() []byte  { return *copyPool.Get().(*[]byte) }
+func (copyBuffers) Put(b []byte) { copyPool.Put(&b) }
 
 // singleJoin appends the client's path to the target's base without doubling or dropping a slash.
 // The base carries the engine's location prefix (https://box/e/md-00007), so this is what makes

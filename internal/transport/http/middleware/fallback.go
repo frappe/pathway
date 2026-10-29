@@ -128,8 +128,8 @@ func rewriteBody(r *http.Request, state *State) {
 	if state.Fallback != "" {
 		state.Body["model"], _ = json.Marshal(state.Fallback)
 	}
-	if encoded, err := domain.JSON.Marshal(state.Body); err == nil {
-		restoreBody(r, encoded)
+	if encoded, err := encodeBody(state); err == nil {
+		restoreBody(r, state, encoded)
 	}
 }
 
@@ -138,6 +138,6 @@ func rewriteBody(r *http.Request, state *State) {
 func replayBody(r *http.Request, state *State) {
 	state.Body = nil
 	_ = domain.JSON.Unmarshal(state.Raw, &state.Body)
-	restoreBody(r, state.Raw)
+	restoreBody(r, state, state.Raw)
 	rewriteBody(r, state)
 }
