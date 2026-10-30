@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/frappe/pathway/internal/config"
 	"github.com/frappe/pathway/internal/domain"
@@ -113,7 +114,9 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 
 	w = adminCall(t, handler, http.MethodGet, "/grove-admin/state-hash", "")
 	var hashes struct {
-		Hashes map[string]string `json:"hashes"`
+		Hashes    map[string]string `json:"hashes"`
+		PushedAt  string            `json:"pushed_at"`
+		ContactAt string            `json:"contact_at"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &hashes); err != nil {
 		t.Fatalf("state-hash: %v", err)
@@ -124,6 +127,13 @@ func TestAStatePushLandsAndItsHashesReadBack(t *testing.T) {
 			t.Errorf("hashes[%s] = %q, want %q", field, hashes.Hashes[field], hash)
 		}
 	}
+	// The push that landed, and this call itself, are both stamped.
+	for name, stamp := range map[string]string{"pushed_at": hashes.PushedAt, "contact_at": hashes.ContactAt} {
+		at, err := time.Parse(time.RFC3339, stamp)
+		if err != nil || time.Since(at) > time.Minute {
+			t.Errorf("%s = %q (%v), want a moment ago", name, stamp, err)
+		}
+	}
 }
 
 func TestAFreshStoreAnswersAnEmptyHashMap(t *testing.T) {
@@ -131,7 +141,11 @@ func TestAFreshStoreAnswersAnEmptyHashMap(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("state-hash = %d", w.Code)
 	}
-	// {} not null — the control plane reads this as "the box holds nothing, push everything".
+	// {} not null — the control plane reads this as "the box holds nothing, push everything". No
+	// push has landed, so none is stamped; the call itself is a contact.
+	if strings.Contains(w.Body.String(), `"pushed_at"`) || !strings.Contains(w.Body.String(), `"contact_at"`) {
+		t.Errorf("body = %s, want a contact and no push", w.Body)
+	}
 	if !strings.Contains(w.Body.String(), `"hashes":{}`) {
 		t.Errorf("body = %s, want an empty object", w.Body)
 	}

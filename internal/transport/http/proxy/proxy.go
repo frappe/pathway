@@ -29,6 +29,10 @@ import (
 type Outcome struct {
 	Status int    // the upstream's status; 0 means the hop never produced one
 	Usage  string // the captured usage line, empty if the response carried none
+	// ServedModel is the model id the upstream named in its answer, off the usage line it was read
+	// from: a vendor answers an alias under the name behind it, a dated snapshot under its date.
+	// Blank when it named none, or sent no usage line to read it from.
+	ServedModel string
 	// UsageStart is the first usage line of a response that carried more than one: where an
 	// Anthropic stream reports its prompt.
 	UsageStart string
@@ -154,6 +158,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 		if tee != nil {
 			outcome.Usage = tee.Usage()
 			outcome.UsageStart = tee.UsageStart()
+			outcome.ServedModel = tee.Model()
 		}
 		outcome.Cut = cutBy(hop, r.Context(), tee)
 	}()

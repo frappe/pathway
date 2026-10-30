@@ -5,6 +5,7 @@ package http
 import (
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -48,8 +49,12 @@ type Server struct {
 	logged middleware.Middleware
 
 	adminToken string
-	isIngress  bool
-	retention  func() time.Duration
+	// contact is when the control plane last called an admin endpoint with the right token, unix
+	// seconds; 0 since this process started. It polls every tier on a fixed tick, so a growing age
+	// is a control plane that is gone, which no push-based signal says on a quiet fleet.
+	contact   atomic.Int64
+	isIngress bool
+	retention func() time.Duration
 }
 
 // usageRetention is the configured window, or three days on a server built without one (tests).
@@ -224,24 +229,42 @@ func (s *swappable) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	// The replica table is the one thing both planes hold, so both take this push.
-	mux.HandleFunc("/grove-admin/routes", adminAuth(s.adminToken, s.handleAdminRoutes))
+	mux.HandleFunc("/grove-admin/routes", s.admin(s.handleAdminRoutes))
 	// The state push replaces the per-section endpoints above (plan_agent_state_sync.md); both
 	// planes serve it — an ingress simply only ever receives the routes section.
-	mux.HandleFunc("/grove-admin/state", adminAuth(s.adminToken, s.handleAdminState))
-	mux.HandleFunc("/grove-admin/state-hash", adminAuth(s.adminToken, s.handleAdminStateHash))
+	mux.HandleFunc("/grove-admin/state", s.admin(s.handleAdminState))
+	mux.HandleFunc("/grove-admin/state-hash", s.admin(s.handleAdminStateHash))
 	// Read-only: maintenance is only ever changed through the tunables file.
-	mux.HandleFunc("/grove-admin/in-flight", adminAuth(s.adminToken, s.handleAdminInFlight))
+	mux.HandleFunc("/grove-admin/in-flight", s.admin(s.handleAdminInFlight))
 	if s.isIngress {
 		return mux
 	}
-	mux.HandleFunc("/grove-admin/keys", adminAuth(s.adminToken, s.handleAdminKeys))
-	mux.HandleFunc("/grove-admin/groups", adminAuth(s.adminToken, s.handleAdminGroups))
-	mux.HandleFunc("/grove-admin/usage", adminAuth(s.adminToken, s.handleAdminUsage))
-	mux.HandleFunc("POST /grove-admin/usage/ack", adminAuth(s.adminToken, s.handleAdminUsageAck))
-	mux.HandleFunc("POST /grove-admin/spend-adjust", adminAuth(s.adminToken, s.handleAdminSpendAdjust))
-	mux.HandleFunc("/grove-admin/spent", adminAuth(s.adminToken, s.handleAdminSpent))
-	mux.HandleFunc("/grove-admin/provider-keys", adminAuth(s.adminToken, s.handleAdminProviderKeys))
+	mux.HandleFunc("/grove-admin/keys", s.admin(s.handleAdminKeys))
+	mux.HandleFunc("/grove-admin/groups", s.admin(s.handleAdminGroups))
+	mux.HandleFunc("/grove-admin/usage", s.admin(s.handleAdminUsage))
+	mux.HandleFunc("POST /grove-admin/usage/ack", s.admin(s.handleAdminUsageAck))
+	mux.HandleFunc("POST /grove-admin/spend-adjust", s.admin(s.handleAdminSpendAdjust))
+	mux.HandleFunc("/grove-admin/spent", s.admin(s.handleAdminSpent))
+	mux.HandleFunc("/grove-admin/provider-keys", s.admin(s.handleAdminProviderKeys))
 	return mux
+}
+
+// admin gates a control-plane endpoint on the token and, once it passes, stamps the contact: the
+// call itself is the control plane saying it is alive, whatever it then asks.
+func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
+	return adminAuth(s.adminToken, func(w http.ResponseWriter, r *http.Request) {
+		s.contact.Store(time.Now().Unix())
+		next(w, r)
+	})
+}
+
+// ContactAt is when the control plane last spoke to this box, zero when it has not since this
+// process started.
+func (s *Server) ContactAt() time.Time {
+	if at := s.contact.Load(); at != 0 {
+		return time.Unix(at, 0)
+	}
+	return time.Time{}
 }
 
 // Health answers the check every tier in front of this box asks, and answers it with "can I serve",
@@ -250,8 +273,13 @@ func (s *Server) AdminHandler() http.Handler {
 // BEFORE its socket goes anywhere, and 503 when a pick would fail for every model it holds.
 //
 // The body is a fixed word either way: this is reachable from the internet unauthenticated, so it
-// names nothing.
+// names nothing. The one header, X-Grove-Contact-Age, is seconds since the control plane last
+// spoke to this box, absent until it has: a monitor's number, not a reason to leave DNS — a box
+// whose control plane went quiet still serves what it holds.
 func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
+	if at := s.ContactAt(); !at.IsZero() {
+		w.Header().Set("X-Grove-Contact-Age", strconv.FormatInt(int64(time.Since(at).Seconds()), 10))
+	}
 	if s.drain != nil && s.drain.Draining() {
 		respond.TypedError(w, http.StatusServiceUnavailable, "draining", "draining")
 		return

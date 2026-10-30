@@ -104,6 +104,27 @@ func (r *modelSwapReader) rewrite(buf []byte, last bool) (out, carry []byte) {
 	return append(out, buf[:len(buf)-hold]...), buf[len(buf)-hold:]
 }
 
+// findModel is the first `"model":"…"` value in buf, blank when there is none that is a closed
+// string. The same raw-byte match the swap relies on: the first unescaped one is the real field.
+func findModel(buf []byte) string {
+	at := bytes.Index(buf, modelKey)
+	if at < 0 {
+		return ""
+	}
+	value := at + len(modelKey)
+	for value < len(buf) && buf[value] == ' ' {
+		value++
+	}
+	if value == len(buf) || buf[value] != '"' {
+		return ""
+	}
+	end := closingQuote(buf[value+1:])
+	if end < 0 {
+		return ""
+	}
+	return string(buf[value+1 : value+1+end])
+}
+
 // closingQuote is the index of the quote that ends a JSON string whose content starts at value.
 // -1 when it has not arrived.
 func closingQuote(value []byte) int {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/repository"
@@ -151,5 +152,27 @@ func TestAFailedApplyStoresNoHashes(t *testing.T) {
 	}
 	if len(store.Hashes) != 0 {
 		t.Errorf("hashes = %v, want none on failure", store.Hashes)
+	}
+}
+
+// A push that lands is stamped; one that does not, or none yet, leaves the stamp zero.
+func TestAPushThatLandsIsStamped(t *testing.T) {
+	service := New(memory.New().Repositories(), quiet())
+	if !service.PushedAt().IsZero() {
+		t.Errorf("PushedAt = %v before any push", service.PushedAt())
+	}
+	if _, err := service.ApplyState(context.Background(), repository.StatePush{Groups: &repository.GroupsPush{Hash: "h"}}); err != nil {
+		t.Fatal(err)
+	}
+	if since := time.Since(service.PushedAt()); since < 0 || since > time.Minute {
+		t.Errorf("PushedAt = %v, want a moment ago", service.PushedAt())
+	}
+
+	failing := memory.New()
+	failing.Fail["state"] = true
+	service = New(failing.Repositories(), quiet())
+	_, _ = service.ApplyState(context.Background(), repository.StatePush{Groups: &repository.GroupsPush{Hash: "h"}})
+	if !service.PushedAt().IsZero() {
+		t.Errorf("PushedAt = %v after a push that did not land", service.PushedAt())
 	}
 }

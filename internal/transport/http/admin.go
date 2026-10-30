@@ -9,6 +9,7 @@ import (
 	"github.com/frappe/pathway/internal/service/metering"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/repository"
@@ -164,8 +165,11 @@ func (s *Server) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, map[string]any{"ok": true, "models": models, "pruned": pruned})
 }
 
-// GET /admin/state-hash — the hashes stored by the last accepted state push, empty on a fresh or
-// wiped store. The control plane diffs against this before deciding to push anything at all.
+// GET /grove-admin/state-hash — the hashes stored by the last accepted state push, empty on a
+// fresh or wiped store. The control plane diffs against this before deciding to push anything at
+// all. With them, for an operator: `pushed_at`, when a push last landed on this process, and
+// `contact_at`, when the control plane last called any admin endpoint — this call included —
+// each left out until it has happened.
 func (s *Server) handleAdminStateHash(w http.ResponseWriter, r *http.Request) {
 	hashes, err := s.provisioning.StateHashes(r.Context())
 	if err != nil {
@@ -175,7 +179,14 @@ func (s *Server) handleAdminStateHash(w http.ResponseWriter, r *http.Request) {
 	if hashes == nil {
 		hashes = map[string]string{}
 	}
-	respond.JSON(w, map[string]any{"hashes": hashes})
+	reply := map[string]any{"hashes": hashes}
+	if at := s.provisioning.PushedAt(); !at.IsZero() {
+		reply["pushed_at"] = at.UTC().Format(time.RFC3339)
+	}
+	if at := s.ContactAt(); !at.IsZero() {
+		reply["contact_at"] = at.UTC().Format(time.RFC3339)
+	}
+	respond.JSON(w, reply)
 }
 
 // GET /admin/in-flight — whether new requests are refused, and how many are still running. The

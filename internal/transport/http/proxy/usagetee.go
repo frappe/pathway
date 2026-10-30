@@ -55,6 +55,15 @@ func (t *usageTee) Close() error {
 // Usage is the captured line, or empty if the response never carried one.
 func (t *usageTee) Usage() string { return string(t.line) }
 
+// Model is the model id the upstream named on a usage line: the last one's, else the first's,
+// which is where an Anthropic stream's message_start names it. Blank when neither does.
+func (t *usageTee) Model() string {
+	if model := findModel(t.line); model != "" {
+		return model
+	}
+	return findModel(t.first)
+}
+
 // UsageStart is the first usage-bearing line, empty when Usage is the only one.
 func (t *usageTee) UsageStart() string { return string(t.first) }
 

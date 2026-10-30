@@ -11,7 +11,7 @@
 | `GET /anthropic/v1/models` | the same, in Anthropic's list shape, for what that key may use through the Anthropic surface |
 | `GET /v1/credits` | answered here: what the key has left of its own cap on this store over its window (this month, or for life), in US dollars to the cent — `{"balance", "spent"}`. `balance` is `budget − spent`, the figure `quota` gates on, negative once overspent and still readable then. Nothing of the team's balance is exposed, so every key may read it |
 | any other method on either | 405 `Allow: GET`, not forwarded — a chat body POSTed at the list would otherwise reach the proxy and be refused as a model that "does not serve" the path |
-| `GET /healthz` | 200, or 503 while draining or in maintenance |
+| `GET /healthz` | 200, or 503 while draining, in maintenance, or when no model it holds could be served. The body is a fixed word; the one header, `X-Grove-Contact-Age`, is seconds since the control plane last called an admin endpoint, absent until it has since the process started — a monitor's number, never a reason to 503 |
 | `GET /metrics/node` | node_exporter behind bcrypt basic auth |
 
 ## Headers
