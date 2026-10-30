@@ -38,6 +38,8 @@ type adminKey struct {
 	BudgetWindow string `json:"budget_window"`
 	// Limits is the key's rate limits, a comma list of metric:window:value; "" = none.
 	Limits string `json:"limits"`
+	// CapMessage is what the 402 says once the key's cap is spent; absent: the default text.
+	CapMessage string `json:"cap_message"`
 }
 
 // upsert refuses a limit this binary cannot read, the way decodeBody refuses a field it does not
@@ -53,6 +55,7 @@ func (k adminKey) upsert() (repository.KeyUpsert, error) {
 		MeterID: k.KeyHash, Prefix: k.Prefix, Team: k.Team, Status: k.Status, Groups: k.Group,
 		Allow: k.Allow, Deny: k.Deny, Limited: k.Limited, LogPayloads: k.LogPayloads,
 		Geography: k.Geography, Budget: k.Budget, BudgetWindow: k.BudgetWindow, Limits: k.Limits,
+		CapMessage: k.CapMessage,
 	}, nil
 }
 

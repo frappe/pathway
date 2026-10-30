@@ -39,6 +39,10 @@ type KeyRecord struct {
 	BudgetWindow string
 	// Limits caps the key's requests and tokens per reset window; none = uncapped.
 	Limits []Limit
+	// CapMessage is what the 402 says once this key's cap is spent: the control plane's text for
+	// the team, a trial's "upgrade to go on"; blank is the default. A limited team's keys keep the
+	// default whatever it says — that hold is not the cap's.
+	CapMessage string
 }
 
 // GroupRecord is what a Model Group grants everyone in it, stored under model_group:<name>. A group
@@ -88,14 +92,18 @@ func IsBudgetWindow(w string) bool { return w == "" || w == WindowMonth || w == 
 // a key's live counters under, and the day the control plane records them on.
 func DayOf(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
-// ExhaustedDenial is the 402 for an exhausted key, nil otherwise. The control plane's verdict and
-// this box's own balance answer alike: a client cannot tell, and should not need to, which side
-// noticed first.
+// ExhaustedDenial is the 402 for an exhausted key, nil otherwise. The cap spent answers the key's
+// CapMessage when the control plane pushed one; the control plane's verdict on the team keeps the
+// default text, which is also the cap's when no message was pushed — then a client cannot tell,
+// and need not, which side noticed first.
 func ExhaustedDenial(key KeyRecord) error {
-	if key.Exhausted() {
-		return Deny(402, "credit balance exhausted")
+	if !key.Exhausted() {
+		return nil
 	}
-	return nil
+	if key.CapMessage != "" && !key.Limited {
+		return Deny(402, key.CapMessage)
+	}
+	return Deny(402, "credit balance exhausted")
 }
 
 // CanUse is the access decision: the grant of every group the key is in, plus its own Allow,

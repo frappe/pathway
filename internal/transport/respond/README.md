@@ -13,7 +13,7 @@ Anthropic API names it (`authentication_error`, `rate_limit_error`, …), except
 | 403 | the key exists but may not use this model | ask for access |
 | 408 | the body did not arrive within 60s of the headers | resend on a working connection |
 | 413 | body over `max_body_bytes` | send less |
-| 402 | the key's monthly cap is spent, or its team is limited | a higher cap; nothing to retry |
+| 402 | the key's cap is spent (the message is the key's `cap_message` when the control plane pushed one), or its team is limited | a higher cap; nothing to retry |
 | 429 | every replica at capacity, or the key is over a rate limit | back off and retry — `Retry-After` is set for a rate limit |
 | 499 | the client left before the upstream answered. Only ever in the access line: nobody is there to receive it | – |
 | 502 | the engine could not be reached or failed the hop | retry; another replica may take it |

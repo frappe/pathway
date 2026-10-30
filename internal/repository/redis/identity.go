@@ -132,6 +132,7 @@ func keyRecord(h map[string]string, now time.Time) (domain.KeyRecord, error) {
 		Spent:        int64Field(h, spentFieldFor(window, now)),
 		BudgetWindow: window,
 		Limits:       limits,
+		CapMessage:   h["cap_message"],
 	}, nil
 }
 
@@ -174,6 +175,7 @@ func keyFields(rec repository.KeyUpsert) map[string]any {
 		"budget":        strconv.FormatInt(rec.Budget, 10),
 		"budget_window": rec.BudgetWindow, // always written: blank (the month) is what clears a dropped total
 		"limits":        rec.Limits,       // always written: blank is what clears a removed limit
+		"cap_message":   rec.CapMessage,   // always written: blank is what clears a dropped message
 	}
 }
 

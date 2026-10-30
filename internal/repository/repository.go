@@ -215,6 +215,7 @@ type KeyUpsert struct {
 	// BudgetWindow is what Spent counts against the cap: domain.WindowMonth (blank) or WindowTotal.
 	BudgetWindow string
 	Limits       string // comma list of metric:window:value
+	CapMessage   string // the 402 text once the cap is spent; blank = the default
 }
 
 type GroupUpsert struct {

@@ -30,6 +30,7 @@ would stay missing until its section changed; only gateway-owned keys expire
 ```
 key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
                            geography  budget  budget_window  spent:<YYYY-MM>  spent:total  limits
+                           cap_message
 team:<Grove Team>          limited  log_payloads  limits
 model_group:<Model Group>  models
 usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
@@ -63,7 +64,8 @@ spooled line replayed after a push lands where the key now counts; a push naming
 binary cannot gate is refused whole (400). This
 box's balance for the key is `budget − spent`; Grove keeps the team's own from the pulled usage and
 audits the two every pull. `spent >= budget` → 402 `credit balance
-exhausted` (`billing_error` on the Anthropic surface), at `quota` before the body is read, and
+exhausted`, or the key's `cap_message` when the push carried one (`billing_error` on the Anthropic
+surface either way), at `quota` before the body is read, and
 `/v1/models` refuses through the same `Evaluate`. `limited` is the control plane's verdict on the
 team and refuses alike. A key pinned by `geography` lives on one store, so its gate is exact —
 every gateway on that store moves the one counter — and a team's keys elsewhere spend their own
