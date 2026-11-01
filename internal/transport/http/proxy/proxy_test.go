@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -129,7 +130,7 @@ func TestUsageSurvivesAClientHangup(t *testing.T) {
 	if !strings.Contains(out.Usage, `"total_tokens":9`) {
 		t.Errorf("usage lost to the hangup: %q", out.Usage)
 	}
-	if at, _ := out.Hop.legs(); at[hopDone].IsZero() {
+	if at, _ := out.Hop.stamps(); at[hopDone].IsZero() {
 		t.Error("the hop's end was not stamped through the unwind")
 	}
 }
@@ -541,8 +542,8 @@ func TestAVendorsAccountOfTheHopIsKeptForTheAccessLine(t *testing.T) {
 	}
 }
 
-// legs is the hop's stamps, read under its lock: a late callback may still be writing.
-func (h *Hop) legs() ([hopDone + 1]time.Time, bool) {
+// stamps is the hop's raw marks, read under its lock: a late callback may still be writing.
+func (h *Hop) stamps() ([hopDone + 1]time.Time, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.at, h.reused
@@ -563,26 +564,54 @@ func TestTheHopsEventsAreStamped(t *testing.T) {
 	t.Cleanup(server.Close)
 	p := New(Options{}, quiet())
 
-	at, reused := forward(p, server.URL, false).Hop.legs()
+	at, reused := forward(p, server.URL, false).Hop.stamps()
 	if reused || at[hopConnectDone].IsZero() || at[hopGotConn].IsZero() || at[hopWroteRequest].IsZero() {
 		t.Errorf("first hop: reused=%v, stamps=%v; want a dial", reused, at)
 	}
 	if wait := at[hopFirstByte].Sub(at[hopWroteRequest]); wait < 50*time.Millisecond {
 		t.Errorf("wait = %v, want the upstream's 50ms silence", wait)
 	}
+	if at[hopFirstBody].IsZero() || at[hopFirstBody].Before(at[hopFirstByte]) {
+		t.Errorf("first body byte at %v, headers at %v; want the body stamped after the headers", at[hopFirstBody], at[hopFirstByte])
+	}
 	if stream := at[hopDone].Sub(at[hopFirstByte]); stream < 30*time.Millisecond {
 		t.Errorf("stream = %v, want the 30ms body", stream)
+	}
+	if legs := (&Hop{at: at, reused: reused}).Legs(); legs.Total < legs.Wait+legs.Stream || legs.Connect <= 0 || legs.TLS != 0 {
+		t.Errorf("legs = %+v, want the whole hop with a connect and no tls", legs)
 	}
 
 	// The transport returns the connection to its pool on its own goroutine once the body is read.
 	time.Sleep(10 * time.Millisecond)
-	if at, reused := forward(p, server.URL, false).Hop.legs(); !reused || !at[hopConnectStart].IsZero() {
+	if at, reused := forward(p, server.URL, false).Hop.stamps(); !reused || !at[hopConnectStart].IsZero() {
 		t.Errorf("second hop: reused=%v, connect=%v; want the pooled connection", reused, at[hopConnectStart])
 	}
 
 	engine := tlsEngine(t)
-	if at, _ := forward(New(Options{VerifyUpstream: false}, quiet()), engine.URL, false).Hop.legs(); at[hopTLSDone].IsZero() || at[hopTLSDone].Before(at[hopTLSStart]) {
+	if at, _ := forward(New(Options{VerifyUpstream: false}, quiet()), engine.URL, false).Hop.stamps(); at[hopTLSDone].IsZero() || at[hopTLSDone].Before(at[hopTLSStart]) {
 		t.Errorf("tls hop: start=%v done=%v; want a handshake", at[hopTLSStart], at[hopTLSDone])
+	}
+}
+
+// Every read that brings bytes is counted, and the longest silence between two of them kept: a
+// stream that stalls short of the idle timeout has nowhere else to show.
+func TestAStreamsReadsAreCountedAndItsLongestSilenceKept(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for i, pause := range []time.Duration{0, 10 * time.Millisecond, 40 * time.Millisecond} {
+			time.Sleep(pause)
+			_, _ = fmt.Fprintf(w, "data: {\"i\":%d}\n\n", i)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	legs := forward(New(Options{}, quiet()), server.URL, false).Hop.Legs()
+	if legs.Chunks < 3 {
+		t.Errorf("chunks = %d, want one per flush", legs.Chunks)
+	}
+	if legs.GapMax < 40*time.Millisecond || legs.GapMax > legs.Stream {
+		t.Errorf("gap_max = %v, want the 40ms pause, within stream = %v", legs.GapMax, legs.Stream)
 	}
 }
 
@@ -601,7 +630,7 @@ func TestAnEarlyAnswerRacesNothingOnTheHop(t *testing.T) {
 	if out.Hop == nil {
 		t.Fatal("no hop on a served request")
 	}
-	if attrs := out.Hop.Attrs(time.Now()); attrs.Key != "hop" {
-		t.Errorf("attrs = %v", attrs)
+	if legs := out.Hop.Legs(); legs.Total <= 0 || legs.First.IsZero() {
+		t.Errorf("legs = %+v, want a served hop", legs)
 	}
 }

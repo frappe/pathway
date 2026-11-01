@@ -19,7 +19,10 @@ Each of those is a full handshake: no TLS session cache is set. Neither number i
 are set in `proxy.transportFor`.
 
 Each hop's events — connect, TLS handshake, request written, first response byte, body done — are
-stamped off `net/http/httptrace` into `Outcome.Hop` and reach the access line as `hop`. The trace
+stamped off `net/http/httptrace` into `Outcome.Hop` and reach the access line as `hop`, with the whole
+as `latency.upstream_ms`. The body's reads are counted on the way (`idleBody` tells the hop of each
+one that brought bytes) and the longest silence between two of them kept: `hop.chunks` and
+`hop.gap_max`, which is where a stream that stalled short of the read timeout shows. The trace
 rides the hop's context, which ReverseProxy clones into the outbound request and composes with
 its own. Two callbacks can fire after `Forward` has returned (a dial outlives a cancelled request;
 a body is still being written when the server answers early), so `Hop` is locked and held by

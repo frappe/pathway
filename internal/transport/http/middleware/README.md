@@ -157,23 +157,29 @@ or the answer named none.
 
 What the vendor said of the hop in its own headers is on the line too, and nowhere else — the
 proxy strips every upstream header a client has no use for before the response goes on.
-`upstream_ms` is the hop as OpenAI timed it (`openai-processing-ms`); the rest of `ttft` is the
-wire and the gateway. `upstream_attempts` is how many times Baseten ran the request on its side
-(`X-Baseten-Model-Prediction-Attempts`); more than 1 is where a slow `ttft` went. On a refusal,
+`upstream_attempts` is how many times Baseten ran the request on its side
+(`X-Baseten-Model-Prediction-Attempts`); more than 1 is where a slow response went. On a refusal,
 `retry_after` is how long the vendor asked for, and `remaining_requests` / `remaining_tokens`
 which limit ran out (`x-ratelimit-remaining-*`, `anthropic-ratelimit-*-remaining`). `0` or `-`
 from an engine, and from a vendor that sends none.
 
-Where the time went is on the line as two groups, neither of which reaches the client. `stage` is
-each stage's own time in seconds, from when the request reached it to when it reached the next,
-`handler` being the proxy at the bottom: the capacity wait is `stage.route`, and `stage.retry` /
-`stage.fallback` hold the attempts those stages discarded, each of which has an attempt line of
-its own. `hop` is the upstream hop as `net/http` traced it: `reused` (a pooled connection),
-`connect` and `tls` (only when one was dialled), `send` (our request going out), `wait` (the
-upstream's silence before its first byte — what `upstream_ms` is the vendor's own account of),
-`respond` (ours, from the upstream's first byte to the client's), `stream` (from the upstream's
-first byte to its last). A leg that did not happen is absent; `hop` itself is absent when nothing
-was dialled.
+Where the time went is on the line as three groups, in milliseconds, none of which reaches the
+client. `latency` is the split: `total_ms` = `gateway_ms` + `upstream_ms`, with `ttfb_ms` the
+client's first byte (what `ttft` is in seconds) and `vendor_ms` the hop as the vendor's own clock
+had it (`openai-processing-ms`, 0 from one that sends none). `gateway` is our share by stage —
+`auth`, `quota`, `body`, `route` (its capacity wait included), `fallback` and `retry` (holding the
+attempts they discarded, each of which has an attempt line), `transform`, `upstreamauth` — then
+`respond`, ours between the upstream's first body byte and the client's, and `other`, every stage
+and gap not named; the named phases and `other` sum to `gateway_ms`. A stage the request never reached is absent. `hop` is the upstream hop as
+`net/http` traced it: `reused` (a pooled connection), `connect` and `tls` (0 when it was), `send` (our request
+going out), `wait` (the upstream's silence before the first byte of its body — a vendor's headers
+may come well before its first token, and that thinking is the vendor's), `stream` (that byte to
+its last), `chunks` (body reads that brought bytes: one per upstream flush, about one per event on
+a stream, a few on a unary answer) and `gap_max` (the longest silence between two of them, ms). A
+stream that stalled short of the read timeout shows `gap_max` near `stream` with few `chunks`; one
+the timeout cut shows `gap_max` at about the timeout with `cut=upstream_idle`. The group is absent
+when nothing was dialled, and `latency.upstream_ms` is 0. A line that ran no stage and dialled
+nothing — a health probe, an admin call — carries none of the three.
 
 A caller tags its own requests with `X-Grove-Metadata: app=hrms, trace=7f3a-91`, and the tags land
 on the access line as `meta: {"app": "hrms", "trace": "7f3a-91"}`: which app spent a key several
@@ -190,9 +196,9 @@ own in the same log, `msg="attempt"`, under the same `rid`:
 |---|---|
 | `attempt` | which dial failed, from 1; `0` for a model `route` could not place, so nothing was dialled |
 | `model` | the model this attempt was on |
-| `upstream`, `deployment`, `engine`, `served_model`, `upstream_rid`, `upstream_status`, `upstream_ms`, `upstream_attempts`, `retry_after`, `remaining_requests`, `remaining_tokens`, `reason`, `cut` | as on the access line, for this attempt; `reason` is the pick's refusal when nothing was dialled, `upstream unavailable` or `upstream timed out` when the dial gave no status |
+| `upstream`, `deployment`, `engine`, `served_model`, `upstream_rid`, `upstream_status`, `upstream_attempts`, `retry_after`, `remaining_requests`, `remaining_tokens`, `reason`, `cut` | as on the access line, for this attempt; `reason` is the pick's refusal when nothing was dialled, `upstream unavailable` or `upstream timed out` when the dial gave no status |
 | `upstream_key` | id of the vendor credential dialled; `-` on an engine |
-| `stage`, `hop` | as on the access line, for this attempt; `hop.respond` absent, the client never received this answer |
+| `latency`, `gateway`, `hop` | as on the access line, for this attempt, from when it began; `ttfb_ms` and `respond` absent, the client never received this answer |
 | `rt` | seconds this attempt took |
 | `moved`, `to` | what the request moved to: `key` and the next credential's id, or `model` and the fallback |
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/frappe/pathway/internal/service/metering"
 	"github.com/frappe/pathway/internal/service/routing"
 	"github.com/frappe/pathway/internal/service/transform"
+	"github.com/frappe/pathway/internal/transport/http/proxy"
 	"github.com/frappe/pathway/internal/transport/respond"
 )
 
@@ -111,7 +113,6 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.String("engine", or(state.Outcome.Deployment, "-")),
 					slog.String("served_model", servedModel(state)),
 					slog.Int("upstream_status", state.Outcome.Status),
-					slog.Int("upstream_ms", state.Outcome.UpstreamMS),
 					slog.Int("upstream_attempts", state.Outcome.UpstreamAttempts),
 					slog.String("retry_after", or(state.Outcome.RetryAfter, "-")),
 					slog.String("remaining_requests", or(state.Outcome.RemainingRequests, "-")),
@@ -119,7 +120,7 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.String("reason", or(state.DeniedReason, state.Outcome.Reason)),
 					slog.String("cut", or(state.Outcome.Cut, "-")),
 				)
-				attrs = append(attrs, timing(state, recorder.firstByte)...)
+				attrs = append(attrs, timing(state, state.Started, recorder.firstByte)...)
 				if len(state.Meta) > 0 {
 					attrs = append(attrs, metaGroup(state.Meta))
 				}
@@ -696,11 +697,50 @@ func (s *statusRecorder) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// timing is where the request's time went, for the access line and the attempt line: each stage's
-// own time, from when the request reached it to when it reached the next, the last running to
-// now; then the hop's legs. clientFirstByte is blank on an attempt line, whose answer the client
-// never received.
-func timing(state *State, clientFirstByte time.Time) []slog.Attr {
+// gatewayPhases are the stages that do work on a request, in chain order, each named on the line
+// when the request reached it. Every other stage, and the glue between stages, is `other`.
+var gatewayPhases = []string{"ingressauth", "pick", "auth", "quota", "body", "route", "fallback", "retry", "transform", "upstreamauth"}
+
+// timing is where the request's time went, in three groups. `latency` splits the total into the
+// gateway's and the upstream's. `gateway` names the stages that did work, `respond` for the
+// gateway's own handling between the upstream's first byte and the client's, and `other` for every
+// stage and gap not named. `hop` is the upstream hop's legs (`upstream` is taken: the target URL). `started` is the request's on the access
+// line and the attempt's on its own; clientFirstByte is zero on an attempt line, whose answer the
+// client never received, which leaves `ttfb_ms` and `respond` off it.
+func timing(state *State, started, clientFirstByte time.Time) []slog.Attr {
+	// Only the handler was reached below accesslog — the listener's own routes: a probe, an admin
+	// call, a host-mismatch 404 — and nothing was dialled: no time to account for, so no groups
+	// rather than zeros on every probe. A line through the data chain always has drain's mark.
+	if _, bare := state.Entered["handler"]; bare && len(state.Entered) == 1 && state.Outcome.Hop == nil {
+		return nil
+	}
+	now := time.Now()
+	total := now.Sub(started)
+	var legs proxy.Legs
+	if state.Outcome.Hop != nil {
+		legs = state.Outcome.Hop.Legs()
+	}
+	// respond is the gateway's own, between the upstream's first body byte and the client's. It
+	// falls inside the hop's span, so it comes out of the upstream's share: the two shares sum.
+	var respond time.Duration
+	if !clientFirstByte.IsZero() && !legs.First.IsZero() {
+		respond = max(clientFirstByte.Sub(legs.First), 0)
+	}
+	upstream := max(legs.Total-respond, 0)
+	gateway := max(total-upstream, 0)
+
+	latency := []any{
+		slog.Float64("total_ms", ms(total)),
+		slog.Float64("gateway_ms", ms(gateway)),
+		slog.Float64("upstream_ms", ms(upstream)),
+	}
+	if !clientFirstByte.IsZero() {
+		latency = append(latency, slog.Float64("ttfb_ms", ms(clientFirstByte.Sub(started))))
+	}
+	latency = append(latency, slog.Int("vendor_ms", state.Outcome.UpstreamMS))
+
+	// A stage's own time runs from when the request reached it to when it reached the next; the
+	// last one reached runs to now.
 	type mark struct {
 		name string
 		at   time.Time
@@ -710,23 +750,43 @@ func timing(state *State, clientFirstByte time.Time) []slog.Attr {
 		marks = append(marks, mark{name, at})
 	}
 	slices.SortFunc(marks, func(a, b mark) int { return a.at.Compare(b.at) })
-	var attrs []slog.Attr
-	if len(marks) > 0 {
-		now, stages := time.Now(), make([]any, 0, len(marks))
-		for i, m := range marks {
-			end := now
-			if i+1 < len(marks) {
-				end = marks[i+1].at
-			}
-			stages = append(stages, slog.Float64(m.name, end.Sub(m.at).Seconds()))
+	own := make(map[string]time.Duration, len(marks))
+	for i, m := range marks {
+		end := now
+		if i+1 < len(marks) {
+			end = marks[i+1].at
 		}
-		attrs = append(attrs, slog.Group("stage", stages...))
+		own[m.name] = end.Sub(m.at)
 	}
+	var named time.Duration
+	phases := make([]any, 0, len(gatewayPhases)+2)
+	for _, name := range gatewayPhases {
+		if d, reached := own[name]; reached {
+			phases = append(phases, slog.Float64(name, ms(d)))
+			named += d
+		}
+	}
+	if !clientFirstByte.IsZero() && !legs.First.IsZero() {
+		phases = append(phases, slog.Float64("respond", ms(respond)))
+		named += respond
+	}
+	phases = append(phases, slog.Float64("other", ms(max(gateway-named, 0))))
+
+	attrs := []slog.Attr{slog.Group("latency", latency...), slog.Group("gateway", phases...)}
 	if state.Outcome.Hop != nil {
-		attrs = append(attrs, state.Outcome.Hop.Attrs(clientFirstByte))
+		attrs = append(attrs, slog.Group("hop",
+			slog.Bool("reused", legs.Reused),
+			slog.Float64("connect", ms(legs.Connect)), slog.Float64("tls", ms(legs.TLS)),
+			slog.Float64("send", ms(legs.Send)), slog.Float64("wait", ms(legs.Wait)), slog.Float64("stream", ms(legs.Stream)),
+			slog.Int("chunks", legs.Chunks), slog.Float64("gap_max", ms(legs.GapMax)),
+		))
 	}
 	return attrs
 }
+
+// ms is a duration in milliseconds to the microsecond: what a log store sums, and what reads as a
+// number rather than as scientific notation.
+func ms(d time.Duration) float64 { return math.Round(float64(d.Microseconds())) / 1000 }
 
 // ttft is seconds to the first body byte, 0 when nothing was ever written.
 func (s *statusRecorder) ttft(started time.Time) float64 {

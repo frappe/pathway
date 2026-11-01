@@ -113,7 +113,6 @@ func logAttempt(deps Deps, r *http.Request, state *State, started time.Time, rea
 		slog.String("engine", or(state.Outcome.Deployment, "-")),
 		slog.String("served_model", servedModel(state)),
 		slog.Int("upstream_status", state.Outcome.Status),
-		slog.Int("upstream_ms", state.Outcome.UpstreamMS),
 		slog.Int("upstream_attempts", state.Outcome.UpstreamAttempts),
 		slog.String("retry_after", or(state.Outcome.RetryAfter, "-")),
 		slog.String("remaining_requests", or(state.Outcome.RemainingRequests, "-")),
@@ -124,7 +123,7 @@ func logAttempt(deps Deps, r *http.Request, state *State, started time.Time, rea
 		slog.String("moved", moved),
 		slog.String("to", to),
 	}
-	attrs = append(attrs, timing(state, time.Time{})...)
+	attrs = append(attrs, timing(state, started, time.Time{})...)
 	deps.AccessLog().LogAttrs(r.Context(), slog.LevelInfo, "attempt", attrs...)
 }
 

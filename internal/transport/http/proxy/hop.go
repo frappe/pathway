@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"crypto/tls"
-	"log/slog"
 	"net/http/httptrace"
 	"sync"
 	"time"
@@ -17,6 +16,11 @@ type Hop struct {
 	mu     sync.Mutex
 	at     [hopDone + 1]time.Time
 	reused bool
+	// The body as it was read: how many reads brought bytes, when the last did, and the longest
+	// silence between two of them — where a stream that stalled without being cut spent its time.
+	chunks int
+	last   time.Time
+	gapMax time.Duration
 }
 
 const (
@@ -26,13 +30,29 @@ const (
 	hopTLSDone
 	hopGotConn
 	hopWroteRequest
-	hopFirstByte
+	hopFirstByte // the upstream's headers
+	hopFirstBody // the first byte of its body read, which a vendor may send well after its headers
 	hopDone
 )
 
 func (h *Hop) mark(event int) {
 	h.mu.Lock()
 	h.at[event] = time.Now()
+	h.mu.Unlock()
+}
+
+// read is one body read that brought bytes: the first stamps hopFirstBody, every later one
+// measures its silence since the one before.
+func (h *Hop) read() {
+	now := time.Now()
+	h.mu.Lock()
+	if h.at[hopFirstBody].IsZero() {
+		h.at[hopFirstBody] = now
+	} else {
+		h.gapMax = max(h.gapMax, now.Sub(h.last))
+	}
+	h.last = now
+	h.chunks++
 	h.mu.Unlock()
 }
 
@@ -54,24 +74,50 @@ func (h *Hop) trace() *httptrace.ClientTrace {
 	}
 }
 
-// Attrs is the hop for the access line: `reused`, then each leg in seconds, and only the legs
-// that happened — a reused connection has no connect and no tls. `respond` is the gateway's own
-// handling between the upstream's first byte and the client's; a blank clientFirstByte leaves it
-// off, for an attempt the client never received.
-func (h *Hop) Attrs(clientFirstByte time.Time) slog.Attr {
+// Legs is the hop as the access line reads it: each leg as a duration, zero when it did not
+// happen — a reused connection has no connect and no tls — and Total, the whole of it, from the
+// first event on the socket to the hop's end. Wait runs to the first byte of the body, not the
+// headers: a vendor may send its headers at once and think before its first token, and that is
+// its time. First is when that byte arrived (the headers, for a response with no body), zero when
+// nothing did; the gateway's own `respond` is measured from it. Chunks is how many body reads
+// brought bytes — one per upstream flush, about one per event on a stream — and GapMax the longest
+// silence between two of them: a stream that stalled shows it near Stream, with few Chunks.
+type Legs struct {
+	Reused                           bool
+	Connect, TLS, Send, Wait, Stream time.Duration
+	Total                            time.Duration
+	First                            time.Time
+	Chunks                           int
+	GapMax                           time.Duration
+}
+
+func (h *Hop) Legs() Legs {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	attrs := []any{slog.Bool("reused", h.reused)}
-	leg := func(name string, from, to time.Time) {
-		if !from.IsZero() && !to.IsZero() {
-			attrs = append(attrs, slog.Float64(name, to.Sub(from).Seconds()))
+	leg := func(from, to time.Time) time.Duration {
+		if from.IsZero() || to.IsZero() {
+			return 0
 		}
+		return to.Sub(from)
 	}
-	leg("connect", h.at[hopConnectStart], h.at[hopConnectDone])
-	leg("tls", h.at[hopTLSStart], h.at[hopTLSDone])
-	leg("send", h.at[hopGotConn], h.at[hopWroteRequest])
-	leg("wait", h.at[hopWroteRequest], h.at[hopFirstByte])
-	leg("respond", h.at[hopFirstByte], clientFirstByte)
-	leg("stream", h.at[hopFirstByte], h.at[hopDone])
-	return slog.Group("hop", attrs...)
+	start := h.at[hopConnectStart]
+	if start.IsZero() {
+		start = h.at[hopGotConn]
+	}
+	first := h.at[hopFirstBody]
+	if first.IsZero() {
+		first = h.at[hopFirstByte]
+	}
+	return Legs{
+		Reused:  h.reused,
+		Connect: leg(h.at[hopConnectStart], h.at[hopConnectDone]),
+		TLS:     leg(h.at[hopTLSStart], h.at[hopTLSDone]),
+		Send:    leg(h.at[hopGotConn], h.at[hopWroteRequest]),
+		Wait:    leg(h.at[hopWroteRequest], first),
+		Stream:  leg(first, h.at[hopDone]),
+		Total:   leg(start, h.at[hopDone]),
+		First:   first,
+		Chunks:  h.chunks,
+		GapMax:  h.gapMax,
+	}
 }

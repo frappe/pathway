@@ -210,7 +210,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			if resp.StatusCode == http.StatusSwitchingProtocols {
 				return nil
 			}
-			idle := newIdleBody(resp.Body, p.readTimeout(), func() { cancel(errUpstreamIdle) })
+			idle := newIdleBody(resp.Body, p.readTimeout(), func() { cancel(errUpstreamIdle) }, events)
 			tee = newUsageTee(idle, isEventStream(resp))
 			resp.Body = tee
 			if swap.active() {
