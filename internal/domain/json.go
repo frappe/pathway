@@ -7,3 +7,6 @@ import "github.com/bytedance/sonic"
 // a rewritten body reads as it did; what a RawMessage holds is written as it is, unvalidated,
 // because every one here came out of this decoder or was written by the gateway itself.
 var JSON = sonic.Config{SortMapKeys: true, NoValidateJSONMarshaler: true}.Froze()
+
+// The call sites that marshal through sonic directly get the same codec.
+func init() { sonic.ConfigDefault = JSON }

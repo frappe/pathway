@@ -590,7 +590,7 @@ func TestADeadDialLeavesItsReasonOnTheAttemptLine(t *testing.T) {
 	}
 
 	held := accessLines(t, access)[0]
-	if held["msg"] != "attempt" || held["upstream_status"] != float64(0) || held["reason"] != "upstream unavailable" {
+	if held["msg"] != "attempt" || held["upstream_status"] != float64(0) || held["reason"] != "upstream unavailable" || held["failure_class"] != domain.ClassTransient {
 		t.Errorf("attempt line = %v", held)
 	}
 }
@@ -607,5 +607,21 @@ func TestARefusedCredentialFallsBackToTheNext(t *testing.T) {
 	}
 	if len(vendor.keys) != 1 || resp.Header().Get("X-Grove-Fallback") != "backup" {
 		t.Errorf("keys dialled = %v, headers = %v", vendor.keys, resp.Header())
+	}
+}
+
+// A model the vendor retired cannot serve the request anywhere: the caller's fallback answers.
+func TestARetiredModelFallsBackToTheNext(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 410}, "A")
+	vendor.bodies = map[string]string{"A": retiredBody}
+	addBackup(t, f, jsonEngine(`{"id":"chatcmpl-2","model":"backup",`+usageObject+`}`))
+	access := captureAccess(t, f)
+
+	resp := f.post("/openai/v1/chat/completions", `{"model":"deepseek/chat","messages":[],"fallbacks":["backup"]}`)
+	if resp.Code != http.StatusOK || resp.Header().Get("X-Grove-Fallback") != "backup" {
+		t.Fatalf("status = %d, body = %s, headers = %v", resp.Code, resp.Body, resp.Header())
+	}
+	if held := accessLines(t, access)[0]; held["failure_class"] != domain.ClassModelGone || held["moved"] != "model" {
+		t.Errorf("attempt line = %v", held)
 	}
 }

@@ -27,6 +27,9 @@ type Context struct {
 	Provider bool
 	// Vendor is the provider's name on a vendor hop ("openai"), blank on anything we run.
 	Vendor string
+	// SkipQuirks is each of the vendor's rewrites the route row switches off for this model, by
+	// the names vendor.Quirks lists.
+	SkipQuirks []string
 	// Changed collects what a transform did that alters what the model does, as `field=value`, for
 	// the caller to be told. A rename is not one of these. Nil when nobody is listening.
 	Changed *[]string

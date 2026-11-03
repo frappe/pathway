@@ -267,20 +267,6 @@ func TestKeyringIsThePushedKeysOrTheOneInternalKey(t *testing.T) {
 	}
 }
 
-// A fallback model is for an upstream that broke or a key nobody could use, never for a request
-// that was wrong, answered, or abandoned.
-func TestIsModelFailure(t *testing.T) {
-	for status, want := range map[int]bool{
-		200: false, 400: false, 404: false, 422: false, 499: false,
-		401: true, 402: true, 403: true, 429: true,
-		500: true, 502: true, 503: true, 504: true, 529: true,
-	} {
-		if got := IsModelFailure(status); got != want {
-			t.Errorf("IsModelFailure(%d) = %v, want %v", status, got, want)
-		}
-	}
-}
-
 func TestKeyStatusClass(t *testing.T) {
 	for status, want := range map[int]string{
 		200: "ok", 400: "ok", 404: "ok", 429: "rate_limited",
@@ -289,9 +275,6 @@ func TestKeyStatusClass(t *testing.T) {
 	} {
 		if got := KeyStatusClass(status); got != want {
 			t.Errorf("KeyStatusClass(%d) = %q, want %q", status, got, want)
-		}
-		if IsKeyFailure(status) != (want == "rate_limited" || IsKeyRejected(status)) {
-			t.Errorf("IsKeyFailure(%d) disagrees with its class %q", status, want)
 		}
 	}
 }
@@ -310,26 +293,92 @@ func TestRefusedCredential(t *testing.T) {
 	}
 }
 
-// An exhausted account reads as a 402 whatever status the vendor put on it: OpenAI's 429
-// insufficient_quota and Anthropic's 400 credit balance. The words alone do not: a 5xx that
-// mentions them is still the upstream's failure, and a 429 or 400 without them is its own.
-func TestClassifyUpstream(t *testing.T) {
+// What an answer says went wrong is read from its body first and its status second: each row is
+// a vendor's actual wording. The words alone do not decide: a 5xx that mentions a credit balance
+// is still the upstream's failure.
+func TestFailureClass(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		body   string
-		want   int
+		want   string
 	}{
-		{429, `{"error":{"code":"insufficient_quota"}}`, 402},
-		{429, `{"error":{"type":"INSUFFICIENT_QUOTA"}}`, 402},
-		{400, `{"error":{"message":"Your credit balance is too low to access the Anthropic API."}}`, 402},
-		{429, `{"error":{"message":"Rate limit reached"}}`, 429},
-		{400, `{"error":{"message":"messages[0].content is invalid"}}`, 400},
-		{503, `credit balance service unavailable`, 503},
-		{402, ``, 402},
-		{200, `{"choices":[]}`, 200},
+		{200, `{"choices":[]}`, ""},
+		{429, `{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}`, ClassQuota},
+		{429, `{"error":{"type":"INSUFFICIENT_QUOTA"}}`, ClassQuota},
+		{400, `{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}`, ClassQuota},
+		{429, `{"error":{"message":"This request would exceed your organization's spend limit"}}`, ClassQuota},
+		{402, ``, ClassQuota},
+		{429, `{"error":{"message":"Rate limit reached for gpt-4o"}}`, ClassRateLimit},
+		{429, ``, ClassRateLimit},
+		{503, `{"error":{"message":"rate limit exceeded, retry later"}}`, ClassRateLimit},
+		{503, `credit balance service unavailable`, ClassTransient},
+		{500, ``, ClassTransient},
+		{529, `{"error":{"type":"overloaded_error"}}`, ClassTransient},
+		{403, `{"error":{"code":"unsupported_country_region_territory"}}`, ClassRegionBlocked},
+		{400, `{"error":{"message":"User location is not supported for the API use."}}`, ClassRegionBlocked},
+		{401, ``, ClassCredential},
+		{401, `{"error":{"code":"invalid_api_key"}}`, ClassCredential},
+		{400, `{"error":{"status":"INVALID_ARGUMENT","message":"API key not valid. Please pass a valid API key."}}`, ClassCredential},
+		{403, `{"error":{"message":"permission denied"}}`, ClassCredential},
+		{403, ``, ClassCredential},
+		{404, `{"error":{"code":"model_not_found","message":"The model gpt-5 does not exist or you do not have access to it."}}`, ClassModelAccess},
+		{403, `{"error":{"code":"model_not_found","message":"Project does not have access to model gpt-5"}}`, ClassModelAccess},
+		{404, `{"type":"error","error":{"type":"not_found_error","message":"model: claude-9"}}`, ClassModelAccess},
+		{403, `{"type":"error","error":{"type":"permission_error","message":"Your workspace does not have access to the model claude-9"}}`, ClassModelAccess},
+		{410, ``, ClassModelGone},
+		{404, `{"error":{"message":"The model text-davinci-003 has been deprecated"}}`, ClassModelGone},
+		{400, `{"error":{"code":"model_decommissioned","message":"The model has been decommissioned"}}`, ClassModelGone},
+		{400, `{"error":{"message":"messages[0].content is invalid","type":"invalid_request_error"}}`, ClassCallerFault},
+		{400, `{"error":{"message":"max_tokens exceeds the model's maximum"}}`, ClassCallerFault},
+		{413, `{"error":{"message":"request too large"}}`, ClassCallerFault},
+		{400, ``, ClassUnknown},
+		{404, `<html><body>Not Found</body></html>`, ClassUnknown},
 	} {
-		if got := ClassifyUpstream(tc.status, []byte(tc.body)); got != tc.want {
-			t.Errorf("ClassifyUpstream(%d, %q) = %d, want %d", tc.status, tc.body, got, tc.want)
+		if got := FailureClass(tc.status, []byte(tc.body)); got != tc.want {
+			t.Errorf("FailureClass(%d, %q) = %q, want %q", tc.status, tc.body, got, tc.want)
+		}
+	}
+}
+
+// What each class does: which retire the key, which rotate to another, which are the gateway's
+// 502 once every key says so, which move the request to a fallback model.
+func TestWhatEachClassDoes(t *testing.T) {
+	for class, want := range map[string]struct{ retires, rotates, exhausts, moves bool }{
+		ClassCredential:    {true, true, true, true},
+		ClassQuota:         {true, true, true, true},
+		ClassModelAccess:   {true, true, false, true},
+		ClassRegionBlocked: {true, true, false, true},
+		ClassRateLimit:     {false, true, false, true},
+		ClassModelGone:     {false, false, false, true},
+		ClassTransient:     {false, false, false, true},
+		ClassTimeout:       {false, false, false, true},
+		ClassCallerFault:   {false, false, false, false},
+		ClassUnknown:       {false, false, false, false},
+		ClassCancelled:     {false, false, false, false},
+		"":                 {false, false, false, false},
+	} {
+		got := struct{ retires, rotates, exhausts, moves bool }{Retires(class), Rotates(class), Exhausts(class), MovesModel(class)}
+		if got != want {
+			t.Errorf("%q: retires/rotates/exhausts/moves = %+v, want %+v", class, got, want)
+		}
+	}
+}
+
+// An attempt is counted on its key under the status its class means, not the one the vendor hid
+// it under.
+func TestCountedStatus(t *testing.T) {
+	for _, tc := range []struct {
+		class        string
+		status, want int
+	}{
+		{ClassQuota, 429, 402}, {ClassQuota, 400, 402},
+		{ClassCredential, 401, 401}, {ClassCredential, 400, 401}, {ClassCredential, 403, 403},
+		{ClassModelAccess, 404, 403}, {ClassRegionBlocked, 403, 403},
+		{ClassRateLimit, 503, 429},
+		{ClassModelGone, 410, 410}, {ClassCallerFault, 400, 400}, {ClassTransient, 502, 502}, {"", 200, 200}, {ClassTimeout, 0, 0},
+	} {
+		if got := CountedStatus(tc.class, tc.status); got != tc.want {
+			t.Errorf("CountedStatus(%q, %d) = %d, want %d", tc.class, tc.status, got, tc.want)
 		}
 	}
 }

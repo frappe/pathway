@@ -271,7 +271,9 @@ func TestProviderKeyStatsReadBack(t *testing.T) {
 // answer, one line that says neither the vendor's text nor which refusal it was; only the access
 // line and the key's stats know the class.
 func TestEveryKeyRefusedIsTheGatewaysAnswer(t *testing.T) {
-	for status, class := range map[int]string{401: "unauthorized", 402: "unpaid", 403: "forbidden"} {
+	for status, tc := range map[int]struct{ bucket, class string }{
+		401: {"unauthorized", domain.ClassCredential}, 402: {"unpaid", domain.ClassQuota}, 403: {"forbidden", domain.ClassCredential},
+	} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			f, vendor := keyedFixture(t, map[string]int{"A": status, "B": status}, "A", "B")
 			access := captureAccess(t, f)
@@ -292,13 +294,13 @@ func TestEveryKeyRefusedIsTheGatewaysAnswer(t *testing.T) {
 				t.Errorf("keys dialled = %v, want each once", vendor.keys)
 			}
 			for _, key := range []string{"A", "B"} {
-				if counts := f.keyCounts(t, key); counts[class] != 1 || counts["rejected"] != 1 || counts["ok"] != 0 {
-					t.Errorf("stats %s = %v, want one %s", key, counts, class)
+				if counts := f.keyCounts(t, key); counts[tc.bucket] != 1 || counts["rejected"] != 1 || counts["ok"] != 0 {
+					t.Errorf("stats %s = %v, want one %s", key, counts, tc.bucket)
 				}
 			}
 			lines := accessLines(t, access)
 			last := lines[len(lines)-1]
-			if last["status"] != 502. || last["upstream_status"] != float64(status) || last["reason"] != "credential "+class {
+			if last["status"] != 502. || last["upstream_status"] != float64(status) || last["failure_class"] != tc.class {
 				t.Errorf("access line = %v", last)
 			}
 		})
@@ -355,7 +357,7 @@ func TestAnExhaustedAccountUnderA429RetiresTheKey(t *testing.T) {
 		t.Errorf("stats A = %+v", a)
 	}
 	attempt := accessLines(t, access)[0]
-	if attempt["upstream_status"] != 429. || attempt["reason"] != "credential unpaid" || attempt["moved"] != "key" {
+	if attempt["upstream_status"] != 429. || attempt["failure_class"] != domain.ClassQuota || attempt["moved"] != "key" {
 		t.Errorf("attempt line = %v", attempt)
 	}
 }
@@ -402,5 +404,75 @@ func TestALong400IsRelayedWhole(t *testing.T) {
 
 	if resp.Code != http.StatusBadRequest || resp.Body.String() != long {
 		t.Errorf("status = %d, body length = %d of %d", resp.Code, resp.Body.Len(), len(long))
+	}
+}
+
+const (
+	noModelBody  = `{"error":{"code":"model_not_found","message":"The model does not exist or you do not have access to it.","type":"invalid_request_error"}}`
+	retiredBody  = `{"error":{"message":"The model has been deprecated and is no longer available.","type":"invalid_request_error"}}`
+	noRegionBody = `{"error":{"code":"unsupported_country_region_territory","message":"Country, region, or territory not supported"}}`
+)
+
+// A key that cannot reach the model is dead for the request and the next key answers, as another
+// project of the same vendor may well have it. Counted forbidden on the key; the attempt line
+// says what it was.
+func TestAKeyWithoutTheModelIsSwappedForAnother(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 404}, "A", "B")
+	vendor.bodies = map[string]string{"A": noModelBody}
+	access := captureAccess(t, f)
+	rotated(t, f, vendor)
+
+	if strings.Join(vendor.keys, ",") != "A,B" {
+		t.Errorf("keys dialled = %v", vendor.keys)
+	}
+	if a := f.keyStats("A"); a.Forbidden != 1 || a.Rejected != 1 || a.OK != 0 {
+		t.Errorf("stats A = %+v", a)
+	}
+	attempt := accessLines(t, access)[0]
+	if attempt["upstream_status"] != 404. || attempt["failure_class"] != domain.ClassModelAccess || attempt["moved"] != "key" {
+		t.Errorf("attempt line = %v", attempt)
+	}
+}
+
+// Every key lacking the model, or refused for the region, is the vendor's own answer: nothing the
+// caller did, but nothing a credential of ours is to blame for either, and the next model may take it.
+func TestEveryKeyLackingTheModelRelaysTheVendorsAnswer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status      int
+		body, class string
+	}{
+		"model":  {404, noModelBody, domain.ClassModelAccess},
+		"region": {403, noRegionBody, domain.ClassRegionBlocked},
+	} {
+		f, vendor := keyedFixture(t, map[string]int{"A": tc.status, "B": tc.status}, "A", "B")
+		vendor.bodies = map[string]string{"A": tc.body, "B": tc.body}
+		access := captureAccess(t, f)
+		resp := vendor.chat(f)
+
+		if resp.Code != tc.status || resp.Body.String() != tc.body || len(vendor.keys) != 2 {
+			t.Errorf("%s: status = %d, body = %s, keys dialled = %v", name, resp.Code, resp.Body, vendor.keys)
+		}
+		lines := accessLines(t, access)
+		if last := lines[len(lines)-1]; last["failure_class"] != tc.class || last["attempts"] != 2. {
+			t.Errorf("%s: access line = %v", name, last)
+		}
+	}
+}
+
+// A retired model is retired on every key: one dial, the vendor's answer, and the line says why.
+func TestARetiredModelIsNotTriedOnAnotherKey(t *testing.T) {
+	f, vendor := keyedFixture(t, map[string]int{"A": 410, "B": 410}, "A", "B")
+	vendor.bodies = map[string]string{"A": retiredBody, "B": retiredBody}
+	access := captureAccess(t, f)
+	resp := vendor.chat(f)
+
+	if resp.Code != http.StatusGone || resp.Body.String() != retiredBody || len(vendor.keys) != 1 {
+		t.Errorf("status = %d, body = %s, keys dialled = %v", resp.Code, resp.Body, vendor.keys)
+	}
+	if a := f.keyStats("A"); a.OK != 1 || a.Rejected != 0 {
+		t.Errorf("stats A = %+v", a)
+	}
+	if line := jsonLine(t, access); line["failure_class"] != domain.ClassModelGone {
+		t.Errorf("access line = %v", line)
 	}
 }

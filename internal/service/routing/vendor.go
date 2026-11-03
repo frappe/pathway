@@ -64,13 +64,13 @@ func NewKeyRing(keys []domain.Credential) *KeyRing {
 	return &KeyRing{keys: keys, spent: map[string]bool{}, dead: map[string]bool{}}
 }
 
-// Next retires `loser` for `status` and picks the key the next attempt dials with — the one after
-// it round the ring, blank when none is left. The rate-limited keys are opened once when nothing
-// else remains: a vendor's quota window may have slid by then. A second exhaustion is the answer
-// the client gets.
-func (k *KeyRing) Next(loser domain.Credential, status int) domain.Credential {
+// Next retires `loser` for the class of its answer and picks the key the next attempt dials with —
+// the one after it round the ring, blank when none is left. The rate-limited keys are opened once
+// when nothing else remains: a vendor's quota window may have slid by then. A second exhaustion
+// is the answer the client gets.
+func (k *KeyRing) Next(loser domain.Credential, class string) domain.Credential {
 	k.spent[loser.ID] = true
-	if domain.IsKeyRejected(status) {
+	if domain.Retires(class) {
 		k.dead[loser.ID] = true
 	}
 	if winner := nextKey(k.keys, loser, k.spent); winner.ID != "" || k.reset {

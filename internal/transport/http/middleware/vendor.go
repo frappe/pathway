@@ -14,14 +14,10 @@ import (
 func vendorAuth(r *http.Request, state *State) {
 	route := state.Decision.Route
 	r.Header.Del("X-Request-Id")
-	for name, value := range vendor.For(route.Vendor).Headers(route.Dialect, state.Decision.Key.Secret, route.APIVersion) {
+	for name, value := range vendor.Of(route).Headers(route.Dialect, state.Decision.Key.Secret, route.APIVersion) {
 		r.Header.Set(name, value)
 	}
 }
-
-// vendorPeeks says which of a vendor's statuses retry reads to the end before classing: an
-// exhausted account hides under a 400 or a 429 (domain.ClassifyUpstream). An engine's are its own.
-func vendorPeeks(status int) bool { return status == 400 || status == 429 }
 
 // countAttempt lands one attempt on the key it dialled with. A blank id is an engine's one
 // credential, counted nowhere.

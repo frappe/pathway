@@ -64,6 +64,7 @@ headers, and every wait for more of its body after them. A model that thinks for
 its first token needs it raised; a stream that talks for an hour does not. Running out before the
 headers is a **504** `upstream timed out`; after them, an event stream ends in an error event (see
 [Streaming](../transport/http/proxy/README.md#streaming)) and the access line says `cut=upstream_idle`.
+Either end is `failure_class=timeout` on the line.
 
 `synthetic_session_ttl` is the one worth knowing. `0s` balances every caller that names no session
 of its own; `30m` pins each API key to one engine, which is what a single-placement fleet always

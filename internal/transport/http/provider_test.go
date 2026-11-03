@@ -96,6 +96,26 @@ func TestTheCallerIsToldWhatTheGatewayChanged(t *testing.T) {
 	}
 }
 
+// The control plane switches a vendor's rewrite off for one model on the row, and that model
+// gets the field as the caller sent it, with nothing to tell.
+func TestTheRowSwitchesAQuirkOffForOneModel(t *testing.T) {
+	f := providerFixture(t)
+	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("openai/chat")}
+	f.store.Routes["openai/chat"] = []domain.Route{{
+		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
+		Vendor: "openai", Kind: "provider", Dialect: "openai", UpstreamModel: "chat",
+		SkipQuirks: []string{"unreason_with_tools", "default_sampling"},
+	}}
+	resp := f.post("/openai/v1/chat/completions", `{"model":"openai/chat","temperature":0.2,"tools":[{"type":"function","function":{"name":"a"}}]}`)
+
+	if got := resp.Header().Get("X-Grove-Changed"); got != "" {
+		t.Errorf("X-Grove-Changed = %q on a model the row exempts", got)
+	}
+	if body := string(f.seen.body); !strings.Contains(body, `"temperature":0.2`) || strings.Contains(body, "reasoning_effort") {
+		t.Errorf("upstream body = %s", body)
+	}
+}
+
 // The customer's id is ours; the vendor answers to a dated snapshot it has never heard us call
 // anything else.
 func TestAProviderRouteSendsTheUpstreamsOwnModelID(t *testing.T) {

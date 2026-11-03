@@ -46,6 +46,12 @@ type Route struct {
 	// ("web_search_options"), as the control plane lists them. A request that names one is
 	// refused before the dial (SentTools, Refuses). Empty on every row we run ourselves.
 	DeniedTools []string `json:"denied_tools,omitempty"`
+	// SkipQuirks names the rewrites of the vendor's type this model is not given, as the control
+	// plane lists them (vendor.QuirkNames has every name, in snake case, and each vendor's own
+	// Quirks the ones it has; a push naming another is refused): the type says what the vendor
+	// does, and this says which of its models
+	// does otherwise — one that does not reason keeps its sampling. Empty gives every rewrite.
+	SkipQuirks []string `json:"skip_quirks,omitempty"`
 	// What this upstream answers to, when that is not the id the caller sent. The control plane
 	// owns the mapping. Blank on every route we run ourselves — an engine is started under the
 	// Grove id — and on any route pushed before this field existed, which reads as "send unchanged".
@@ -104,18 +110,14 @@ type KeyStats struct {
 	LastRateLimited int64 `json:"last_rate_limited"`
 }
 
-// IsKeyFailure reports whether an upstream status is the credential's fault rather than the
-// request's or the upstream's: a rate limit, or a key refused outright. Only these move a request
-// to another key — a 502 on one key is a 502 on the next.
-func IsKeyFailure(status int) bool { return status == 429 || IsKeyRejected(status) }
-
 // IsKeyRejected reports a status that says the credential is dead for this request: unauthorised,
-// unpaid or forbidden. A rate limit is not — that key may be back once the others are spent.
+// unpaid or forbidden. A rate limit is not — that key may be back once the others are spent. The
+// status is the one an attempt is counted under (CountedStatus), which is where a class that hid
+// under another status has already been put right.
 func IsKeyRejected(status int) bool { _, ok := RefusedCredential(status); return ok }
 
-// RefusedCredential names the refusal a 401, 402 or 403 from an upstream carries — the gateway's
-// own credential was turned away. The class is the KeyStats field it counts under and the access
-// line's reason suffix; a client is never told it.
+// RefusedCredential names the KeyStats bucket a 401, 402 or 403 counts under — the gateway's own
+// credential was turned away. A client is never told it.
 func RefusedCredential(status int) (string, bool) {
 	switch status {
 	case 401:
@@ -128,26 +130,164 @@ func RefusedCredential(status int) (string, bool) {
 	return "", false
 }
 
-// ClassifyUpstream is the status an upstream's answer means, which is not always the one it
-// sent: an exhausted account is OpenAI's 429 `insufficient_quota` and Anthropic's 400 "credit
-// balance", and reads here as the 402 it is. Anything else means its own status.
-func ClassifyUpstream(status int, body []byte) int {
-	lower := strings.ToLower(string(body))
-	if (status == 429 && strings.Contains(lower, "insufficient_quota")) ||
-		(status == 400 && strings.Contains(lower, "credit balance")) {
-		return 402
+// What an upstream's answer says went wrong, one name per cause whichever vendor said it, so a
+// log reads the same word for the same thing. Read from the body first and the status second:
+// vendors disagree on which status carries which fact — Gemini rejects a key with a 400,
+// Anthropic reports an empty balance as a 400, OpenAI as a 429.
+const (
+	// ClassCredential: the key itself was rejected. Nothing on it will work until it is changed. A
+	// bare 403 is one too, as it always has been here.
+	ClassCredential = "credential"
+	// ClassQuota: the account behind the key is out of credit or over a spend cap. Unlike a rate
+	// limit, waiting does not help.
+	ClassQuota = "quota"
+	// ClassModelAccess: this key cannot reach the model — no access, no such deployment. Another
+	// key may.
+	ClassModelAccess = "model_access"
+	// ClassModelGone: the vendor retired the model. Every key gets the same answer, so the ring
+	// is not walked for it; a fallback model is.
+	ClassModelGone = "model_gone"
+	// ClassRegionBlocked: the vendor refuses the request's location. The block can be bound to the
+	// key's project or account rather than to our address, so the next key is tried.
+	ClassRegionBlocked = "region_blocked"
+	// ClassRateLimit: the key is limited right now, and may not be shortly.
+	ClassRateLimit = "rate_limit"
+	// ClassTransient: the upstream broke in a way unrelated to the key or the request — a 5xx, a
+	// connection refused or reset, a body that broke off.
+	ClassTransient = "transient"
+	// ClassCallerFault: the request itself was refused. No key would have served it.
+	ClassCallerFault = "caller_fault"
+	// ClassUnknown: a failure carrying nothing recognised — an HTML 404 from a proxy in the way.
+	ClassUnknown = "unknown"
+	// ClassTimeout: the upstream sent nothing for upstream_read_timeout, before its headers or
+	// after them. The gateway cut the hop.
+	ClassTimeout = "timeout"
+	// ClassCancelled: the client left while the hop was in flight. It says nothing of the upstream.
+	ClassCancelled = "cancelled"
+)
+
+// The phrases each class is read by, lowered. Substrings of the body rather than a parse: a code
+// or a type is a substring of the JSON that carries it, and a vendor that sends only a message is
+// read the same way. Each list is kept to phrases that cannot sit in an echoed prompt by accident —
+// one that could would rotate or retire a key for the wrong reason.
+var (
+	quotaMarkers = []string{"insufficient_quota", "blocked_api_access", "credit balance", "spend limit",
+		"api usage limits", "prepayment credits", "credits are depleted", "spending cap",
+		"requires billing to be enabled", "key limit exceeded", "account is not active"}
+	// throttl: throttled, throttling.
+	rateLimitMarkers = []string{"rate limit", "rate_limit", "ratelimit", "too many requests", "quota exceeded",
+		"quota_exceeded", "throttl", "rate exceeded", "rpm exceeded", "tpm exceeded", "tokens per minute"}
+	regionMarkers = []string{"unsupported_country_region_territory", "unsupported countries",
+		"location is not supported", "not available in your country"}
+	credentialMarkers = []string{"invalid_api_key", "authentication_error", "unauthenticated", "organization_restricted",
+		"api key not valid", "api_key_invalid", "api key expired", "invalid api key", "invalid x-api-key", "incorrect api key"}
+	modelMarkers = []string{"model_not_found", "deploymentnotfound", "unknown_model", "invalid_model",
+		"model_terms_required", "model_permission_blocked", "no endpoints found", "no allowed providers"}
+	retiredMarkers = []string{"model_decommissioned", "deprecated", "deprecation", "decommissioned", "retired",
+		"end of its life", "end-of-life", "no longer available", "has been removed", "was removed"}
+)
+
+// FailureClass names what an upstream's answer says went wrong, blank on one that was no failure.
+// body is the vendor's error as it was sent, nil when only the status is known; a status alone
+// decides only what it can carry on its own (401, 402, 403, 429, the 5xx). The rules, in their
+// order: quota before rate limit, since an exhausted account is reported under a 429 whose words
+// also say "rate limit"; a 5xx stays transient whatever its body says, unless the body says the
+// limit was hit; a 401 or 403 is the key's whatever its body says.
+func FailureClass(status int, body []byte) string {
+	if status < 400 {
+		return ""
 	}
-	return status
+	lower := strings.ToLower(string(body))
+	transient := status >= 500
+	switch {
+	case !transient && (status == 402 || containsAny(lower, quotaMarkers)):
+		return ClassQuota
+	case status == 429 || (status != 401 && status != 403 && containsAny(lower, rateLimitMarkers)):
+		return ClassRateLimit
+	case transient:
+		return ClassTransient
+	case containsAny(lower, regionMarkers):
+		return ClassRegionBlocked
+	case status == 401 || containsAny(lower, credentialMarkers):
+		return ClassCredential
+	}
+	// The model is unreachable with this key, or withdrawn altogether: the two share their signals
+	// and differ in what is said of the model. A 410 is a withdrawn model whoever sent it.
+	retired := containsAny(lower, retiredMarkers)
+	model := strings.Contains(lower, "model")
+	isModel := status == 410 || containsAny(lower, modelMarkers) ||
+		(model && (status == 404 || retired || containsAny(lower, []string{"not_found_error", "permission_error"})))
+	switch {
+	case isModel && retired, status == 410:
+		return ClassModelGone
+	case isModel:
+		return ClassModelAccess
+	case status == 403:
+		return ClassCredential
+	case len(body) > 0 && (status == 400 || status == 409 || status == 413 || status == 415 || status == 422):
+		return ClassCallerFault
+	}
+	return ClassUnknown
+}
+
+func containsAny(s string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// Retires reports a class that leaves the key dead for the rest of the request: waiting changes
+// nothing for it, and another key may not say the same.
+func Retires(class string) bool {
+	switch class {
+	case ClassCredential, ClassQuota, ClassModelAccess, ClassRegionBlocked:
+		return true
+	}
+	return false
+}
+
+// Rotates reports a class that is the key's fault rather than the request's or the upstream's, so
+// another key gets a go: one that retires it, or a rate limit, whose key may be back once the
+// others are spent. Only these move a request to another key — a 502 on one key is a 502 on the next.
+func Rotates(class string) bool { return class == ClassRateLimit || Retires(class) }
+
+// Exhausts reports a class that holds for every model on the key — the key or the account behind
+// it. When every key says it, the gateway answers 502 in the vendor's place: nothing the caller
+// did, and nothing they should be told the shape of. A model or a region refusal is the request's
+// to see, and is relayed as the last key got it.
+func Exhausts(class string) bool { return class == ClassCredential || class == ClassQuota }
+
+// MovesModel reports a class that says this model cannot serve the request here, whoever asks:
+// its upstream broke or ran out of time, retired the model, or refused the credential. Only these
+// move a request to a fallback model — the request's own fault would be refused there too.
+func MovesModel(class string) bool {
+	return Rotates(class) || class == ClassModelGone || class == ClassTransient || class == ClassTimeout
 }
 
 // MaxFallbacks is how many other models one request may name to fall back on: each can cost a dial.
 const MaxFallbacks = 3
 
-// IsModelFailure reports an answer that says this model cannot serve the request here, whoever
-// asks: its upstream broke, or every credential the retry stage had was refused. Only these move
-// a request to a fallback model — any other 4xx is the request's fault, and the next model would
-// say the same.
-func IsModelFailure(status int) bool { return status >= 500 || IsKeyFailure(status) }
+// CountedStatus is the status an attempt lands on its key under (KeyStatusClass): the one its
+// class means when the vendor hid it under another — an exhausted account under a 429 or a 400
+// counts unpaid, a key that cannot reach the model forbidden — else the one sent.
+func CountedStatus(class string, status int) int {
+	switch class {
+	case ClassQuota:
+		return 402
+	case ClassCredential:
+		if status != 403 {
+			return 401
+		}
+	case ClassModelAccess, ClassRegionBlocked:
+		return 403
+	case ClassRateLimit:
+		return 429
+	}
+	return status
+}
 
 // KeyStatusClass is the KeyStats bucket an attempt's status lands in, by the field's JSON name.
 func KeyStatusClass(status int) string {

@@ -15,8 +15,8 @@ the order is `GatewayChain` in `middleware.go`.
 | `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the key's `log_payloads` is on. See [The payload log](#the-payload-log) |
 | `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot, except on a vendor row |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |
-| `fallback` | runs the stages below again on the next model in the body's `fallbacks` when the one serving cannot (5xx, or a key failure `retry` could not rotate away). See [Fallback models](../../../service/routing/README.md#fallback-models) |
-| `retry` | runs the stages below again with another credential when a vendor refuses the one dialled (429, 401/402/403); counts every attempt against its key |
+| `fallback` | runs the stages below again on the next model in the body's `fallbacks` when the one serving cannot (`domain.MovesModel`: a 5xx, a timeout, a retired model, or a key failure `retry` could not rotate away). See [Fallback models](../../../service/routing/README.md#fallback-models) |
+| `retry` | runs the stages below again with another credential when a vendor's answer is the key's fault (`domain.Rotates`: a rate limit, a rejected key, an exhausted account, a model or a region the key is refused); counts every attempt against its key |
 | `transform` | the registered body rewrites; re-encodes only if one changed something |
 | `upstreamauth` | sets the forwarding headers, then the target's own auth: an engine's internal key and the ingress headers (`engineAuth`), or a vendor's key in its scheme (`vendorAuth`) |
 
@@ -163,6 +163,25 @@ proxy strips every upstream header a client has no use for before the response g
 which limit ran out (`x-ratelimit-remaining-*`, `anthropic-ratelimit-*-remaining`). `0` or `-`
 from an engine, and from a vendor that sends none.
 
+`failure_class` is what went wrong, one name per cause whichever vendor said it
+(`domain.FailureClass`), `-` when nothing did. Read from the vendor's error body when `retry` read
+it — every 4xx of a provider row — and from the status otherwise, since vendors disagree on which
+status carries which fact:
+
+| `failure_class` | Is | Then |
+|---|---|---|
+| `credential` | the key was rejected: a 401, `invalid_api_key`, `authentication_error`, "API key not valid", a bare 403 | next key; every key → 502 `upstream unavailable` |
+| `quota` | the account is out of credit or over a cap: a 402, `insufficient_quota`, "credit balance", "spend limit" | next key; every key → 502 |
+| `model_access` | this key cannot reach the model: `model_not_found`, `not_found_error` naming a model, `permission_error` | next key; every key → the vendor's answer |
+| `region_blocked` | the vendor refuses the request's location: `unsupported_country_region_territory`, "location is not supported" | next key; every key → the vendor's answer |
+| `rate_limit` | a 429, or rate-limit wording at any status but 401/403 | next key; the ring opens once more when spent |
+| `model_gone` | the vendor retired the model: a 410, "deprecated", `model_decommissioned` | the vendor's answer; a fallback model |
+| `transient` | the upstream broke: a 5xx, a connection refused or reset, a body that broke off | the vendor's answer, or 502; a fallback model |
+| `timeout` | nothing came for `upstream_read_timeout`, before the headers (504) or after them (`cut=upstream_idle`) | a fallback model when before the headers |
+| `cancelled` | the client left while the hop was in flight (`cut=client_left`) | nothing |
+| `caller_fault` | the request itself was refused: a 400/409/413/415/422 with an error body | the vendor's answer, as sent |
+| `unknown` | a 4xx carrying nothing recognised — an HTML 404 from a proxy in the way | the vendor's answer, as sent |
+
 Where the time went is on the line as three groups, in milliseconds, none of which reaches the
 client. `latency` is the split: `total_ms` = `gateway_ms` + `upstream_ms`, with `ttfb_ms` the
 client's first byte (what `ttft` is in seconds) and `vendor_ms` the hop as the vendor's own clock
@@ -196,7 +215,7 @@ own in the same log, `msg="attempt"`, under the same `rid`:
 |---|---|
 | `attempt` | which dial failed, from 1; `0` for a model `route` could not place, so nothing was dialled |
 | `model` | the model this attempt was on |
-| `upstream`, `deployment`, `engine`, `served_model`, `upstream_rid`, `upstream_status`, `upstream_attempts`, `retry_after`, `remaining_requests`, `remaining_tokens`, `reason`, `cut` | as on the access line, for this attempt; `reason` is the pick's refusal when nothing was dialled, `upstream unavailable` or `upstream timed out` when the dial gave no status |
+| `upstream`, `deployment`, `engine`, `served_model`, `upstream_rid`, `upstream_status`, `upstream_attempts`, `retry_after`, `remaining_requests`, `remaining_tokens`, `reason`, `cut`, `failure_class` | as on the access line, for this attempt; `reason` is the pick's refusal when nothing was dialled, `upstream unavailable` or `upstream timed out` when the dial gave no status |
 | `upstream_key` | id of the vendor credential dialled; `-` on an engine |
 | `latency`, `gateway`, `hop` | as on the access line, for this attempt, from when it began; `ttfb_ms` and `respond` absent, the client never received this answer |
 | `rt` | seconds this attempt took |

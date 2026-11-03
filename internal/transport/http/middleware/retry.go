@@ -9,6 +9,7 @@ import (
 
 	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/service/routing"
+	"github.com/frappe/pathway/internal/service/vendor"
 	"github.com/frappe/pathway/internal/transport/http/proxy"
 	"github.com/frappe/pathway/internal/transport/respond"
 )
@@ -20,14 +21,17 @@ func init() {
 // retry runs the stages below it again with another credential when a vendor refuses the one an
 // attempt dialled with. Below meter, so the request is billed and released once whatever it
 // took; above transform and upstreamauth, so each attempt rewrites the body and the auth header
-// afresh. Only a key's own failures move it (domain.IsKeyFailure): a 429 spends the key until
-// every other is spent too, then the whole ring is open once more — quota windows slide — while
-// a 401/402/403 retires the key for the rest of the request. A provider row's 400 or 429 is read
-// to its end before it is classed, since an exhausted account hides under both
-// (domain.ClassifyUpstream). Nothing else is retried here: a 502 on one key is a 502 on the next.
-// A 401/402/403 the ring cannot move off — or an engine's — never reaches the client as the
-// upstream wrote it, nor which refusal it was: the gateway answers 502 `upstream unavailable`,
-// and what the upstream said goes to the error log and the key's stats.
+// afresh. Only a key's own failures move it (domain.Rotates): a rate limit spends the key until
+// every other is spent too, then the whole ring is open once more — quota windows slide — while a
+// rejected key, an exhausted account, a model the key cannot reach or a region it is refused from
+// retires the key for the rest of the request (domain.Retires). A refusal the upstream's type
+// says to (vendor.Peeks: a provider's 4xx, none of an engine's) is read to its end before it is
+// classed, since each of those hides under one status or another, and it is classed as that type
+// reads it (vendor.Classify). Nothing else is retried here: a 502 on one key is a 502 on the next.
+// A rejected key or an exhausted account the ring cannot move off — or an engine's — never
+// reaches the client as the upstream wrote it, nor which refusal it was: the gateway answers 502
+// `upstream unavailable`, and what the upstream said goes to the error log and the key's stats
+// (domain.Exhausts). A model or a region refusal every key got is the request's to see, as sent.
 // Every attempt, held or answered, is counted against its key, and a held one leaves its own
 // line on the access log.
 func newRetry(deps Deps) (Middleware, error) {
@@ -37,26 +41,29 @@ func newRetry(deps Deps) (Middleware, error) {
 			keyring := state.Decision.Route.Keyring()
 			// An upgrade or a multipart body cannot be replayed; a single key has nowhere to go.
 			replayable := !isUpgrade(r) && state.Raw != nil && len(keyring) > 1
-			provider := state.Decision.Route.IsProvider()
+			upstream := vendor.Of(state.Decision.Route)
 			ring := routing.NewKeyRing(keyring)
 			for {
 				marks := markAttempt(w, r)
 				var winner domain.Credential
 				writer := &attemptWriter{ResponseWriter: w,
-					peek:     func(status int) bool { return provider && vendorPeeks(status) },
-					classify: domain.ClassifyUpstream,
-					again: func(status int) bool {
-						if class, ok := domain.RefusedCredential(status); ok {
-							state.Outcome.Reason = "credential " + class
+					peek:     upstream.Peeks,
+					classify: upstream.Classify,
+					again: func(status int, class string) bool {
+						// The proxy classed the status alone; the body is better. A status the
+						// proxy did not record is the gateway's own answer to a dial that
+						// failed, classed there.
+						if state.Outcome.Status == status {
+							state.Outcome.Class = class
 						}
-						if !replayable || r.Context().Err() != nil || !domain.IsKeyFailure(status) {
+						if !replayable || r.Context().Err() != nil || !domain.Rotates(class) {
 							return false
 						}
-						winner = ring.Next(state.Decision.Key, status)
+						winner = ring.Next(state.Decision.Key, class)
 						return winner.ID != ""
 					},
-					replace: func(status int) bool {
-						if _, ok := domain.RefusedCredential(status); !ok {
+					replace: func(_ int, class string) bool {
+						if !domain.Exhausts(class) {
 							return false
 						}
 						// The upstream's headers came with its answer; ours go with ours.
@@ -68,7 +75,7 @@ func newRetry(deps Deps) (Middleware, error) {
 				}
 				serveAttempt(next, writer, r)
 				writer.decide()
-				countAttempt(deps, r, state.Decision.Key, writer.counted(state.Outcome.Status))
+				countAttempt(deps, r, state.Decision.Key, domain.CountedStatus(writer.class, state.Outcome.Status))
 				if writer.replaced.Load() {
 					logRefusal(deps, r, state, writer)
 				}
@@ -119,6 +126,7 @@ func logAttempt(deps Deps, r *http.Request, state *State, started time.Time, rea
 		slog.String("remaining_tokens", or(state.Outcome.RemainingTokens, "-")),
 		slog.String("reason", reason),
 		slog.String("cut", or(state.Outcome.Cut, "-")),
+		slog.String("failure_class", or(state.Outcome.Class, "-")),
 		slog.Float64("rt", time.Since(started).Seconds()),
 		slog.String("moved", moved),
 		slog.String("to", to),
@@ -132,7 +140,7 @@ func logAttempt(deps Deps, r *http.Request, state *State, started time.Time, rea
 func logRefusal(deps Deps, r *http.Request, state *State, writer *attemptWriter) {
 	deps.Log.Warn("upstream refused the credential",
 		"rid", state.RequestID,
-		"reason", state.Outcome.Reason,
+		"failure_class", state.Outcome.Class,
 		"model", or(state.ServingModel(), "-"),
 		"upstream", or(state.Decision.EngineURL(), "-"),
 		"upstream_key", or(state.Decision.Key.ID, "-"),
@@ -177,18 +185,20 @@ const (
 // attemptWriter holds an attempt's answer until `again` has said whether another key gets a go
 // and `replace` whether the gateway answers in the upstream's place: the status is decided inside
 // WriteHeader, and a held attempt's body goes nowhere. A status `peek` wants read first is kept
-// whole — an error answer, capped — and decided on what `classify` makes of it once it ends.
-// 1xx go straight through — the proxy clears the shared header map for them itself.
+// whole — an error answer, capped — and decided on what `classify` makes of its body once it
+// ends; domain.FailureClass when nobody set one. 1xx go straight through — the proxy clears the
+// shared header map for them itself.
 type attemptWriter struct {
 	http.ResponseWriter
 	peek     func(status int) bool
-	classify func(status int, body []byte) int
-	again    func(status int) bool
-	replace  func(status int) bool
-	// status is what the upstream sent; effective what it meant, which the attempt is moved and
-	// counted on. peeked: the body was read before the two were told apart.
-	status, effective int
-	wrote, peeked     bool
+	classify func(status int, body []byte) string
+	again    func(status int, class string) bool
+	replace  func(status int, class string) bool
+	// status is what the upstream sent; class what it meant (classify), which the attempt is
+	// moved and counted on. peeked: the body was read before the class was decided.
+	status        int
+	class         string
+	wrote, peeked bool
 	// pending: the body is being kept until it is decided; held: it was swallowed in favour of
 	// another attempt; replaced: the gateway answered instead. Atomic because a flush can arrive
 	// from the proxy's timer goroutine.
@@ -210,18 +220,27 @@ func (a *attemptWriter) WriteHeader(status int) {
 		a.pending.Store(true)
 		return
 	}
-	a.settle(status)
+	a.settle(a.classed(status, nil))
 }
 
-// settle decides what a status gets: another key's go, the gateway's own answer, or the
-// upstream's through.
-func (a *attemptWriter) settle(effective int) {
-	a.effective = effective
-	if a.again(effective) {
+// classed is what an answer means, as the upstream's type reads it, or as every upstream's is
+// read when the writer was given no type.
+func (a *attemptWriter) classed(status int, body []byte) string {
+	if a.classify == nil {
+		return domain.FailureClass(status, body)
+	}
+	return a.classify(status, body)
+}
+
+// settle decides what an answer of this class gets: another key's go, the gateway's own answer,
+// or the upstream's through.
+func (a *attemptWriter) settle(class string) {
+	a.class = class
+	if a.again(a.status, class) {
 		a.held.Store(true)
 		return
 	}
-	if a.replace != nil && a.replace(effective) {
+	if a.replace != nil && a.replace(a.status, class) {
 		a.replaced.Store(true)
 		return
 	}
@@ -235,7 +254,7 @@ func (a *attemptWriter) decide() {
 		return
 	}
 	a.pending.Store(false)
-	a.settle(a.classify(a.status, a.buf))
+	a.settle(a.classed(a.status, a.buf))
 	if a.keeping() {
 		a.keep(a.buf)
 	} else {
@@ -272,15 +291,6 @@ func (a *attemptWriter) keep(p []byte) {
 	if room := excerptLimit - len(a.excerpt); room > 0 {
 		a.excerpt = append(a.excerpt, p[:min(room, len(p))]...)
 	}
-}
-
-// counted is the status the attempt lands on its key under: what the upstream meant when its
-// body was read first, else `status` as the hop recorded it.
-func (a *attemptWriter) counted(status int) int {
-	if a.peeked {
-		return a.effective
-	}
-	return status
 }
 
 // Flush is what the proxy's flush timer calls from its own goroutine; an answer the client is
