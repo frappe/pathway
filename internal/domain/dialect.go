@@ -1,8 +1,9 @@
 package domain
 
 import (
-	"encoding/json"
 	"strings"
+
+	"github.com/bytedance/sonic"
 )
 
 // The two dialects this gateway fronts. The surface a request arrives on IS the shape its upstream
@@ -29,7 +30,7 @@ func PathDialect(path string) string {
 // AnthropicError renders an upstream failure in the shape an Anthropic SDK parses. The type
 // comes from the status — the one signal every OpenAI-compatible vendor agrees on.
 func AnthropicError(status int, raw []byte) []byte {
-	out, _ := json.Marshal(anthropicErrorObject(status, raw))
+	out, _ := sonic.Marshal(anthropicErrorObject(status, raw))
 	return out
 }
 
@@ -40,7 +41,7 @@ func anthropicErrorObject(status int, raw []byte) map[string]any {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(raw, &envelope) == nil && envelope.Error.Message != "" {
+	if sonic.Unmarshal(raw, &envelope) == nil && envelope.Error.Message != "" {
 		message = envelope.Error.Message
 	}
 	return map[string]any{
