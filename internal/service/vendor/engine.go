@@ -7,6 +7,11 @@ type engine struct{ base }
 // NameOutputCap: as sent.
 func (engine) NameOutputCap(*Request) (bool, error) { return false, nil }
 
+// CacheKey: vLLM and SGLang partition the prefix cache by a top-level `cache_salt`, on either shape.
+func (engine) CacheKey(req *Request) (bool, error) {
+	return namespaceKey(req.Team, req.Body, "cache_salt")
+}
+
 func (engine) UsagePerChunk() bool { return true }
 
 func (engine) Quirks() []string { return []string{QuirkUsagePerChunk} }

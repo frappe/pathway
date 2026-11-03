@@ -28,8 +28,8 @@ What a vendor is sent in place of what the client sent:
 | `reasoning_effort`, when the request has tools (OpenAI shape) | at OpenAI `"none"` is added when the caller sent no `reasoning_effort`. The caller is told: `X-Grove-Changed: reasoning_effort=none` (`vendorfields`) |
 | `temperature`, `top_p`, `logprobs`, `top_logprobs` (OpenAI shape) | at OpenAI, unless `reasoning_effort` is `"none"`: dropped, but for a `temperature` or `top_p` of 1. The caller is told: `X-Grove-Changed: temperature=default, top_p=default` (`vendorfields`) |
 | `service_tier` | dropped: it picks the vendor's price class, which nothing here prices. The caller is told: `X-Grove-Changed: service_tier=default` (`servicetier`) |
-| `prompt_cache_key` (OpenAI shape) | at OpenAI the tenant, or `<team>:<value>` when the caller sent one: a key's cache accounting is the team's, and no team can land in another's (`cachekey`) |
-| `user_id` (OpenAI shape), `metadata.user_id` (Anthropic shape) | at DeepSeek the tenant, or `<team>:<value>` when the caller sent one: its KV cache isolation is per team (`cachekey`) |
+| `prompt_cache_key` (OpenAI shape) | at OpenAI the tenant, or `<team>:<value>` when the caller sent one: a key's cache accounting is the team's, and no team can land in another's (`cachekey`, from the type's `CacheKey`) |
+| `user_id` (OpenAI shape), `metadata.user_id` (Anthropic shape) | at DeepSeek the tenant, or `<team>:<value>` when the caller sent one: its KV cache isolation is per team (`cachekey`, from the type's `CacheKey` and `MetadataCacheKey`) |
 | every other field, listed above or not | as the client sent it |
 
 - **A field not on the list is forwarded**, not dropped and not refused: the list is what the
@@ -59,7 +59,10 @@ What a vendor is sent in place of what the client sent:
   a Bearer, set by `upstreamauth`), and the answer's side: what its headers say of the hop
   (`Answered`: Baseten's own request id and retries), which refusals are read to the end before
   they are classed and what they mean (`Peeks`, `Classify`), and a rewrite of the answer itself
-  (`Relay`, which no vendor needs yet). [vendor_quirks.md](vendor_quirks.md) shows each rewrite
+  (`Relay`, which no vendor needs yet). Where it partitions its prompt cache is the type's too
+  (`CacheKey`, `MetadataCacheKey`: an engine's `cache_salt`, OpenAI's `prompt_cache_key`,
+  DeepSeek's `user_id`), set to the tenant by `cachesalt` and `cachekey` when `isolate_caches` is
+  on — ours, not a quirk, so no row switches it off. [vendor_quirks.md](vendor_quirks.md) shows each rewrite
   with what the caller sent and what the vendor gets. `vendorfields` and `streamusage` run the
   rewrites per attempt on the client's own body, so a request that moves to another vendor is
   written afresh for that one. A model of a vendor that does not share one of its quirks is the

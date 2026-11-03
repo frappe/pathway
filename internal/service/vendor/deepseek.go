@@ -16,6 +16,16 @@ func (deepseek) Quirks() []string {
 		"blank_thinking_block", "unthink_forced_function", "unthink_forced_tool"}
 }
 
+// CacheKey: DeepSeek isolates its KV cache by `user_id`.
+func (deepseek) CacheKey(req *Request) (bool, error) {
+	return namespaceKey(req.Team, req.Body, "user_id")
+}
+
+// MetadataCacheKey: the same `user_id`, inside `metadata` on the Anthropic shape.
+func (deepseek) MetadataCacheKey(req *Request) (bool, error) {
+	return namespaceMetadataKey(req.Team, req.Body)
+}
+
 // UntypeCustomTools drops `"type":"custom"` from each tool. Any other type stays: one the vendor
 // would run on its own side was refused at `route`, from the route's denied_tools, before this ran.
 func (deepseek) UntypeCustomTools(req *Request) (bool, error) {

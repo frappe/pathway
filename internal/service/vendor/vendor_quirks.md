@@ -451,8 +451,10 @@ per-model switch before it is routed.
    and name it in the type's `Quirks`. A new one: add the method to `Vendor` in `vendor.go`, a
    no-op on `base`, a named slot in `chat` or `messages` there, and the override on the vendor,
    with a test in `vendorfields_test.go` (`TestEachUpstreamDeclaresTheQuirksItHas` wants the
-   least body it acts on). A header: override `Headers`, as Baseten does. A new vendor: a file
-   of its name with a type embedding `base`, and a row in `known`.
+   least body it acts on). A header: override `Headers`, as Baseten does. A rewrite that is ours
+   rather than a vendor's refusal (fast mode, the cache partition's `CacheKey`) is a method with no
+   slot and no name: a row cannot switch it off. A new vendor: a file of its name with a type
+   embedding `base`, and a row in `known`.
 4. Add a section here: what the vendor does, the rewrite, what is sent and what the vendor gets.
 
 ## 10. Fast mode

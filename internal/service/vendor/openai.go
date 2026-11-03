@@ -20,6 +20,11 @@ func (openai) NameOutputCap(req *Request) (bool, error) {
 	return renameOutputCap(req, MaxCompletionTokens)
 }
 
+// CacheKey: OpenAI routes and accounts its prompt cache by `prompt_cache_key`.
+func (openai) CacheKey(req *Request) (bool, error) {
+	return namespaceKey(req.Team, req.Body, "prompt_cache_key")
+}
+
 // UnreasonWithTools switches reasoning off when the request carries tools and the caller set no
 // effort. A caller who set one gets the upstream's refusal: the gateway does not choose between
 // the two. A model that does not reason has the row switch this off (skip_quirks).

@@ -43,6 +43,10 @@ func (base) UntypeCustomTools(*Request) (bool, error)     { return false, nil }
 func (base) UnthinkForcedTool(*Request) (bool, error)     { return false, nil }
 func (base) BlankThinkingBlock(*Request) (bool, error)    { return false, nil }
 
+// CacheKey, MetadataCacheKey: the shape names no cache partition; an upstream that reads one says where.
+func (base) CacheKey(*Request) (bool, error)         { return false, nil }
+func (base) MetadataCacheKey(*Request) (bool, error) { return false, nil }
+
 func (base) UsagePerChunk() bool { return false }
 
 // Quirks: the cap's name is every third party's; nothing else here changes a body.

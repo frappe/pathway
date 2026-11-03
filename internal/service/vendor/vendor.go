@@ -23,6 +23,7 @@ type Vendor interface {
 	Headers(dialect, secret, apiVersion string) map[string]string
 	Chat
 	Messages
+	Cache
 	// UsagePerChunk asks a stream for usage on every chunk (`continuous_usage_stats`), so one that
 	// is cut is still billed for what it had generated.
 	UsagePerChunk() bool
@@ -65,6 +66,19 @@ type Messages interface {
 	UnthinkForcedTool(*Request) (bool, error)
 	// BlankThinkingBlock is BlankReasoningContent on this shape: an empty thinking block in front.
 	BlankThinkingBlock(*Request) (bool, error)
+}
+
+// Cache is where an upstream partitions its prompt cache, one method per shape. Not a quirk: the
+// partition is the tenant's, so there is no slot in chat or messages and no name a row switches
+// off. Run by the cachekey and cachesalt transforms when isolate_caches is on, never by vendorfields.
+type Cache interface {
+	// CacheKey sets the field this upstream keys its prompt cache by, on the OpenAI chat shape, to
+	// the tenant (Request.Team), or `<team>:<caller's value>` when the caller sent one. Nothing on
+	// an upstream with no such field, or with no tenant to name.
+	CacheKey(*Request) (bool, error)
+	// MetadataCacheKey is CacheKey on the Anthropic messages shape, where the field sits inside
+	// `metadata`.
+	MetadataCacheKey(*Request) (bool, error)
 }
 
 // Response is what a vendor's answer says that the shape does not, and what is put right on it.
@@ -117,6 +131,9 @@ type Request struct {
 	// route row (skip_quirks): a vendor's type says what the vendor does, and the row says which
 	// of its models does otherwise.
 	Skip []string
+	// Team is the tenant the request is billed to: what a cache partition is keyed by (Cache).
+	// Blank when nobody is.
+	Team string
 }
 
 // Tell notes a change the caller is told of.

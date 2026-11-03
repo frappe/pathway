@@ -1,14 +1,17 @@
 package transform
 
+import "github.com/frappe/pathway/internal/service/vendor"
+
 func init() {
 	Register(cacheSalt{})
 }
 
-// cacheSalt pins an engine's prefix-cache namespace to the tenant: vLLM's and SGLang's cache_salt
-// becomes the team, or "<team>:<caller's salt>" when the caller sent one. Passed through raw, one
-// tenant could echo another's salt and land inside their namespace; sent by nobody, every tenant
-// on the box shares one. A vendor has no such field and a strict one 400s on unknowns, so a salt
-// is stripped from a vendor hop; a vendor's partition is cachekey's.
+// cacheSalt pins an engine's prefix-cache namespace to the tenant, in the field the engine's type
+// names (vendor.Engine.CacheKey: vLLM's and SGLang's cache_salt): the team, or "<team>:<caller's
+// salt>" when the caller sent one. Passed through raw, one tenant could echo another's salt and
+// land inside their namespace; sent by nobody, every tenant on the box shares one. A vendor has no
+// such field and a strict one 400s on unknowns, so a salt is stripped from a vendor hop; a vendor's
+// partition is cachekey's.
 type cacheSalt struct{}
 
 func (cacheSalt) Name() string { return "cachesalt" }
@@ -25,8 +28,5 @@ func (cacheSalt) Apply(ctx Context, body Body) (bool, error) {
 		delete(body, "cache_salt")
 		return true, nil
 	}
-	if ctx.Team == "" {
-		return false, nil
-	}
-	return namespaceKey(ctx.Team, body, "cache_salt")
+	return upstreamOf(ctx).CacheKey(&vendor.Request{Body: body, Team: ctx.Team})
 }

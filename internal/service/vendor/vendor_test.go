@@ -177,3 +177,55 @@ func TestARefusalIsPeekedAndClassedPerUpstream(t *testing.T) {
 		t.Error("a response was not relayed as it came")
 	}
 }
+
+// Each upstream puts the tenant where it partitions its prompt cache, prefixes a value the caller
+// sent, and writes nothing with no tenant to name; one with no such field changes nothing. Only
+// DeepSeek reads one on the Anthropic shape, inside metadata, whose other keys keep their bytes.
+func TestEachUpstreamPartitionsItsCacheWhereItReadsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		v     Vendor
+		field string // what CacheKey writes on the chat shape; blank when the upstream has none
+	}{
+		{"an engine of ours", Engine, "cache_salt"},
+		{"openai", For("openai"), "prompt_cache_key"},
+		{"deepseek", For("deepseek"), "user_id"},
+		{"baseten", For("baseten"), ""},
+		{"anthropic", For("anthropic"), ""},
+		{"an unmet vendor", Default, ""},
+	} {
+		req := &Request{Body: map[string]json.RawMessage{"model": json.RawMessage(`"m"`)}, Team: "t"}
+		changed, err := tc.v.CacheKey(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.field == "" {
+			if changed || len(req.Body) != 1 {
+				t.Errorf("%s: wrote a cache key: %v", tc.name, req.Body)
+			}
+			continue
+		}
+		if !changed || string(req.Body[tc.field]) != `"t"` {
+			t.Errorf("%s: %s = %s, want the tenant", tc.name, tc.field, req.Body[tc.field])
+		}
+		req.Body[tc.field] = json.RawMessage(`"mine"`)
+		if _, err := tc.v.CacheKey(req); err != nil || string(req.Body[tc.field]) != `"t:mine"` {
+			t.Errorf("%s: a sent value = %s, want it under the tenant", tc.name, req.Body[tc.field])
+		}
+		req.Team, req.Body[tc.field] = "", json.RawMessage(`"mine"`)
+		if changed, _ := tc.v.CacheKey(req); changed || string(req.Body[tc.field]) != `"mine"` {
+			t.Errorf("%s: with no tenant %s = %s", tc.name, tc.field, req.Body[tc.field])
+		}
+	}
+
+	req := &Request{Body: map[string]json.RawMessage{"metadata": json.RawMessage(`{"other":1.000,"user_id":"u"}`)}, Team: "t"}
+	if changed, err := For("deepseek").MetadataCacheKey(req); err != nil || !changed || string(req.Body["metadata"]) != `{"other":1.000,"user_id":"t:u"}` {
+		t.Errorf("deepseek metadata = %s, changed = %v, err = %v", req.Body["metadata"], changed, err)
+	}
+	for name, v := range map[string]Vendor{"openai": For("openai"), "an engine of ours": Engine, "an unmet vendor": Default} {
+		req := &Request{Body: map[string]json.RawMessage{}, Team: "t"}
+		if changed, _ := v.MetadataCacheKey(req); changed || len(req.Body) != 0 {
+			t.Errorf("%s wrote metadata: %v", name, req.Body)
+		}
+	}
+}
