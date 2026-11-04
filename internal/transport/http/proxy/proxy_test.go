@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -663,5 +664,45 @@ func TestAFailedHopIsLoggedUnderTheRequestID(t *testing.T) {
 	New(Options{}, slog.New(slog.NewJSONHandler(&log, nil))).Forward(httptest.NewRecorder(), r, dead.URL, false, vendor.Engine, ModelSwap{}, &out)
 	if !strings.Contains(log.String(), `"rid":"01999999-0000-7000-8000-000000000001"`) {
 		t.Errorf("error log line = %s, want the request id on it", log.String())
+	}
+}
+
+// With stream_timeline on the hop keeps when each read arrived and says so on one line: where in the
+// stream a stall was. Off, it keeps nothing.
+func TestAStreamsTimelineIsOneLineWhenAsked(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, pause := range []time.Duration{0, 10 * time.Millisecond, 40 * time.Millisecond} {
+			time.Sleep(pause)
+			_, _ = io.WriteString(w, "data: {}\n\n")
+			w.(http.Flusher).Flush()
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var log strings.Builder
+	timed := New(Options{StreamTimeline: true}, slog.New(slog.NewJSONHandler(&log, nil)))
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	r.Header.Set("X-Request-Id", "rid-1")
+	var out Outcome
+	timed.Forward(httptest.NewRecorder(), r, server.URL, false, vendor.Engine, ModelSwap{}, &out)
+	lines := strings.Split(strings.TrimSpace(log.String()), "\n")
+	var line struct {
+		Msg   string    `json:"msg"`
+		RID   string    `json:"rid"`
+		Cut   string    `json:"cut"`
+		Reads []float64 `json:"reads_ms"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &line); err != nil {
+		t.Fatalf("last line %q: %v", lines[len(lines)-1], err)
+	}
+	chunks := out.Hop.Legs().Chunks
+	if line.Msg != "stream timeline" || line.RID != "rid-1" || line.Cut != "-" || len(line.Reads) != chunks || chunks < 3 ||
+		line.Reads[0] != 0 || !slices.IsSorted(line.Reads) || line.Reads[len(line.Reads)-1] < 40 {
+		t.Errorf("timeline line = %+v with %d chunks, want cut=- with one read at 0 and the last past the 40ms pause", line, chunks)
+	}
+
+	if kept := forward(New(Options{}, quiet()), server.URL, false).Hop.Timeline(); kept != nil {
+		t.Errorf("off, the hop kept a timeline of %d reads, want none", len(kept))
 	}
 }

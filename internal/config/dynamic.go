@@ -57,6 +57,10 @@ type Dynamic struct {
 	// names in Transforms: the control plane renders no list, since a list would freeze the order
 	// against a newer binary.
 	IsolateCaches bool `json:"isolate_caches"`
+
+	// StreamTimeline leaves one process-log line per hop with when each read of the body arrived:
+	// where in a stream a stall was. Off, nothing is kept; the access line never carries it.
+	StreamTimeline bool `json:"stream_timeline"`
 }
 
 // cachePartitions are the transforms IsolateCaches appends, after the defaults and unless named.
@@ -93,8 +97,9 @@ type Resolved struct {
 	UsageSpool         string
 	UsageSpoolMaxBytes int64
 
-	Maintenance   bool
-	IsolateCaches bool
+	Maintenance    bool
+	IsolateCaches  bool
+	StreamTimeline bool
 }
 
 // Defaults are what a box with no config file runs, and what any field the file omits falls back
@@ -176,6 +181,7 @@ func (d Dynamic) Resolve(base Resolved) (Resolved, error) {
 	}
 	out.Maintenance = d.Maintenance
 	out.IsolateCaches = d.IsolateCaches
+	out.StreamTimeline = d.StreamTimeline
 	if out.IsolateCaches {
 		out.Transforms = withCachePartitions(out.Transforms)
 	}

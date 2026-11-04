@@ -7,6 +7,7 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -83,6 +84,10 @@ type Options struct {
 	// died without a FIN is never idle under traffic, and would keep taking requests without it.
 	PingAfter   time.Duration
 	PingTimeout time.Duration
+	// StreamTimeline keeps when each read of a body arrived and leaves it as one `stream timeline`
+	// line per hop: the one thing of the hop that is not a fixed-size record, so it is a knob and
+	// never on the access line.
+	StreamTimeline bool
 }
 
 func (o Options) withDefaults() Options {
@@ -147,7 +152,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	// while the client is still there, and the two told apart afterwards.
 	hop, cancel := context.WithCancelCause(r.Context())
 	defer cancel(nil)
-	events := &Hop{}
+	events := &Hop{timed: p.streamTimeline()}
 	outcome.Hop = events
 
 	var tee *usageTee
@@ -167,6 +172,9 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			outcome.Class = domain.ClassTimeout
 		case domain.CutUpstream:
 			outcome.Class = domain.ClassTransient
+		}
+		if events.timed {
+			p.log.Info("stream timeline", "rid", rid, "target", target, "cut", cmp.Or(outcome.Cut, "-"), "reads_ms", events.Timeline())
 		}
 	}()
 
@@ -308,6 +316,12 @@ func (p *Proxy) readTimeout() time.Duration {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.opts.ReadTimeout
+}
+
+func (p *Proxy) streamTimeline() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.opts.StreamTimeline
 }
 
 // isEventStream reports whether the upstream answered with server-sent events, which is what

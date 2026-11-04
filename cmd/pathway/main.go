@@ -195,6 +195,7 @@ func (b *built) applyScalars(next config.Resolved) {
 	b.proxy.Reconfigure(proxy.Options{
 		ReadTimeout:    next.UpstreamReadTimeout,
 		VerifyUpstream: next.UpstreamTLSVerify,
+		StreamTimeline: next.StreamTimeline,
 	})
 }
 
