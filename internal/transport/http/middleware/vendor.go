@@ -26,6 +26,6 @@ func countAttempt(deps Deps, r *http.Request, key domain.Credential, status int)
 		return
 	}
 	if err := deps.ProviderKeys.Count(withoutCancel(r.Context()), key.ID, status); err != nil {
-		deps.Log.Warn("provider key count failed", "key", key.ID, "err", err)
+		deps.Log.Warn("provider key count failed", "rid", From(r).RequestID, "key", key.ID, "err", err)
 	}
 }

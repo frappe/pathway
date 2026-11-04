@@ -650,3 +650,18 @@ func TestAnEarlyAnswerRacesNothingOnTheHop(t *testing.T) {
 		t.Errorf("legs = %+v, want a served hop", legs)
 	}
 }
+
+// A failed hop's line in the error log carries the request id the route stage stamped on the hop,
+// so one grep joins it to the access line.
+func TestAFailedHopIsLoggedUnderTheRequestID(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	var log strings.Builder
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	r.Header.Set("X-Request-Id", "01999999-0000-7000-8000-000000000001")
+	var out Outcome
+	New(Options{}, slog.New(slog.NewJSONHandler(&log, nil))).Forward(httptest.NewRecorder(), r, dead.URL, false, vendor.Engine, ModelSwap{}, &out)
+	if !strings.Contains(log.String(), `"rid":"01999999-0000-7000-8000-000000000001"`) {
+		t.Errorf("error log line = %s, want the request id on it", log.String())
+	}
+}

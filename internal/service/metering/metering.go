@@ -67,7 +67,7 @@ func (s *Service) debit(ctx context.Context, rep Report, tokens int64) {
 		return
 	}
 	if err := s.limits.Debit(ctx, rep.Prefix, limits, tokens, s.Now()); err != nil {
-		s.log.Error("token limits not debited", "key", rep.Prefix, "tokens", tokens, "err", err)
+		s.log.Error("token limits not debited", "rid", rep.RequestID, "key", rep.Prefix, "tokens", tokens, "err", err)
 	}
 }
 
@@ -84,14 +84,14 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 	fields, trusted := UsageFields(rep)
 	if !trusted {
 		if _, seen := s.warned.LoadOrStore(rep.Model, true); !seen {
-			s.log.Warn("cache buckets exceed the prompt; counted as plain", "model", rep.Model)
+			s.log.Warn("cache buckets exceed the prompt; counted as plain", "rid", rep.RequestID, "model", rep.Model)
 		}
 	}
 	if rep.Pricing != nil && len(rep.Pricing.Counters) == 0 {
 		// The control plane always pushes one; a pricing without it prices nothing, which the pull
 		// would read as a free request. Say so, once per pricing.
 		if _, seen := s.warned.LoadOrStore("pricing:"+rep.Pricing.ID, true); !seen {
-			s.log.Error("pricing carries no counter table; nothing priced", "pricing", rep.Pricing.ID, "model", rep.Model)
+			s.log.Error("pricing carries no counter table; nothing priced", "rid", rep.RequestID, "pricing", rep.Pricing.ID, "model", rep.Model)
 		}
 	}
 	cost := PricedFields(fields, rep.Pricing)
@@ -99,7 +99,7 @@ func (s *Service) Record(ctx context.Context, rep Report) {
 		ID: rep.RequestID, Prefix: rep.Prefix, Fields: fields, Cost: cost, Key: rep.MeterID, Budget: rep.Budget,
 	}
 	if err := s.usage.Accrue(ctx, accrual); err != nil {
-		s.log.Error("usage not recorded; spooled", "prefix", rep.Prefix, "model", rep.Model, "err", err)
+		s.log.Error("usage not recorded; spooled", "rid", rep.RequestID, "prefix", rep.Prefix, "model", rep.Model, "err", err)
 		if s.Spool != nil {
 			s.Spool.Add(accrual)
 		}
@@ -243,6 +243,6 @@ func (s *Service) recordOutcome(ctx context.Context, rep Report) {
 		return
 	}
 	if err != nil {
-		s.log.Warn("health counter not moved", "target", rep.Target, "err", err)
+		s.log.Warn("health counter not moved", "rid", rep.RequestID, "target", rep.Target, "err", err)
 	}
 }

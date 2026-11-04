@@ -135,9 +135,11 @@ func (p *Proxy) Reconfigure(opts Options) {
 // http.ErrAbortHandler when a client hangs up mid-stream, and the unwind discards a return value
 // along with whatever usage the tee had already captured.
 func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, external bool, upstream vendor.Vendor, swap ModelSwap, outcome *Outcome) {
+	// Stamped on the hop by the route stage; the request state lives a package up.
+	rid := r.Header.Get("X-Request-Id")
 	base, err := url.Parse(target)
 	if err != nil || base.Host == "" {
-		p.log.Error("unroutable target", "target", target, "err", err)
+		p.log.Error("unroutable target", "rid", rid, "target", target, "err", err)
 		return
 	}
 
@@ -243,7 +245,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			}
 			// Status stays 0, which is what marks the hop failed: the connection never got far
 			// enough to have one.
-			p.log.Warn("upstream hop failed", "target", target, "err", err)
+			p.log.Warn("upstream hop failed", "rid", rid, "target", target, "err", err)
 			// A dial or header wait that ran out is a timeout and says so; anything else is a
 			// connection that was refused or broken.
 			status, message, class := http.StatusBadGateway, "upstream unavailable", domain.ClassTransient

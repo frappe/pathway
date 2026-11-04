@@ -90,7 +90,7 @@ func (s *Spool) Add(a repository.Accrual) {
 
 func (s *Spool) drop(a repository.Accrual, err error) {
 	s.stats.dropped.Add(1)
-	s.log.Error("usage dropped", "id", a.ID, "prefix", a.Prefix, "err", err)
+	s.log.Error("usage dropped", "rid", a.ID, "prefix", a.Prefix, "err", err)
 }
 
 // Run replays at start and then every interval until ctx ends.

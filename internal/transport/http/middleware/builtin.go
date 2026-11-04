@@ -52,7 +52,9 @@ func newRecover(deps Deps) (Middleware, error) {
 					if errors.Is(p.(error), http.ErrAbortHandler) {
 						panic(p)
 					}
-					deps.Log.Error("panic serving request", "path", r.URL.Path, "panic", p)
+					// The rid is on the answer, not the context: accesslog, one stage down, minted it on a
+					// request this stage never saw.
+					deps.Log.Error("panic serving request", "rid", w.Header().Get("X-Request-Id"), "path", r.URL.Path, "panic", p)
 					respond.Error(w, http.StatusInternalServerError, "gateway error")
 				}
 			}()
@@ -288,7 +290,7 @@ func newBody(deps Deps) (Middleware, error) {
 					deny(w, r, domain.Deny(http.StatusRequestEntityTooLarge, "request body too large"))
 					return
 				}
-				model, session, form, err := readMultipart(w, r, boundary, maxBytes, deps.Log)
+				model, session, form, err := readMultipart(w, r, boundary, maxBytes, deps.Log.With("rid", state.RequestID))
 				doneReading(err)
 				if err != nil {
 					denyUnreadableBody(w, r, err)
@@ -461,7 +463,7 @@ func newTransform(deps Deps) (Middleware, error) {
 				Changed:       &changes,
 			}, state.Body)
 			if err != nil {
-				deps.Log.Error("request transform failed", "path", r.URL.Path, "err", err)
+				deps.Log.Error("request transform failed", "rid", state.RequestID, "path", r.URL.Path, "err", err)
 				deny(w, r, domain.Deny(http.StatusInternalServerError, "gateway error"))
 				return
 			}

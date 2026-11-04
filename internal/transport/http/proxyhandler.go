@@ -18,7 +18,7 @@ func (s *Server) proxyHandler() http.Handler {
 		if target == "" {
 			// Nothing picked a route, which means the chain was assembled without one. A config
 			// fault, not a caller's.
-			s.log.Error("no route on an admitted request", "path", r.URL.Path)
+			s.log.Error("no route on an admitted request", "rid", state.RequestID, "path", r.URL.Path)
 			respond.Error(w, http.StatusInternalServerError, "gateway error")
 			return
 		}
