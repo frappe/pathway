@@ -176,9 +176,10 @@ cannot move off — every key refused, a single key, an engine's own — never i
 the client gets the gateway's **502** `api_error` `upstream unavailable`, which refusal it was told
 to nobody outside; the access line says `failure_class="credential|quota"` with the vendor's
 status in `upstream_status`, and the error log keeps the vendor's own words with the key id
-(`upstream refused the credential`). Nothing else is retried: a 502 on one key is a 502 on the
-next. A held attempt leaks nothing to the client; the request is billed once whatever it
-walked, and the access line's `attempts` counts the dials. Every attempt lands in `pk:<key id>`
+(`upstream failed`, the line every failure of the upstream's leaves). Nothing else is retried: a
+502 on one key is a 502 on the next. A held attempt leaks nothing to the client; the request is
+billed once whatever it walked, and the access line's `attempts` counts the dials. Every attempt
+lands in `pk:<key id>`
 (`requests`, `ok`, `rate_limited`, `unauthorized`, `unpaid`, `forbidden`, `rejected` — the three
 before it together — `failed`, `last_used`, `last_rate_limited`) until
 `GET /grove-admin/provider-keys?ids=a,b` takes it.

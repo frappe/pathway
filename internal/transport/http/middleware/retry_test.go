@@ -37,3 +37,15 @@ func TestAttemptWriterPassesInterimStatusesThrough(t *testing.T) {
 		t.Errorf("code=%d wrote=%v held=%v", real.Code, w.wrote, w.held.Load())
 	}
 }
+
+// A failed answer's head is kept for the error log whoever receives the body; a good one's is not.
+func TestAttemptWriterKeepsAFailedAnswersHead(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		w := &attemptWriter{ResponseWriter: httptest.NewRecorder(), again: func(int, string) bool { return false }}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte("body"))
+		if kept := string(w.excerpt); (status >= 400) != (kept == "body") {
+			t.Errorf("status %d kept %q", status, kept)
+		}
+	}
+}

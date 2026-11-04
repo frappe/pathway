@@ -364,6 +364,19 @@ func TestWhatEachClassDoes(t *testing.T) {
 	}
 }
 
+// The error log keeps the upstream's words for every failure that was its own, not the caller's.
+func TestUpstreamFault(t *testing.T) {
+	for class, want := range map[string]bool{
+		ClassTransient: true, ClassRateLimit: true, ClassModelAccess: true, ClassModelGone: true, ClassRegionBlocked: true,
+		ClassUnknown: true, ClassCredential: true, ClassQuota: true, ClassTimeout: true,
+		"": false, ClassCallerFault: false, ClassCancelled: false,
+	} {
+		if got := UpstreamFault(class); got != want {
+			t.Errorf("UpstreamFault(%q) = %v, want %v", class, got, want)
+		}
+	}
+}
+
 // An attempt is counted on its key under the status its class means, not the one the vendor hid
 // it under.
 func TestCountedStatus(t *testing.T) {

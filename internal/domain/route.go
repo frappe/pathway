@@ -260,6 +260,12 @@ func Rotates(class string) bool { return class == ClassRateLimit || Retires(clas
 // to see, and is relayed as the last key got it.
 func Exhausts(class string) bool { return class == ClassCredential || class == ClassQuota }
 
+// UpstreamFault reports a class that was the upstream's doing — not the caller's request, not the
+// client leaving — which is what the error log keeps the upstream's words for.
+func UpstreamFault(class string) bool {
+	return class != "" && class != ClassCallerFault && class != ClassCancelled
+}
+
 // MovesModel reports a class that says this model cannot serve the request here, whoever asks:
 // its upstream broke or ran out of time, retired the model, or refused the credential. Only these
 // move a request to a fallback model — the request's own fault would be refused there too.

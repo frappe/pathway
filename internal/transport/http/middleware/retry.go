@@ -30,10 +30,10 @@ func init() {
 // reads it (vendor.Classify). Nothing else is retried here: a 502 on one key is a 502 on the next.
 // A rejected key or an exhausted account the ring cannot move off — or an engine's — never
 // reaches the client as the upstream wrote it, nor which refusal it was: the gateway answers 502
-// `upstream unavailable`, and what the upstream said goes to the error log and the key's stats
-// (domain.Exhausts). A model or a region refusal every key got is the request's to see, as sent.
-// Every attempt, held or answered, is counted against its key, and a held one leaves its own
-// line on the access log.
+// `upstream unavailable` (domain.Exhausts). A model or a region refusal every key got is the
+// request's to see, as sent. Every attempt, held or answered, is counted against its key, a held
+// one leaves its own line on the access log, and every failure of the upstream's — not the
+// caller's — leaves what it said on the error log, with the key (domain.UpstreamFault).
 func newRetry(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,8 +76,8 @@ func newRetry(deps Deps) (Middleware, error) {
 				serveAttempt(next, writer, r)
 				writer.decide()
 				countAttempt(deps, r, state.Decision.Key, domain.CountedStatus(writer.class, state.Outcome.Status))
-				if writer.replaced.Load() {
-					logRefusal(deps, r, state, writer)
+				if state.Outcome.Status != 0 && domain.UpstreamFault(writer.class) {
+					logFailure(deps, r, state, writer)
 				}
 				if !writer.held.Load() {
 					return
@@ -135,10 +135,11 @@ func logAttempt(deps Deps, r *http.Request, state *State, started time.Time, rea
 	deps.AccessLog().LogAttrs(r.Context(), slog.LevelInfo, "attempt", attrs...)
 }
 
-// logRefusal is the error log's record of a credential an upstream turned away, with what it
-// said: the client was told nothing of it.
-func logRefusal(deps Deps, r *http.Request, state *State, writer *attemptWriter) {
-	deps.Log.Warn("upstream refused the credential",
+// logFailure is the error log's record of an answer that was the upstream's failure, with the
+// head of what it said — whether the client received it, another key got a go, or the gateway
+// answered instead. A hop with no status has the proxy's own line.
+func logFailure(deps Deps, r *http.Request, state *State, writer *attemptWriter) {
+	deps.Log.Warn("upstream failed",
 		"rid", state.RequestID,
 		"failure_class", state.Outcome.Class,
 		"model", or(state.ServingModel(), "-"),
@@ -178,7 +179,7 @@ const (
 	// peekLimit bounds a body read before it is classed: a vendor's error, however much of the
 	// prompt it echoes. Past it the status is decided on what has arrived.
 	peekLimit = 64 << 10
-	// excerptLimit is how much of a swallowed answer the error log keeps.
+	// excerptLimit is how much of a failed answer the error log keeps.
 	excerptLimit = 512
 )
 
@@ -255,9 +256,8 @@ func (a *attemptWriter) decide() {
 	}
 	a.pending.Store(false)
 	a.settle(a.classed(a.status, a.buf))
-	if a.keeping() {
-		a.keep(a.buf)
-	} else {
+	a.keep(a.buf)
+	if !a.keeping() {
 		_, _ = a.ResponseWriter.Write(a.buf)
 	}
 	a.buf = nil
@@ -274,8 +274,11 @@ func (a *attemptWriter) Write(p []byte) (int, error) {
 		}
 		return len(p), nil
 	}
-	if a.keeping() {
+	// The head of a failed answer is kept whoever gets the body.
+	if a.status >= 400 || a.keeping() {
 		a.keep(p)
+	}
+	if a.keeping() {
 		return len(p), nil
 	}
 	return a.ResponseWriter.Write(p)
@@ -286,7 +289,7 @@ func (a *attemptWriter) keeping() bool {
 	return a.pending.Load() || a.held.Load() || a.replaced.Load()
 }
 
-// keep retains the head of a swallowed answer for the log.
+// keep retains the head of a failed answer for the log.
 func (a *attemptWriter) keep(p []byte) {
 	if room := excerptLimit - len(a.excerpt); room > 0 {
 		a.excerpt = append(a.excerpt, p[:min(room, len(p))]...)
