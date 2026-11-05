@@ -173,7 +173,8 @@ const (
 var (
 	quotaMarkers = []string{"insufficient_quota", "blocked_api_access", "credit balance", "spend limit",
 		"api usage limits", "prepayment credits", "credits are depleted", "spending cap",
-		"requires billing to be enabled", "key limit exceeded", "account is not active"}
+		"requires billing to be enabled", "key limit exceeded", "account is not active",
+		"member_budget_exceeded"}
 	// throttl: throttled, throttling.
 	rateLimitMarkers = []string{"rate limit", "rate_limit", "ratelimit", "too many requests", "quota exceeded",
 		"quota_exceeded", "throttl", "rate exceeded", "rpm exceeded", "tpm exceeded", "tokens per minute"}

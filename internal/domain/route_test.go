@@ -305,6 +305,8 @@ func TestFailureClass(t *testing.T) {
 		{200, `{"choices":[]}`, ""},
 		{429, `{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}`, ClassQuota},
 		{429, `{"error":{"type":"INSUFFICIENT_QUOTA"}}`, ClassQuota},
+		// Morph: an org member past their monthly budget, until the 1st (UTC).
+		{429, `{"error":{"code":"member_budget_exceeded"}}`, ClassQuota},
 		{400, `{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}`, ClassQuota},
 		{429, `{"error":{"message":"This request would exceed your organization's spend limit"}}`, ClassQuota},
 		{402, ``, ClassQuota},
