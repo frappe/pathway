@@ -1,13 +1,15 @@
 // Package vendor is what the gateway knows of each upstream it dials that the shape it speaks does
 // not say: where the credential goes, which fields it reads differently, what its answer says of
 // the hop, and what its refusals mean. One type per upstream, in the file of its name, by the name
-// the control plane pushes; a vendor the gateway has not met gets Default, and an engine we run
-// gets Engine. What an upstream is reached at, speaks, and answers to is the route row, not this.
+// the control plane pushes; a push naming a vendor the gateway has not met is refused, and an
+// engine we run gets Engine. What an upstream is reached at, speaks, and answers to is the route
+// row, not this.
 package vendor
 
 import (
 	"encoding/json"
 	"io"
+	"maps"
 	"slices"
 
 	"github.com/frappe/pathway/internal/domain"
@@ -19,8 +21,8 @@ import (
 // read here, and so a driver reaches the override: a base method called on base is base's.
 type Vendor interface {
 	// Headers carries the credential the way the vendor reads it, by the front's dialect. A blank
-	// secret sends no credential header; the version header, when the row has one, goes regardless.
-	Headers(dialect, secret, apiVersion string) map[string]string
+	// secret sends no credential header; an Anthropic front's version header goes regardless.
+	Headers(dialect, secret string) map[string]string
 	Chat
 	Messages
 	Cache
@@ -231,7 +233,14 @@ var known = map[string]Vendor{
 	"deepseek":  deepseek{},
 	"baseten":   baseten{},
 	"anthropic": anthropic{},
+	"morph":     morph{},
 }
+
+// Names is every vendor the gateway has met, sorted: what a push is checked against.
+func Names() []string { return slices.Sorted(maps.Keys(known)) }
+
+// IsVendor reports whether the gateway has met the vendor named.
+func IsVendor(name string) bool { _, met := known[name]; return met }
 
 // For is the vendor named, or Default for one the gateway has not met.
 func For(name string) Vendor {

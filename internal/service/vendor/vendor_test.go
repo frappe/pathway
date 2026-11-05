@@ -35,7 +35,7 @@ func TestHeadersFollowTheDialectUnlessTheVendorReadsOtherwise(t *testing.T) {
 // A vendor is the type of its name and an engine of ours one of its own; one the table does not
 // name is the shape as documented. Each answers for itself, and the drivers reach the override.
 func TestEachUpstreamIsItsOwnType(t *testing.T) {
-	if For("nobody") != Default || For("openai") == Default || Engine == Default {
+	if For("nobody") != Default || For("openai") == Default || For("morph") == Default || Engine == Default {
 		t.Error("the table does not tell its upstreams apart")
 	}
 	if Of(domain.Route{Kind: "provider", Vendor: "openai"}) != For("openai") || Of(domain.Route{Kind: "direct"}) != Engine {
@@ -192,6 +192,7 @@ func TestEachUpstreamPartitionsItsCacheWhereItReadsIt(t *testing.T) {
 		{"deepseek", For("deepseek"), "user_id"},
 		{"baseten", For("baseten"), ""},
 		{"anthropic", For("anthropic"), ""},
+		{"morph", For("morph"), ""},
 		{"an unmet vendor", Default, ""},
 	} {
 		req := &Request{Body: map[string]json.RawMessage{"model": json.RawMessage(`"m"`)}, Team: "t"}

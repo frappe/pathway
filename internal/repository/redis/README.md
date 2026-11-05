@@ -102,7 +102,8 @@ that carries one is refused like any unknown field.
 a request costs 0.
 
 A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries its
-own fields. A model's rows are all provider rows or none; a mixed push is a 400:
+own fields. A model's rows are all provider rows or none; a mixed push is a 400, and so is one whose
+`vendor` the gateway has not met (`vendor.Names()`), before any of it lands:
 
 ```json
 [{

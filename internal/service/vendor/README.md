@@ -19,7 +19,7 @@ What a vendor is sent in place of what the client sent:
 |---|---|
 | `model` | its own id for the model (`modelmap`) |
 | `max_completion_tokens` / `max_tokens` (OpenAI shape) | `max_completion_tokens` at OpenAI, `max_tokens` at every other vendor; sent under both names, the newer one's value (`vendorfields`) |
-| `stream_options` (OpenAI shape) | `include_usage: true` added on a stream (`streamusage`). `continuous_usage_stats` is added for Baseten and for an engine of ours, not for OpenAI (400s on it), DeepSeek (ignores it) or a vendor the gateway does not know |
+| `stream_options` (OpenAI shape) | `include_usage: true` added on a stream (`streamusage`). `continuous_usage_stats` is added for Baseten and for an engine of ours, not for OpenAI (400s on it) or DeepSeek (ignores it) |
 | a tool's `type` (Anthropic shape) | `"type": "custom"` removed at DeepSeek, which refuses it; a tool with no type means the same. Any other type stays (`vendorfields`) |
 | `speed` (Anthropic shape) | removed for every vendor: fast mode is twice the rate and nothing here prices it. The caller is told: `X-Grove-Changed: speed=default` (`vendorfields`) |
 | a `developer` message (OpenAI shape) | sent as a `system` message at DeepSeek, which knows no such role (`vendorfields`) |
@@ -45,8 +45,9 @@ What a vendor is sent in place of what the client sent:
   asked for. On a fallback, that vendor's refusal moves the request on (see
   [Fallback models](../routing/README.md#fallback-models)).
 - **Where an upstream differs is one type per upstream**, in `internal/service/vendor/`: a file
-  of its name (`openai.go`, `deepseek.go`, `baseten.go`, `anthropic.go`; `engine.go` for what we
-  run), registered in `known` under the name the control plane pushes. The `Vendor` interface in
+  of its name (`openai.go`, `deepseek.go`, `baseten.go`, `anthropic.go`, `morph.go`; `engine.go` for what we
+  run), registered in `known` under the name the control plane pushes; a push naming a vendor
+  not in it is a 400. The `Vendor` interface in
   `vendor.go` is everything one may differ in, and `base` is each as the shape says; a vendor's
   type overrides only what it does differently. One method per rewrite: the name the output cap
   goes under (`NameOutputCap`), whether a stream is asked for usage on every chunk
