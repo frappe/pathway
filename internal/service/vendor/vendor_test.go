@@ -13,20 +13,22 @@ import (
 
 func TestHeadersFollowTheDialectUnlessTheVendorReadsOtherwise(t *testing.T) {
 	for _, tc := range []struct {
-		name, vendor, dialect, secret, version string
-		want                                   map[string]string
+		name, vendor, dialect, secret string
+		want                          map[string]string
 	}{
-		{"an unmet OpenAI front", "nobody", domain.DialectOpenAI, "k", "", map[string]string{"Authorization": "Bearer k"}},
-		{"an unmet Anthropic front", "nobody", domain.DialectAnthropic, "k", "2023-06-01",
+		{"an unmet OpenAI front", "nobody", domain.DialectOpenAI, "k", map[string]string{"Authorization": "Bearer k"}},
+		{"an unmet Anthropic-shaped front: the key alone", "nobody", domain.DialectAnthropic, "k",
+			map[string]string{"x-api-key": "k"}},
+		{"Anthropic's own front: the key and its version", "anthropic", domain.DialectAnthropic, "k",
 			map[string]string{"x-api-key": "k", "anthropic-version": "2023-06-01"}},
-		{"no secret, the version still", "nobody", domain.DialectAnthropic, "", "2023-06-01",
+		{"Anthropic's own front, no secret: the version still", "anthropic", domain.DialectAnthropic, "",
 			map[string]string{"anthropic-version": "2023-06-01"}},
-		{"no secret, no version", "openai", domain.DialectOpenAI, "", "", map[string]string{}},
-		{"Baseten's Anthropic front reads a Bearer", "baseten", domain.DialectAnthropic, "k", "2023-06-01",
-			map[string]string{"Authorization": "Bearer k", "anthropic-version": "2023-06-01"}},
-		{"Baseten's OpenAI front", "baseten", domain.DialectOpenAI, "k", "", map[string]string{"Authorization": "Bearer k"}},
+		{"no secret, nothing", "openai", domain.DialectOpenAI, "", map[string]string{}},
+		{"Baseten's Anthropic front reads a Bearer and asks no version", "baseten", domain.DialectAnthropic, "k",
+			map[string]string{"Authorization": "Bearer k"}},
+		{"Baseten's OpenAI front", "baseten", domain.DialectOpenAI, "k", map[string]string{"Authorization": "Bearer k"}},
 	} {
-		if got := For(tc.vendor).Headers(tc.dialect, tc.secret, tc.version); !maps.Equal(got, tc.want) {
+		if got := For(tc.vendor).Headers(tc.dialect, tc.secret); !maps.Equal(got, tc.want) {
 			t.Errorf("%s: headers = %v, want %v", tc.name, got, tc.want)
 		}
 	}

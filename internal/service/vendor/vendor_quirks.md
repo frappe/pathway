@@ -319,8 +319,8 @@ It reads the key as `Authorization: Bearer`, the header its OpenAI front takes. 
 as if the caller's key were wrong; it is the vendor's key in a header it does not read. Measured
 2026-10-05, at Baseten directly and through a gateway.
 
-**The rewrite.** A header, not a field: the vendor's key goes out as a Bearer. `anthropic-version`
-is sent as for any Anthropic front.
+**The rewrite.** A header, not a field: the vendor's key goes out as a Bearer, and nothing else —
+Baseten asks no version header; a Model Provider's Extra Headers row would add one.
 
 The caller sends, on `/anthropic/v1/messages`:
 
@@ -333,10 +333,10 @@ Baseten gets:
 
 ```
 Authorization: Bearer <Baseten's key>
-anthropic-version: 2023-06-01
 ```
 
-DeepSeek and Anthropic get `x-api-key: <the vendor's key>`.
+DeepSeek gets `x-api-key: <the vendor's key>`; Anthropic the same plus `anthropic-version: 2023-06-01`,
+the one header its own front requires, from its type.
 
 ---
 

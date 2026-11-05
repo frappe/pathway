@@ -12,17 +12,14 @@ import (
 // receiver: embedding does not dispatch to an override, the drivers in vendor.go do.
 type base struct{}
 
-// Headers: an Anthropic front takes `x-api-key` and its version header; an OpenAI-compatible one
-// takes the Bearer everyone else does.
-func (base) Headers(dialect, secret, apiVersion string) map[string]string {
+// Headers: an Anthropic-shaped front takes `x-api-key`; an OpenAI-compatible one takes the Bearer
+// everyone else does. No version header: that is Anthropic's own, and a row's `headers` for any
+// other front that wants one.
+func (base) Headers(dialect, secret string) map[string]string {
 	headers := map[string]string{}
-	anthropic := dialect == domain.DialectAnthropic
-	if anthropic && apiVersion != "" {
-		headers["anthropic-version"] = apiVersion
-	}
 	switch {
 	case secret == "":
-	case anthropic:
+	case dialect == domain.DialectAnthropic:
 		headers["x-api-key"] = secret
 	default:
 		headers["Authorization"] = "Bearer " + secret

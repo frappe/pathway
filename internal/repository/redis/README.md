@@ -116,7 +116,7 @@ own fields. A model's rows are all provider rows or none; a mixed push is a 400,
   "vendor":         "anthropic",
   "kind":           "provider",
   "upstream_model": "claude-sonnet-4-5-20250929",
-  "api_version":    "2023-06-01",
+  "headers":        {"anthropic-beta": "interleaved-thinking-2025-05-14"},
   "dialect":        "anthropic",
   "denied_tools":   ["web_search_20250305", "web_search_20260209", "code_execution_20260521"],
   "skip_quirks":    []
@@ -150,8 +150,9 @@ id. A realtime upgrade carries its model in the query string and has no body for
 rewrite, so the same substitution is applied to `?model=` in the transform stage. Access, routing, metering and `/v1/models` all key on the id the caller sent, so the rewrite
 cannot desync a grant from a route. On a provider hop the client's `Authorization` is deleted
 rather than replaced, the vendor's own key goes in the header its `dialect` expects (`x-api-key`
-plus `anthropic-version` for an Anthropic front, a Bearer for an OpenAI-compatible one and for an
-Anthropic front whose `vendor.Headers` says it reads one), and the
+for an Anthropic-shaped front, plus `anthropic-version` on Anthropic's own; a Bearer for an
+OpenAI-compatible one and for an Anthropic front whose `vendor.Headers` says it reads one), the
+row's own `headers` go on first so the type's win, and the
 certificate is verified whatever `upstream_tls_verify` says — that hop leaves our network carrying
 someone else's key.
 

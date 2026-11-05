@@ -56,8 +56,9 @@ type Route struct {
 	// owns the mapping. Blank on every route we run ourselves — an engine is started under the
 	// Grove id — and on any route pushed before this field existed, which reads as "send unchanged".
 	UpstreamModel string `json:"upstream_model"`
-	// The vendor's API version header, sent only on a provider route. Blank sends none.
-	APIVersion string `json:"api_version"`
+	// Headers the control plane adds to a provider hop (`anthropic-beta`, a vendor's own). Set
+	// before the vendor type's, so the credential and the version header always win.
+	Headers map[string]string `json:"headers,omitempty"`
 	// Dialect is the API shape this upstream speaks: "openai" or "anthropic". Blank means BOTH on a
 	// row we run — vLLM answers both surfaces natively — and NOTHING on a provider: a vendor row
 	// without a dialect is malformed, so it serves no path rather than a guessed one.

@@ -11,13 +11,9 @@ import (
 // request id and its own retries under headers of its own.
 type baseten struct{ base }
 
-// Headers: the Bearer on either front; the version header goes as for any Anthropic front.
-func (v baseten) Headers(dialect, secret, apiVersion string) map[string]string {
-	headers := v.base.Headers(domain.DialectOpenAI, secret, apiVersion)
-	if dialect == domain.DialectAnthropic && apiVersion != "" {
-		headers["anthropic-version"] = apiVersion
-	}
-	return headers
+// Headers: the Bearer on either front, and nothing else — its Anthropic front asks no version.
+func (baseten) Headers(_, secret string) map[string]string {
+	return base{}.Headers(domain.DialectOpenAI, secret)
 }
 
 // UsagePerChunk: asked all the same, so it stays that way.
