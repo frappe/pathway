@@ -96,12 +96,13 @@ func (s *Store) failed(name string) error {
 // putKey matches the real store's HSET-merge: a push writes its fields and leaves Spent alone.
 func (s *Store) putKey(rec repository.KeyUpsert) {
 	limits, _ := domain.ParseLimits(rec.Limits) // the push handler already refused one that does not read
+	keyLimits, _ := domain.ParseLimits(rec.KeyLimits)
 	s.Keys[rec.MeterID] = domain.KeyRecord{
 		Status: rec.Status, Team: rec.Team, KeyPrefix: rec.Prefix, Groups: domain.ModelSet(rec.Groups),
 		Allow: domain.ModelSet(rec.Allow), Deny: domain.ModelSet(rec.Deny),
 		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Geography: rec.Geography,
 		Budget: rec.Budget, Spent: s.Keys[rec.MeterID].Spent, BudgetWindow: rec.BudgetWindow,
-		Limits: limits, CapMessage: rec.CapMessage,
+		Limits: limits, KeyLimits: keyLimits, CapMessage: rec.CapMessage,
 	}
 }
 
@@ -472,43 +473,48 @@ func (p providerKeys) Take(_ context.Context, ids []string) (map[string]domain.K
 
 type limits struct{ s *Store }
 
-func limitKey(key string, limit domain.Limit, now time.Time) string {
+func limitKey(holder domain.Holder, limit domain.Limit, now time.Time) string {
 	label, _, _ := limit.Bucket(now)
-	return key + ":" + limit.Metric + ":" + limit.Window + ":" + label
+	return holder.Counter() + ":" + limit.Metric + ":" + limit.Window + ":" + label
 }
 
-// Admit matches the real script: every limit is checked before any is counted, under one lock.
-func (l limits) Admit(_ context.Context, key string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
+// Admit matches the real script: every holder's every limit is checked before any is counted,
+// under one lock.
+func (l limits) Admit(_ context.Context, holders []domain.Holder, now time.Time) ([]domain.Over, error) {
 	l.s.mu.Lock()
 	defer l.s.mu.Unlock()
 	if err := l.s.failed("limits"); err != nil {
 		return nil, err
 	}
-	var exceeded []domain.Limit
-	for _, limit := range lims {
-		if l.s.Limits[limitKey(key, limit, now)] >= limit.Value {
-			exceeded = append(exceeded, limit)
+	var exceeded []domain.Over
+	for _, holder := range holders {
+		for _, limit := range holder.Limits {
+			if l.s.Limits[limitKey(holder, limit, now)] >= limit.Value {
+				exceeded = append(exceeded, domain.Over{Holder: holder, Limit: limit})
+			}
 		}
 	}
 	if len(exceeded) > 0 {
 		return exceeded, nil
 	}
-	for _, limit := range lims {
-		if limit.Metric == domain.LimitRequests {
-			l.s.Limits[limitKey(key, limit, now)]++
+	for _, holder := range holders {
+		for _, limit := range domain.LimitsOn(holder.Limits, domain.LimitRequests) {
+			l.s.Limits[limitKey(holder, limit, now)]++
 		}
 	}
 	return nil, nil
 }
 
-func (l limits) Debit(_ context.Context, key string, lims []domain.Limit, tokens int64, now time.Time) error {
+func (l limits) Debit(_ context.Context, holders []domain.Holder, tokens int64, now time.Time) error {
 	l.s.mu.Lock()
 	defer l.s.mu.Unlock()
 	if err := l.s.failed("limits"); err != nil {
 		return err
 	}
-	for _, limit := range lims {
-		l.s.Limits[limitKey(key, limit, now)] += tokens
+	for _, holder := range holders {
+		for _, limit := range domain.LimitsOn(holder.Limits, domain.LimitTokens) {
+			l.s.Limits[limitKey(holder, limit, now)] += tokens
+		}
 	}
 	return nil
 }

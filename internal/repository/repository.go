@@ -94,12 +94,12 @@ type ProviderKeys interface {
 // Limits counts what a key has used inside each limit's current window. now picks the window:
 // the caller's clock decides it, so a test can move it.
 type Limits interface {
-	// Admit checks every limit and, only when all have room, counts the request on the request
-	// limits — one atomic step, so two requests cannot both take the last slot. → the limits
-	// already spent; none when admitted.
-	Admit(ctx context.Context, key string, limits []domain.Limit, now time.Time) ([]domain.Limit, error)
-	// Debit adds tokens to the current window of each of these limits.
-	Debit(ctx context.Context, key string, limits []domain.Limit, tokens int64, now time.Time) error
+	// Admit checks every holder's every limit and, only when all have room, counts the request on
+	// the request limits — one atomic step, so two requests cannot both take the last slot. → the
+	// limits already spent, each with its holder; none when admitted.
+	Admit(ctx context.Context, holders []domain.Holder, now time.Time) ([]domain.Over, error)
+	// Debit adds tokens to the current window of each holder's token limits.
+	Debit(ctx context.Context, holders []domain.Holder, tokens int64, now time.Time) error
 }
 
 // Usage accrues token counters per API key prefix. The field names are the service's business —
@@ -214,7 +214,8 @@ type KeyUpsert struct {
 	Budget      int64 // the key's cap, nano-USD
 	// BudgetWindow is what Spent counts against the cap: domain.WindowMonth (blank) or WindowTotal.
 	BudgetWindow string
-	Limits       string // comma list of metric:window:value
+	Limits       string // comma list of metric:window:value[:model] — the team's, counted under the team
+	KeyLimits    string // the key's own, same shape, counted under the key
 	CapMessage   string // the 402 text once the cap is spent; blank = the default
 }
 

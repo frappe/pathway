@@ -10,7 +10,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
-| `lim:<key prefix>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see [Rate limiting](../../service/admission/README.md#rate-limiting) |
+| `lim:<team\|key>:<id>:<model>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see [Rate limiting](../../service/admission/README.md#rate-limiting) |
 | `usage:<key prefix>:<YYYY-MM-DD>` | hash, one per key per UTC day it was served | the gateway; set aside by `GET /grove-admin/usage`, or by the push that moves the key to another team |
 | `drained:<drain id>:<key prefix>:<YYYY-MM-DD>` | hash, kept `usage_retention` once acked; `team` only on one a push set aside: the team charged for it | `GET /grove-admin/usage` renames a live counter here; so does a key push that changes the key's team, which closes its books under a box-made drain id |
 | `drain:unacked` | set of `<drain id>:<key prefix>:<YYYY-MM-DD>` | every counter set aside and not yet acked |
@@ -30,7 +30,7 @@ would stay missing until its section changed; only gateway-owned keys expire
 ```
 key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
                            geography  budget  budget_window  spent:<YYYY-MM>  spent:total  limits
-                           cap_message
+                           key_limits  cap_message
 team:<Grove Team>          limited  log_payloads  limits
 model_group:<Model Group>  models
 usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
@@ -47,7 +47,7 @@ usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  tota
 to everything, which is the fail-closed default. `group` holds every group the key is in, so a
 name containing a comma would split — Grove refuses one. `team` is the Grove Team the key bills
 to: the cache-salt namespace, the payload log's join field, and the record whose `limited`,
-`log_payloads` and default `limits` are applied onto the key at resolve. The same three
+`log_payloads` and default `limits` are applied onto the key at resolve. `limits` is the team's rate limits as they ride this key (its tier's rows, `metric:window:value[:model]`), counted under the team; `key_limits` the key's own, counted under the key. The same three
 fields on the key record are what a control plane from before teams wrote, read only while the
 store holds no team record.
 

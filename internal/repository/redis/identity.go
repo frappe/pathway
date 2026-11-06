@@ -117,6 +117,10 @@ func keyRecord(h map[string]string, now time.Time) (domain.KeyRecord, error) {
 	if err != nil {
 		return domain.KeyRecord{}, err
 	}
+	keyLimits, err := domain.ParseLimits(h["key_limits"])
+	if err != nil {
+		return domain.KeyRecord{}, err
+	}
 	window := strings.TrimSpace(h["budget_window"])
 	return domain.KeyRecord{
 		Status:       h["status"],
@@ -132,6 +136,7 @@ func keyRecord(h map[string]string, now time.Time) (domain.KeyRecord, error) {
 		Spent:        int64Field(h, spentFieldFor(window, now)),
 		BudgetWindow: window,
 		Limits:       limits,
+		KeyLimits:    keyLimits,
 		CapMessage:   h["cap_message"],
 	}, nil
 }
@@ -175,6 +180,7 @@ func keyFields(rec repository.KeyUpsert) map[string]any {
 		"budget":        strconv.FormatInt(rec.Budget, 10),
 		"budget_window": rec.BudgetWindow, // always written: blank (the month) is what clears a dropped total
 		"limits":        rec.Limits,       // always written: blank is what clears a removed limit
+		"key_limits":    rec.KeyLimits,    // always written: blank is what clears the key's own
 		"cap_message":   rec.CapMessage,   // always written: blank is what clears a dropped message
 	}
 }

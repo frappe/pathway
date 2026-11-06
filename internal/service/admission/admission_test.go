@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/frappe/pathway/internal/domain"
@@ -242,9 +243,9 @@ func TestIdentifySkipsTheGroupStoreWhenUngrouped(t *testing.T) {
 	}
 }
 
-// Rate limits are the key's own, counted under its prefix: a second key of the same team has its
-// own window.
-func TestAdmitCountsUnderTheKeysPrefix(t *testing.T) {
+// Rate limits are the team's, counted per model: a second key of the same team draws on the same
+// window, and another model has its own.
+func TestAdmitCountsUnderTheTeamAndModel(t *testing.T) {
 	store := memory.New()
 	rec := liveKey("acme")
 	rec.Limits = []domain.Limit{{Metric: domain.LimitRequests, Window: "1m", Value: 1}}
@@ -254,13 +255,16 @@ func TestAdmitCountsUnderTheKeysPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Identify: %v", err)
 	}
-	if err := svc.Admit(context.Background(), id); err != nil {
+	if err := svc.Admit(context.Background(), id, "qwen3-4b"); err != nil {
 		t.Fatalf("first = %v, want admitted", err)
 	}
-	assertStatus(t, svc.Admit(context.Background(), id), 429)
+	assertStatus(t, svc.Admit(context.Background(), id, "qwen3-4b"), 429)
+	if err := svc.Admit(context.Background(), id, "other"); err != nil {
+		t.Errorf("another model = %v, want its own window", err)
+	}
 	for counter := range store.Limits {
-		if counter[:len("abc123:")] != "abc123:" {
-			t.Errorf("counter %q is not under the key's prefix", counter)
+		if !strings.HasPrefix(counter, "team:"+rec.Team+":") {
+			t.Errorf("counter %q is not under the team", counter)
 		}
 	}
 }
