@@ -150,16 +150,33 @@ func providerKeysTakeClears(t *testing.T, store repository.Store) {
 }
 
 func admitTakesTheLastSlotOnce(t *testing.T, store repository.Store) {
-	limits := []domain.Limit{{Metric: domain.LimitRequests, Window: "1h", Value: 1}}
+	one := []domain.Limit{{Metric: domain.LimitRequests, Window: "1h", Value: 1}}
+	team := []domain.Holder{{Kind: domain.HolderTeam, ID: "t1", Model: "m", Limits: one}}
 	now := time.Now()
-	if spent, err := store.Limits.Admit(ctx, "k1", limits, now); err != nil || len(spent) != 0 {
+	if spent, err := store.Limits.Admit(ctx, team, now); err != nil || len(spent) != 0 {
 		t.Fatalf("first Admit = %v, %v, want admitted", spent, err)
 	}
-	if spent, err := store.Limits.Admit(ctx, "k1", limits, now); err != nil || len(spent) != 1 {
-		t.Fatalf("second Admit = %v, %v, want the limit spent", spent, err)
+	if spent, err := store.Limits.Admit(ctx, team, now); err != nil || len(spent) != 1 || spent[0].Holder.Kind != domain.HolderTeam {
+		t.Fatalf("second Admit = %v, %v, want the team's limit spent", spent, err)
 	}
-	if spent, _ := store.Limits.Admit(ctx, "k2", limits, now); len(spent) != 0 {
-		t.Fatalf("another key's Admit = %v, want admitted", spent)
+	other := []domain.Holder{{Kind: domain.HolderTeam, ID: "t1", Model: "other", Limits: one}}
+	if spent, _ := store.Limits.Admit(ctx, other, now); len(spent) != 0 {
+		t.Fatalf("another model's Admit = %v, want its own window", spent)
+	}
+	// Two holders in one call: the key's lower row is the one spent, and the refusal counts
+	// nothing on the team's either.
+	both := []domain.Holder{
+		{Kind: domain.HolderTeam, ID: "t2", Model: "m", Limits: []domain.Limit{{Metric: domain.LimitRequests, Window: "1h", Value: 5}}},
+		{Kind: domain.HolderKey, ID: "k1", Model: "m", Limits: one},
+	}
+	if spent, err := store.Limits.Admit(ctx, both, now); err != nil || len(spent) != 0 {
+		t.Fatalf("both holders = %v, %v, want admitted", spent, err)
+	}
+	if spent, err := store.Limits.Admit(ctx, both, now); err != nil || len(spent) != 1 || spent[0].Holder.Kind != domain.HolderKey {
+		t.Fatalf("both again = %v, %v, want the key's limit spent", spent, err)
+	}
+	if spent, _ := store.Limits.Admit(ctx, both[:1], now); len(spent) != 0 {
+		t.Fatalf("the team alone = %v, want room: a refusal counted nothing", spent)
 	}
 }
 

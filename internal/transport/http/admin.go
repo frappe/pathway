@@ -37,8 +37,11 @@ type adminKey struct {
 	// current UTC month, a new month starts at 0) or "total" (everything since the key was pushed,
 	// so a spent key stays spent). Anything else is refused the way a bad limit is.
 	BudgetWindow string `json:"budget_window"`
-	// Limits is the key's rate limits, a comma list of metric:window:value; "" = none.
-	Limits string `json:"limits"`
+	// Limits is the team's rate limits as they ride this key, a comma list of
+	// metric:window:value[:model], counted under the team; "" = none. KeyLimits is the key's own,
+	// same shape, counted under the key beneath the team's.
+	Limits    string `json:"limits"`
+	KeyLimits string `json:"key_limits"`
 	// CapMessage is what the 402 says once the key's cap is spent; absent: the default text.
 	CapMessage string `json:"cap_message"`
 }
@@ -46,8 +49,10 @@ type adminKey struct {
 // upsert refuses a limit this binary cannot read, the way decodeBody refuses a field it does not
 // know: stored, it would be a limit the control plane believes in and nothing enforces.
 func (k adminKey) upsert() (repository.KeyUpsert, error) {
-	if _, err := domain.ParseLimits(k.Limits); err != nil {
-		return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
+	for _, list := range []string{k.Limits, k.KeyLimits} {
+		if _, err := domain.ParseLimits(list); err != nil {
+			return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
+		}
 	}
 	if !domain.IsBudgetWindow(k.BudgetWindow) {
 		return repository.KeyUpsert{}, fmt.Errorf("key %s: budget_window %q is not month or total", k.Prefix, k.BudgetWindow)
@@ -56,7 +61,7 @@ func (k adminKey) upsert() (repository.KeyUpsert, error) {
 		MeterID: k.KeyHash, Prefix: k.Prefix, Team: k.Team, Status: k.Status, Groups: k.Group,
 		Allow: k.Allow, Deny: k.Deny, Limited: k.Limited, LogPayloads: k.LogPayloads,
 		Geography: k.Geography, Budget: k.Budget, BudgetWindow: k.BudgetWindow, Limits: k.Limits,
-		CapMessage: k.CapMessage,
+		KeyLimits: k.KeyLimits, CapMessage: k.CapMessage,
 	}, nil
 }
 

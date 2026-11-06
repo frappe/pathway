@@ -33,14 +33,16 @@ func New(keys repository.Keys, groups repository.Groups, limits repository.Limit
 	return &Service{keys: keys, groups: groups, limits: limits, Now: time.Now}
 }
 
-// Admit counts this request against the key's rate limits, and refuses with a 429 naming the
-// limit already spent. A key with none costs no store call.
-func (s *Service) Admit(ctx context.Context, id Identity) error {
-	if len(id.Key.Limits) == 0 {
+// Admit counts this request against the limits that hold for the key on model — its team's and
+// its own — and refuses with a 429 naming the limit already spent. A key under no limit on the
+// model costs no store call.
+func (s *Service) Admit(ctx context.Context, id Identity, model string) error {
+	holders := domain.Holders(id.Key, model)
+	if len(holders) == 0 {
 		return nil
 	}
 	now := s.Now()
-	exceeded, err := s.limits.Admit(ctx, id.Prefix(), id.Key.Limits, now)
+	exceeded, err := s.limits.Admit(ctx, holders, now)
 	if err != nil {
 		return domain.Deny(503, "limit store error")
 	}

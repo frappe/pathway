@@ -37,8 +37,12 @@ type KeyRecord struct {
 	Budget       int64
 	Spent        int64
 	BudgetWindow string
-	// Limits caps the key's requests and tokens per reset window; none = uncapped.
-	Limits []Limit
+	// Limits is the team's rate limits as pushed on this key — its tier's rows — counted per model
+	// under the team, so every key of the team draws on one window. KeyLimits are the key's own,
+	// counted per model under the key: a second gate beneath the team's, the lower refusing first.
+	// Either empty = no gate of that kind (Holders).
+	Limits    []Limit
+	KeyLimits []Limit
 	// CapMessage is what the 402 says once this key's cap is spent: the control plane's text for
 	// the team, a trial's "upgrade to go on"; blank is the default. A limited team's keys keep the
 	// default whatever it says — that hold is not the cap's.
