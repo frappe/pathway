@@ -27,7 +27,7 @@ never registered, so no handler on that box could read a key store even if one w
 5. Proxies it, streaming the response through untouched, and reads the usage frame out on the way.
 6. Records the hop's outcome on every request, and the tokens on every one the upstream took — a
    2xx that was then abandoned or cut short included; a refusal, a 5xx or no answer is not a request.
-7. Answers each base's `/v1/models` and the root `/v1/credits` itself.
+7. Answers each base's `/v1/models` and the root `/v1/key/balance` itself.
 8. Upgrades its own binary and reloads its own configuration without dropping a connection.
 
 Requirements: Go 1.24.1 or later to build (sonic/loader does not link on 1.24.0), Redis (loopback, or the Network's shared store), a certificate on disk, and an admin token. It refuses to start

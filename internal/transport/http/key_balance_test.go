@@ -154,9 +154,9 @@ func TestAKeysPushCarriesTheCapAndLeavesSpentAlone(t *testing.T) {
 	}
 }
 
-// GET /v1/credits is the key's own balance on this store, in dollars — its cap less what it
+// GET /v1/key/balance is the key's own balance on this store, in dollars — its cap less what it
 // spent, nothing of the team's — overspent or not, since that is when it is asked.
-func TestCreditsAreTheKeysOwn(t *testing.T) {
+func TestTheBalanceIsTheKeysOwn(t *testing.T) {
 	cases := []struct {
 		name      string
 		keyStatus string
@@ -177,7 +177,7 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{}`))
 			f.withKey(func(k *domain.KeyRecord) { tc.edit(k); k.Status = tc.keyStatus })
-			r := httptest.NewRequest(http.MethodGet, "/v1/credits", nil)
+			r := httptest.NewRequest(http.MethodGet, "/v1/key/balance", nil)
 			r.Header.Set("Authorization", "Bearer "+secret)
 			w := httptest.NewRecorder()
 			f.handler.ServeHTTP(w, r)
@@ -186,7 +186,7 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 				t.Fatalf("status = %d, body = %s; want %d with %s", w.Code, w.Body, tc.status, tc.want)
 			}
 			if f.seen.path != "" {
-				t.Error("/v1/credits was forwarded to an engine")
+				t.Error("/v1/key/balance was forwarded to an engine")
 			}
 		})
 	}
