@@ -103,7 +103,7 @@ func ExhaustedDenial(key KeyRecord) error {
 	if key.CapMessage != "" && !key.Limited {
 		return Deny(402, key.CapMessage)
 	}
-	return Deny(402, "credit balance exhausted")
+	return Deny(402, "key credits exhausted")
 }
 
 // CanUse is the access decision: the grant of every group the key is in, plus its own Allow,

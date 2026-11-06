@@ -103,10 +103,10 @@ func TestEvaluateTheCap(t *testing.T) {
 		reason string
 	}{
 		{"funded admits", capped(999, 1000), 200, ""},
-		{"spent to the ceiling", capped(1000, 1000), 402, "credit balance exhausted"},
-		{"overspent", capped(1500, 1000), 402, "credit balance exhausted"},
-		{"no cap pushed", capped(0, 0), 402, "credit balance exhausted"},
-		{"limited refuses a funded key", KeyRecord{Status: "active", Groups: ModelSet("tier"), Limited: true, Budget: 1000}, 402, "credit balance exhausted"},
+		{"spent to the ceiling", capped(1000, 1000), 402, "key credits exhausted"},
+		{"overspent", capped(1500, 1000), 402, "key credits exhausted"},
+		{"no cap pushed", capped(0, 0), 402, "key credits exhausted"},
+		{"limited refuses a funded key", KeyRecord{Status: "active", Groups: ModelSet("tier"), Limited: true, Budget: 1000}, 402, "key credits exhausted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
