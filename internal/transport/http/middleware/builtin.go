@@ -3,7 +3,6 @@ package middleware
 import (
 	"bytes"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -14,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/service/metering"
@@ -51,7 +52,9 @@ func newRecover(deps Deps) (Middleware, error) {
 					if errors.Is(p.(error), http.ErrAbortHandler) {
 						panic(p)
 					}
-					deps.Log.Error("panic serving request", "path", r.URL.Path, "panic", p)
+					// The rid is on the answer, not the context: accesslog, one stage down, minted it on a
+					// request this stage never saw.
+					deps.Log.Error("panic serving request", "rid", w.Header().Get("X-Request-Id"), "path", r.URL.Path, "panic", p)
 					respond.Error(w, http.StatusInternalServerError, "gateway error")
 				}
 			}()
@@ -119,6 +122,7 @@ func newAccessLog(deps Deps) (Middleware, error) {
 					slog.String("remaining_tokens", or(state.Outcome.RemainingTokens, "-")),
 					slog.String("reason", or(state.DeniedReason, state.Outcome.Reason)),
 					slog.String("cut", or(state.Outcome.Cut, "-")),
+					slog.String("failure_class", or(state.Outcome.Class, "-")),
 				)
 				attrs = append(attrs, timing(state, state.Started, recorder.firstByte)...)
 				if len(state.Meta) > 0 {
@@ -286,7 +290,7 @@ func newBody(deps Deps) (Middleware, error) {
 					deny(w, r, domain.Deny(http.StatusRequestEntityTooLarge, "request body too large"))
 					return
 				}
-				model, session, form, err := readMultipart(w, r, boundary, maxBytes, deps.Log)
+				model, session, form, err := readMultipart(w, r, boundary, maxBytes, deps.Log.With("rid", state.RequestID))
 				doneReading(err)
 				if err != nil {
 					denyUnreadableBody(w, r, err)
@@ -310,7 +314,7 @@ func newBody(deps Deps) (Middleware, error) {
 			// to go. What else the body says is the engine's to reject.
 			state.Raw = raw
 			var decoded transform.Body
-			if len(raw) > 0 && domain.JSON.Unmarshal(raw, &decoded) != nil {
+			if len(raw) > 0 && sonic.Unmarshal(raw, &decoded) != nil {
 				deny(w, r, domain.Deny(http.StatusBadRequest, "request body is not a JSON object"))
 				return
 			}
@@ -363,7 +367,7 @@ func newRoute(deps Deps) (Middleware, error) {
 			// A model with nowhere to go hands the request to the caller's fallbacks before any
 			// dial; a pick refused for the request's own fault (the wrong surface) does not.
 			var denial domain.Denial
-			if errors.As(err, &denial) && domain.IsModelFailure(denial.Status) {
+			if errors.As(err, &denial) && domain.MovesModel(domain.FailureClass(denial.Status, nil)) {
 				if winner, model := nextFallback(deps, r, state); model != "" {
 					logAttempt(deps, r, state, started, denial.Reason, "model", model)
 					serveFallback(w, r, state, model, winner)
@@ -455,10 +459,11 @@ func newTransform(deps Deps) (Middleware, error) {
 				Team:          state.Identity.Key.Team,
 				Provider:      state.Decision.Route.IsProvider(),
 				Vendor:        state.Decision.Route.Vendor,
+				SkipQuirks:    state.Decision.Route.SkipQuirks,
 				Changed:       &changes,
 			}, state.Body)
 			if err != nil {
-				deps.Log.Error("request transform failed", "path", r.URL.Path, "err", err)
+				deps.Log.Error("request transform failed", "rid", state.RequestID, "path", r.URL.Path, "err", err)
 				deny(w, r, domain.Deny(http.StatusInternalServerError, "gateway error"))
 				return
 			}
@@ -468,7 +473,7 @@ func newTransform(deps Deps) (Middleware, error) {
 				w.Header().Set("X-Grove-Changed", strings.Join(changes, ", "))
 			}
 			if changed {
-				encoded, err := domain.JSON.Marshal(state.Body)
+				encoded, err := sonic.Marshal(state.Body)
 				if err != nil {
 					deny(w, r, domain.Deny(http.StatusInternalServerError, "gateway error"))
 					return
@@ -663,7 +668,7 @@ func stringField(body transform.Body, name string) string {
 		return ""
 	}
 	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := sonic.Unmarshal(raw, &value); err != nil {
 		return ""
 	}
 	return value

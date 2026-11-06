@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 
+	"github.com/frappe/pathway/internal/service/vendor"
 	"github.com/frappe/pathway/internal/transport/http/middleware"
 	"github.com/frappe/pathway/internal/transport/http/proxy"
 	"github.com/frappe/pathway/internal/transport/respond"
@@ -17,7 +18,7 @@ func (s *Server) proxyHandler() http.Handler {
 		if target == "" {
 			// Nothing picked a route, which means the chain was assembled without one. A config
 			// fault, not a caller's.
-			s.log.Error("no route on an admitted request", "path", r.URL.Path)
+			s.log.Error("no route on an admitted request", "rid", state.RequestID, "path", r.URL.Path)
 			respond.Error(w, http.StatusInternalServerError, "gateway error")
 			return
 		}
@@ -25,10 +26,11 @@ func (s *Server) proxyHandler() http.Handler {
 		// A provider hop leaves our network, which is what decides whether its certificate is
 		// checked — an engine's is one we signed, a vendor's is not. A route that rewrote the
 		// model on the way out gets it swapped back on the way in: the response must speak the id
-		// the client knows the serving model by, not the upstream's own spelling.
+		// the client knows the serving model by, not the upstream's own spelling. The upstream's
+		// type reads what its answer says of the hop and puts right what it writes differently.
 		route := state.Decision.Route
 		state.Attempts++
-		s.proxy.Forward(w, r, target, route.IsProvider(),
+		s.proxy.Forward(w, r, target, route.IsProvider(), vendor.Of(route),
 			proxy.ModelSwap{Upstream: route.UpstreamModel, Client: state.ServingModel()}, &state.Outcome)
 	})
 }

@@ -2,9 +2,10 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/frappe/pathway/internal/domain"
 )
@@ -73,7 +74,7 @@ func (s *streamEnd) closing() []byte {
 		out = append(out, "event: error\ndata: "...)
 		out = append(out, domain.AnthropicError(status, []byte(message))...)
 	} else {
-		event, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error"}})
+		event, _ := sonic.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error"}})
 		out = append(out, "data: "...)
 		out = append(out, event...)
 	}

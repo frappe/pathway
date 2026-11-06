@@ -2,8 +2,9 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
+
+	"github.com/bytedance/sonic"
 )
 
 // ModelSwap names the id the route sent the upstream and the id the client knows the serving model
@@ -42,7 +43,7 @@ type modelSwapReader struct {
 }
 
 func newModelSwapReader(src io.ReadCloser, swap ModelSwap) *modelSwapReader {
-	client, _ := json.Marshal(swap.Client)
+	client, _ := sonic.Marshal(swap.Client)
 	return &modelSwapReader{src: src, client: client[1 : len(client)-1], scratch: make([]byte, 32<<10)}
 }
 

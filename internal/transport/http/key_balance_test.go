@@ -31,11 +31,11 @@ func TestTheCapGate(t *testing.T) {
 		reason string
 	}{
 		{"funded admits", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 999 }, 200, ""},
-		{"exhausted", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 1000 }, 402, "credit balance exhausted"},
-		{"no cap pushed", func(k *domain.KeyRecord) { k.Budget = 0 }, 402, "credit balance exhausted"},
-		{"limited refuses a funded key", func(k *domain.KeyRecord) { k.Limited, k.Budget = true, 1000 }, 402, "credit balance exhausted"},
+		{"exhausted", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1000, 1000 }, 402, "key credits exhausted"},
+		{"no cap pushed", func(k *domain.KeyRecord) { k.Budget = 0 }, 402, "key credits exhausted"},
+		{"limited refuses a funded key", func(k *domain.KeyRecord) { k.Limited, k.Budget = true, 1000 }, 402, "key credits exhausted"},
 		{"the cap says the pushed text", func(k *domain.KeyRecord) { k.Budget, k.Spent, k.CapMessage = 1000, 1000, "trial over, upgrade" }, 402, "trial over, upgrade"},
-		{"limited keeps the default over the text", func(k *domain.KeyRecord) { k.Limited, k.Budget, k.CapMessage = true, 1000, "trial over, upgrade" }, 402, "credit balance exhausted"},
+		{"limited keeps the default over the text", func(k *domain.KeyRecord) { k.Limited, k.Budget, k.CapMessage = true, 1000, "trial over, upgrade" }, 402, "key credits exhausted"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,7 +80,7 @@ func TestTheCapGateSpeaksAnthropic(t *testing.T) {
 		Error struct{ Type, Message string }
 	}
 	_ = json.Unmarshal(resp.Body.Bytes(), &body)
-	if body.Type != "error" || body.Error.Type != "billing_error" || body.Error.Message != "credit balance exhausted" {
+	if body.Type != "error" || body.Error.Type != "billing_error" || body.Error.Message != "key credits exhausted" {
 		t.Errorf("body = %s", resp.Body)
 	}
 }
@@ -154,9 +154,9 @@ func TestAKeysPushCarriesTheCapAndLeavesSpentAlone(t *testing.T) {
 	}
 }
 
-// GET /v1/credits is the key's own balance on this store, in dollars — its cap less what it
+// GET /v1/key/balance is the key's own balance on this store, in dollars — its cap less what it
 // spent, nothing of the team's — overspent or not, since that is when it is asked.
-func TestCreditsAreTheKeysOwn(t *testing.T) {
+func TestTheBalanceIsTheKeysOwn(t *testing.T) {
 	cases := []struct {
 		name      string
 		keyStatus string
@@ -177,7 +177,7 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, jsonEngine(`{}`))
 			f.withKey(func(k *domain.KeyRecord) { tc.edit(k); k.Status = tc.keyStatus })
-			r := httptest.NewRequest(http.MethodGet, "/v1/credits", nil)
+			r := httptest.NewRequest(http.MethodGet, "/v1/key/balance", nil)
 			r.Header.Set("Authorization", "Bearer "+secret)
 			w := httptest.NewRecorder()
 			f.handler.ServeHTTP(w, r)
@@ -186,7 +186,7 @@ func TestCreditsAreTheKeysOwn(t *testing.T) {
 				t.Fatalf("status = %d, body = %s; want %d with %s", w.Code, w.Body, tc.status, tc.want)
 			}
 			if f.seen.path != "" {
-				t.Error("/v1/credits was forwarded to an engine")
+				t.Error("/v1/key/balance was forwarded to an engine")
 			}
 		})
 	}

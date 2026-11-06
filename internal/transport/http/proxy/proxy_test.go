@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/service/vendor"
 	"github.com/frappe/pathway/internal/transport/respond"
 )
 
@@ -32,10 +34,19 @@ func tlsEngine(t *testing.T) *httptest.Server {
 	return server
 }
 
+// forward is a hop to an engine of ours, or to a vendor the table does not name.
 func forward(p *Proxy, target string, external bool) Outcome {
+	if external {
+		return forwardAs(p, target, vendor.Default)
+	}
+	return forwardAs(p, target, vendor.Engine)
+}
+
+// forwardAs is a hop to an upstream of the given type; external when it is not our engine.
+func forwardAs(p *Proxy, target string, upstream vendor.Vendor) Outcome {
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	var out Outcome
-	p.Forward(httptest.NewRecorder(), r, target, external, ModelSwap{}, &out)
+	p.Forward(httptest.NewRecorder(), r, target, upstream != vendor.Engine, upstream, ModelSwap{}, &out)
 	return out
 }
 
@@ -124,7 +135,7 @@ func TestUsageSurvivesAClientHangup(t *testing.T) {
 			}
 		}()
 		New(Options{}, quiet()).Forward(deadClient{httptest.NewRecorder()}, r, server.URL, false,
-			ModelSwap{}, &out)
+			vendor.Engine, ModelSwap{}, &out)
 	}()
 
 	if !strings.Contains(out.Usage, `"total_tokens":9`) {
@@ -174,7 +185,7 @@ func TestTheUpstreamIsNeverAskedToCompress(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	r.Header.Set("Accept-Encoding", "gzip, br")
 	var out Outcome
-	New(Options{}, quiet()).Forward(httptest.NewRecorder(), r, server.URL, false, ModelSwap{}, &out)
+	New(Options{}, quiet()).Forward(httptest.NewRecorder(), r, server.URL, false, vendor.Engine, ModelSwap{}, &out)
 	if out.Status != http.StatusOK || asked != "" {
 		t.Errorf("status %d, upstream saw Accept-Encoding %q", out.Status, asked)
 	}
@@ -231,10 +242,10 @@ func TestAClientThatLeavesBeforeTheAnswerIsNotAFailedHop(t *testing.T) {
 	time.AfterFunc(50*time.Millisecond, leave)
 	recorder := httptest.NewRecorder()
 	var out Outcome
-	New(Options{}, quiet()).Forward(recorder, r, server.URL, false, ModelSwap{}, &out)
+	New(Options{}, quiet()).Forward(recorder, r, server.URL, false, vendor.Engine, ModelSwap{}, &out)
 
-	if out.Cut != domain.CutClientLeft || out.Status != 0 || recorder.Code != statusClientClosed {
-		t.Errorf("cut %q, upstream status %d, answered %d", out.Cut, out.Status, recorder.Code)
+	if out.Cut != domain.CutClientLeft || out.Class != domain.ClassCancelled || out.Status != 0 || recorder.Code != statusClientClosed {
+		t.Errorf("cut %q, class %q, upstream status %d, answered %d", out.Cut, out.Class, out.Status, recorder.Code)
 	}
 	select {
 	case <-told:
@@ -274,6 +285,9 @@ func TestAnUpstreamGoneSilentIsCutAndASlowOneIsNot(t *testing.T) {
 		out := forward(New(Options{ReadTimeout: limit}, quiet()), server.URL, false)
 		if out.Cut != tc.cut || out.Status != http.StatusOK {
 			t.Errorf("%s: cut %q, status %d, want cut %q", name, out.Cut, out.Status, tc.cut)
+		}
+		if want := map[bool]string{true: domain.ClassTimeout, false: ""}[tc.silent]; out.Class != want {
+			t.Errorf("%s: class %q, want %q", name, out.Class, want)
 		}
 		if elapsed := time.Since(start); tc.silent && elapsed > 10*limit {
 			t.Errorf("%s: held for %s past a limit of %s", name, elapsed, limit)
@@ -355,7 +369,7 @@ func forwardOn(p *Proxy, target, dialect string) (Outcome, *httptest.ResponseRec
 	r = r.WithContext(respond.WithDialect(r.Context(), dialect))
 	w := httptest.NewRecorder()
 	var out Outcome
-	p.Forward(w, r, target, false, ModelSwap{}, &out)
+	p.Forward(w, r, target, false, vendor.Engine, ModelSwap{}, &out)
 	return out, w
 }
 
@@ -374,16 +388,16 @@ func TestAHeaderTimeoutIsA504(t *testing.T) {
 	if out.Status != 0 {
 		t.Errorf("outcome status = %d; a hop with no answer must stay 0 to count against the upstream", out.Status)
 	}
-	if out.Reason != "upstream timed out" {
-		t.Errorf("reason = %q; the access log must say why a hop gave no status", out.Reason)
+	if out.Reason != "upstream timed out" || out.Class != domain.ClassTimeout {
+		t.Errorf("reason = %q, class = %q; the access log must say why a hop gave no status", out.Reason, out.Class)
 	}
 
 	// A refused connection is the other way a hop gives no status.
 	dead := httptest.NewServer(http.NotFoundHandler())
 	dead.Close()
 	out, w = forwardOn(New(Options{}, quiet()), dead.URL, domain.DialectOpenAI)
-	if w.Code != http.StatusBadGateway || out.Status != 0 || out.Reason != "upstream unavailable" {
-		t.Errorf("refused: status %d, outcome %d, reason %q", w.Code, out.Status, out.Reason)
+	if w.Code != http.StatusBadGateway || out.Status != 0 || out.Reason != "upstream unavailable" || out.Class != domain.ClassTransient {
+		t.Errorf("refused: status %d, outcome %d, reason %q, class %q", w.Code, out.Status, out.Reason, out.Class)
 	}
 }
 
@@ -492,16 +506,18 @@ func TestAnAbandonedStreamEndsInAnErrorEvent(t *testing.T) {
 	}
 }
 
-// A vendor's request id is read under whichever name that vendor sends it. An engine echoes our
-// own id under those names, which is not a vendor's, so an internal hop keeps none.
+// A vendor's request id is read under whichever name that vendor's type says it sends it. An
+// engine echoes our own id under those names, which is not a vendor's, so an internal hop keeps none.
 func TestTheUpstreamRequestIDIsReadUnderEachVendorsName(t *testing.T) {
-	for _, name := range upstreamRIDHeaders {
+	for name, upstream := range map[string]vendor.Vendor{
+		"X-Request-Id": vendor.Default, "Request-Id": vendor.Default, "X-Baseten-Request-Id": vendor.For("baseten"),
+	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set(name, "theirs")
 			_, _ = io.WriteString(w, `{}`)
 		}))
 		t.Cleanup(server.Close)
-		if out := forward(New(Options{}, quiet()), server.URL, true); out.UpstreamRID != "theirs" {
+		if out := forwardAs(New(Options{}, quiet()), server.URL, upstream); out.UpstreamRID != "theirs" {
 			t.Errorf("%s: upstream rid = %q, want the vendor's", name, out.UpstreamRID)
 		}
 		if out := forward(New(Options{}, quiet()), server.URL, false); out.UpstreamRID != "" {
@@ -510,9 +526,10 @@ func TestTheUpstreamRequestIDIsReadUnderEachVendorsName(t *testing.T) {
 	}
 }
 
-// What a vendor says of the hop in its headers is kept for the access line: its own timing, its
-// own retries, and on a refusal its back-off and the headroom that ran out. Headroom on an answer
-// is not kept, it would say the same thing on every line. An engine has none of this to say.
+// What a vendor says of the hop in its headers is kept for the access line, as its type reads
+// them: its own timing, its own retries, and on a refusal its back-off and the headroom that ran
+// out. Headroom on an answer is not kept, it would say the same thing on every line. An engine
+// has none of this to say.
 func TestAVendorsAccountOfTheHopIsKeptForTheAccessLine(t *testing.T) {
 	status := http.StatusOK
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -528,12 +545,12 @@ func TestAVendorsAccountOfTheHopIsKeptForTheAccessLine(t *testing.T) {
 	t.Cleanup(server.Close)
 	p := New(Options{}, quiet())
 
-	out := forward(p, server.URL, true)
+	out := forwardAs(p, server.URL, vendor.For("baseten"))
 	if out.UpstreamMS != 123 || out.UpstreamAttempts != 2 || out.RetryAfter != "" || out.RemainingRequests != "" || out.RemainingTokens != "" {
 		t.Errorf("on an answer: %+v", out)
 	}
 	status = http.StatusTooManyRequests
-	out = forward(p, server.URL, true)
+	out = forwardAs(p, server.URL, vendor.For("baseten"))
 	if out.UpstreamMS != 123 || out.RetryAfter != "7" || out.RemainingRequests != "0" || out.RemainingTokens != "15000" {
 		t.Errorf("on a refusal: %+v", out)
 	}
@@ -626,11 +643,66 @@ func TestAnEarlyAnswerRacesNothingOnTheHop(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(strings.Repeat("x", 1<<20)))
 	var out Outcome
-	New(Options{}, quiet()).Forward(httptest.NewRecorder(), r, server.URL, false, ModelSwap{}, &out)
+	New(Options{}, quiet()).Forward(httptest.NewRecorder(), r, server.URL, false, vendor.Engine, ModelSwap{}, &out)
 	if out.Hop == nil {
 		t.Fatal("no hop on a served request")
 	}
 	if legs := out.Hop.Legs(); legs.Total <= 0 || legs.First.IsZero() {
 		t.Errorf("legs = %+v, want a served hop", legs)
+	}
+}
+
+// A failed hop's line in the error log carries the request id the route stage stamped on the hop,
+// so one grep joins it to the access line.
+func TestAFailedHopIsLoggedUnderTheRequestID(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	var log strings.Builder
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	r.Header.Set("X-Request-Id", "01999999-0000-7000-8000-000000000001")
+	var out Outcome
+	New(Options{}, slog.New(slog.NewJSONHandler(&log, nil))).Forward(httptest.NewRecorder(), r, dead.URL, false, vendor.Engine, ModelSwap{}, &out)
+	if !strings.Contains(log.String(), `"rid":"01999999-0000-7000-8000-000000000001"`) {
+		t.Errorf("error log line = %s, want the request id on it", log.String())
+	}
+}
+
+// With stream_timeline on the hop keeps when each read arrived and says so on one line: where in the
+// stream a stall was. Off, it keeps nothing.
+func TestAStreamsTimelineIsOneLineWhenAsked(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, pause := range []time.Duration{0, 10 * time.Millisecond, 40 * time.Millisecond} {
+			time.Sleep(pause)
+			_, _ = io.WriteString(w, "data: {}\n\n")
+			w.(http.Flusher).Flush()
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var log strings.Builder
+	timed := New(Options{StreamTimeline: true}, slog.New(slog.NewJSONHandler(&log, nil)))
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	r.Header.Set("X-Request-Id", "rid-1")
+	var out Outcome
+	timed.Forward(httptest.NewRecorder(), r, server.URL, false, vendor.Engine, ModelSwap{}, &out)
+	lines := strings.Split(strings.TrimSpace(log.String()), "\n")
+	var line struct {
+		Msg   string    `json:"msg"`
+		RID   string    `json:"rid"`
+		Cut   string    `json:"cut"`
+		Reads []float64 `json:"reads_ms"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &line); err != nil {
+		t.Fatalf("last line %q: %v", lines[len(lines)-1], err)
+	}
+	chunks := out.Hop.Legs().Chunks
+	if line.Msg != "stream timeline" || line.RID != "rid-1" || line.Cut != "-" || len(line.Reads) != chunks || chunks < 3 ||
+		line.Reads[0] != 0 || !slices.IsSorted(line.Reads) || line.Reads[len(line.Reads)-1] < 40 {
+		t.Errorf("timeline line = %+v with %d chunks, want cut=- with one read at 0 and the last past the 40ms pause", line, chunks)
+	}
+
+	if kept := forward(New(Options{}, quiet()), server.URL, false).Hop.Timeline(); kept != nil {
+		t.Errorf("off, the hop kept a timeline of %d reads, want none", len(kept))
 	}
 }

@@ -1,9 +1,10 @@
 package middleware
 
 import (
-	"encoding/json"
 	"net/http"
 	"slices"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/service/metering"
@@ -16,7 +17,7 @@ func init() {
 }
 
 // fallback runs the stages below it again on the next model the caller named when the one serving
-// cannot (domain.IsModelFailure), or is itself a fallback and refused the request. Below meter, so
+// cannot (domain.MovesModel), or is itself a fallback and refused the request. Below meter, so
 // the request is billed once, on the model that answered; above retry, so a model's whole key ring
 // is walked before the next model is tried. A fallback is the caller's choice, never the
 // gateway's: only the models in the body's `fallbacks`, each granted to them like the first.
@@ -32,11 +33,13 @@ func newFallback(deps Deps) (Middleware, error) {
 				marks := markAttempt(w, r)
 				var winner routing.Decision
 				var model string
-				writer := &attemptWriter{ResponseWriter: w, again: func(status int) bool {
+				writer := &attemptWriter{ResponseWriter: w, again: func(status int, _ string) bool {
 					// The model asked for is moved off only when it could not serve. A fallback is a
-					// stand-in: whatever it refuses with, the next may take.
+					// stand-in: whatever it refuses with, the next may take. The class is the
+					// Outcome's, not this writer's: the proxy set it from the hop and retry
+					// refined it from the body before the status came up to here.
 					refused := state.Fallback != "" && status >= http.StatusBadRequest
-					if r.Context().Err() != nil || !(domain.IsModelFailure(status) || refused) {
+					if r.Context().Err() != nil || !(domain.MovesModel(state.Outcome.Class) || refused) {
 						return false
 					}
 					winner, model = nextFallback(deps, r, state)
@@ -109,7 +112,7 @@ func fallbackModels(body transform.Body) ([]string, error) {
 		return nil, nil
 	}
 	var models []string
-	if json.Unmarshal(raw, &models) != nil || len(models) > domain.MaxFallbacks || slices.Contains(models, "") {
+	if sonic.Unmarshal(raw, &models) != nil || len(models) > domain.MaxFallbacks || slices.Contains(models, "") {
 		return nil, domain.Deny(http.StatusBadRequest,
 			"fallbacks must be a list of at most "+itoa(domain.MaxFallbacks)+" model names")
 	}
@@ -126,9 +129,9 @@ func rewriteBody(r *http.Request, state *State) {
 	}
 	delete(state.Body, "fallbacks")
 	if state.Fallback != "" {
-		state.Body["model"], _ = json.Marshal(state.Fallback)
+		state.Body["model"], _ = sonic.Marshal(state.Fallback)
 	}
-	if encoded, err := domain.JSON.Marshal(state.Body); err == nil {
+	if encoded, err := sonic.Marshal(state.Body); err == nil {
 		restoreBody(r, encoded)
 	}
 }
@@ -137,7 +140,7 @@ func rewriteBody(r *http.Request, state *State) {
 // not idempotent.
 func replayBody(r *http.Request, state *State) {
 	state.Body = nil
-	_ = domain.JSON.Unmarshal(state.Raw, &state.Body)
+	_ = sonic.Unmarshal(state.Raw, &state.Body)
 	restoreBody(r, state.Raw)
 	rewriteBody(r, state)
 }

@@ -43,7 +43,8 @@ Split by **lifetime**, and disjoint — nothing appears in both halves.
   "usage_spool": "/var/lib/pathway/usage-spool.jsonl",
   "usage_spool_max_bytes": 1073741824,
   "maintenance": false,
-  "isolate_caches": false
+  "isolate_caches": false,
+  "stream_timeline": false
 }
 ```
 
@@ -64,6 +65,7 @@ headers, and every wait for more of its body after them. A model that thinks for
 its first token needs it raised; a stream that talks for an hour does not. Running out before the
 headers is a **504** `upstream timed out`; after them, an event stream ends in an error event (see
 [Streaming](../transport/http/proxy/README.md#streaming)) and the access line says `cut=upstream_idle`.
+Either end is `failure_class=timeout` on the line.
 
 `synthetic_session_ttl` is the one worth knowing. `0s` balances every caller that names no session
 of its own; `30m` pins each API key to one engine, which is what a single-placement fleet always
@@ -79,3 +81,9 @@ fails `/healthz`, while requests already running finish. It lives in the file, s
 in maintenance comes back in it. `GET /grove-admin/in-flight` → `{"maintenance", "in_flight"}` is
 how the control plane knows the box has gone idle. An older binary refuses a file carrying this key
 (unknown field), so it is written only once this release is deployed.
+
+`stream_timeline: true` leaves one `stream timeline` line on the process log per upstream hop, with
+when each read of the body arrived (`reads_ms`, offsets from the first body byte) beside `rid`,
+`target` and `cut`: where in a stream a stall was, which `hop.gap_max` on the access line only sizes.
+Off, nothing is kept. A knob rather than a log level because the line is the one per-request record
+that is not fixed-size, and the access line never carries it.

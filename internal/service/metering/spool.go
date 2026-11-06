@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -13,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/frappe/pathway/internal/repository"
 )
@@ -70,7 +71,7 @@ func (s *Spool) Add(a repository.Accrual) {
 		// The replay marker is keyed by it: a blank one would make every such line one request.
 		a.ID = "spool-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
-	line, err := json.Marshal(entry{Accrual: a, At: time.Now().UTC()})
+	line, err := sonic.Marshal(entry{Accrual: a, At: time.Now().UTC()})
 	if err != nil {
 		s.drop(a, err)
 		return
@@ -89,7 +90,7 @@ func (s *Spool) Add(a repository.Accrual) {
 
 func (s *Spool) drop(a repository.Accrual, err error) {
 	s.stats.dropped.Add(1)
-	s.log.Error("usage dropped", "id", a.ID, "prefix", a.Prefix, "err", err)
+	s.log.Error("usage dropped", "rid", a.ID, "prefix", a.Prefix, "err", err)
 }
 
 // Run replays at start and then every interval until ctx ends.
@@ -118,7 +119,7 @@ func (s *Spool) Replay(ctx context.Context) {
 	var keep, dead [][]byte
 	for i, line := range lines {
 		var e entry
-		if err := json.Unmarshal(line, &e); err != nil {
+		if err := sonic.Unmarshal(line, &e); err != nil {
 			dead = append(dead, deadLine("", line, err))
 			continue
 		}
@@ -135,7 +136,7 @@ func (s *Spool) Replay(ctx context.Context) {
 			dead = append(dead, deadLine(e.ID, line, err))
 		default:
 			e.Tries++
-			retry, _ := json.Marshal(e)
+			retry, _ := sonic.Marshal(e)
 			keep = append(keep, retry)
 		}
 	}
@@ -168,7 +169,7 @@ func (s *Spool) Dead() []Dead {
 	out := make([]Dead, 0, len(lines))
 	for _, line := range lines {
 		var d Dead
-		if json.Unmarshal(line, &d) == nil {
+		if sonic.Unmarshal(line, &d) == nil {
 			out = append(out, d)
 		}
 	}
@@ -194,7 +195,7 @@ func (s *Spool) Forget(ids []string) (int, error) {
 	var keep [][]byte
 	for _, line := range lines {
 		var d Dead
-		if json.Unmarshal(line, &d) == nil && gone[d.ID] {
+		if sonic.Unmarshal(line, &d) == nil && gone[d.ID] {
 			continue
 		}
 		keep = append(keep, line)
@@ -214,7 +215,7 @@ func (s *Spool) Stats() Stats {
 }
 
 func deadLine(id string, line []byte, err error) []byte {
-	out, _ := json.Marshal(Dead{ID: id, Line: string(line), Error: err.Error()})
+	out, _ := sonic.Marshal(Dead{ID: id, Line: string(line), Error: err.Error()})
 	return out
 }
 

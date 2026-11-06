@@ -27,7 +27,7 @@ never registered, so no handler on that box could read a key store even if one w
 5. Proxies it, streaming the response through untouched, and reads the usage frame out on the way.
 6. Records the hop's outcome on every request, and the tokens on every one the upstream took — a
    2xx that was then abandoned or cut short included; a refusal, a 5xx or no answer is not a request.
-7. Answers each base's `/v1/models` and the root `/v1/credits` itself.
+7. Answers each base's `/v1/models` and the root `/v1/key/balance` itself.
 8. Upgrades its own binary and reloads its own configuration without dropping a connection.
 
 Requirements: Go 1.24.1 or later to build (sonic/loader does not link on 1.24.0), Redis (loopback, or the Network's shared store), a certificate on disk, and an admin token. It refuses to start
@@ -256,7 +256,7 @@ It is not architecture for its own sake — it bought three specific things:
 |---|---|---|
 | Which engine gets this request? | `domain/route.go` — `PickRoute` | [service/routing](internal/service/routing/README.md) |
 | Engine vs vendor routing | `service/routing/engine.go`, `service/routing/vendor.go`; their auth and key ring in `transport/http/middleware/engine.go`, `vendor.go` | [service/routing](internal/service/routing/README.md) |
-| What a vendor reads differently | `service/vendor/vendor.go` — `known`, one `Vendor` per third party: its `Headers` and `Quirks` | [service/vendor](internal/service/vendor/README.md), [vendor_quirks.md](internal/service/vendor/vendor_quirks.md) |
+| What a vendor reads differently | `service/vendor/` — one type per upstream, in the file of its name (`openai.go`, `deepseek.go`, `baseten.go`, `anthropic.go`, `engine.go`), behind the `Vendor` interface in `vendor.go`: its `Headers`, one method per rewrite, `CacheKey`, `Answered`, `Peeks`, `Classify`, `Relay` | [service/vendor](internal/service/vendor/README.md), [vendor_quirks.md](internal/service/vendor/vendor_quirks.md) |
 | Body rewrites on the way to an upstream | `service/transform/` | [service/transform](internal/service/transform/README.md) |
 | May this caller use this model? | `domain/access.go` — `CanUse`, `Evaluate` | [service/admission](internal/service/admission/README.md) |
 | How many tokens did that cost? | `domain/usage.go` — `ParseUsage` | [service/metering](internal/service/metering/README.md) |

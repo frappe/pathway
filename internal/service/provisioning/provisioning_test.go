@@ -2,8 +2,10 @@ package provisioning
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,4 +139,55 @@ func keysOf(store *memory.Store) []string {
 		out = append(out, model)
 	}
 	return out
+}
+
+// A vendor row naming a vendor the gateway has not met is refused before any of the push lands,
+// naming the model: its quirks were never checked. Engine rows name none and are taken.
+func TestAPushNamingAnUnknownVendorIsRefused(t *testing.T) {
+	store := memory.New()
+	row := func(name string) []domain.Route {
+		return []domain.Route{{EngineURL: "https://api.example.com", Healthy: true,
+			Kind: "provider", Vendor: name, Dialect: "openai"}}
+	}
+	service := New(store.Repositories(), quiet())
+
+	_, _, err := service.ReplaceRoutes(context.Background(),
+		map[string][]domain.Route{"morph/chat": row("morph"), "nobody/chat": row("nobody"), "blank/chat": row("")}, false)
+	var denial domain.Denial
+	if !errors.As(err, &denial) || denial.Status != 400 || !strings.Contains(denial.Reason, "blank/chat") {
+		t.Fatalf("err = %v, want a 400 naming the first unknown model", err)
+	}
+	if len(store.Routes) != 0 {
+		t.Errorf("a refused push landed: %v", store.Routes)
+	}
+
+	if _, _, err := service.ReplaceRoutes(context.Background(), map[string][]domain.Route{"morph/chat": row("morph")}, false); err != nil {
+		t.Fatalf("a known vendor was refused: %v", err)
+	}
+}
+
+// A row that switches off a quirk the gateway does not know is refused before any of the push
+// lands, naming the model, so a misspelt name cannot silently leave the rewrite on. A known one
+// is taken.
+func TestAPushNamingAnUnknownQuirkIsRefused(t *testing.T) {
+	store := memory.New()
+	row := func(quirks ...string) []domain.Route {
+		return []domain.Route{{EngineURL: "https://api.openai.com", Healthy: true,
+			Kind: "provider", Vendor: "openai", Dialect: "openai", SkipQuirks: quirks}}
+	}
+	service := New(store.Repositories(), quiet())
+
+	_, _, err := service.ReplaceRoutes(context.Background(),
+		map[string][]domain.Route{"openai/chat": row("default_sampling"), "openai/bad": row("DefaultSampling")}, false)
+	var denial domain.Denial
+	if !errors.As(err, &denial) || denial.Status != 400 || !strings.Contains(denial.Reason, "openai/bad") {
+		t.Fatalf("err = %v, want a 400 naming the model", err)
+	}
+	if len(store.Routes) != 0 {
+		t.Errorf("a refused push landed: %v", store.Routes)
+	}
+
+	if _, _, err := service.ReplaceRoutes(context.Background(), map[string][]domain.Route{"openai/chat": row("default_sampling")}, false); err != nil {
+		t.Fatalf("a known quirk was refused: %v", err)
+	}
 }

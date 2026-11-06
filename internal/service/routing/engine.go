@@ -32,7 +32,7 @@ func (s *Service) pickEngine(ctx context.Context, req Request, table []domain.Ro
 	if session != "" {
 		if err := s.sessions.Pin(ctx, session, route.EngineURL, ttl); err != nil {
 			// A lost pin costs one cold prefix cache, not a wrong answer.
-			s.log.Warn("session pin failed", "session", session, "err", err)
+			s.log.Warn("session pin failed", "rid", req.RequestID, "session", session, "err", err)
 		}
 	}
 
@@ -49,7 +49,7 @@ func (s *Service) pickEngine(ctx context.Context, req Request, table []domain.Ro
 	if err := s.inFlight.Claim(ctx, route.EngineURL, decision.RequestID); err != nil {
 		// Undercounting an engine biases it toward more traffic; refusing the request over a
 		// counter would be worse.
-		s.log.Warn("in-flight claim failed", "engine", route.EngineURL, "err", err)
+		s.log.Warn("in-flight claim failed", "rid", decision.RequestID, "engine", route.EngineURL, "err", err)
 	}
 	s.log.Debug("route picked",
 		"model", req.Model, "engine", route.EngineURL, "deployment", route.Deployment,
@@ -112,11 +112,11 @@ func (s *Service) PickReplica(ctx context.Context, model, sessionKey, requestID 
 	}
 	if sessionKey != "" {
 		if err := s.sessions.Pin(ctx, sessionKey, route.EngineURL, StickyTTL); err != nil {
-			s.log.Warn("replica pin failed", "err", err)
+			s.log.Warn("replica pin failed", "rid", requestID, "err", err)
 		}
 	}
 	if err := s.inFlight.Claim(ctx, route.EngineURL, requestID); err != nil {
-		s.log.Warn("in-flight claim failed", "engine", route.EngineURL, "err", err)
+		s.log.Warn("in-flight claim failed", "rid", requestID, "engine", route.EngineURL, "err", err)
 	}
 	return route, nil
 }

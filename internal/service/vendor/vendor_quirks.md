@@ -5,12 +5,18 @@ Where the request can be rewritten without changing what the caller asked for, t
 it for that vendor only. This file is each such rewrite, with what the caller sent and what the
 vendor gets.
 
-- What the gateway knows of each vendor is one value per vendor, `known` in
-  [`vendor.go`](vendor.go), keyed by the vendor's
-  name: its `Quirks`, one flag per field rewrite, and its `Headers`, where the credential goes.
-- The code is the `vendorfields` and `streamusage` transforms in `internal/service/transform/`,
-  which read the flags, and `vendorAuth` in `internal/transport/http/middleware/vendor.go`, which
-  sets the headers.
+- What the gateway knows of each vendor is one type per vendor, in the file of its name beside
+  [`vendor.go`](vendor.go), registered in `known` under the vendor's name. The `Vendor` interface
+  there lists everything a vendor may differ in, one method per rewrite; `base` is each as the
+  shape says, and a vendor's type overrides only what it does differently.
+- A vendor's type says what the vendor does; which of its models does otherwise is the control
+  plane's to say, on the route row: `skip_quirks` names a rewrite by its method in snake case
+  (`default_sampling`) and that model is not given it. Each vendor's type names the quirks it
+  has (`Quirks`), which is what there is to switch off for its models; `vendor.QuirkNames()` is
+  every name, and a push naming another is refused.
+- The rewrites are run by the `vendorfields` and `streamusage` transforms in
+  `internal/service/transform/`, in the order `vendor.RewriteChat` and `vendor.RewriteMessages`
+  fix, and the headers set by `vendorAuth` in `internal/transport/http/middleware/vendor.go`.
 - Every quirk here was measured through a gateway on the date given. What was seen and is *not*
   rewritten is in [README.md](README.md), "What each upstream was seen to do".
 - A rewrite runs per attempt on the caller's own body, so a request that falls back to another
@@ -18,18 +24,18 @@ vendor gets.
 - A rewritten list (`tools`, `messages`) has its objects' keys in alphabetical order. Nothing inside
   them is touched.
 
-| Quirk | Vendor | Flag | Shape |
+| Quirk | Vendor | Method | Shape |
 |---|---|---|---|
-| [The output cap's name](#1-the-output-caps-name) | OpenAI, and every other vendor the other way | `OutputCap` | OpenAI |
+| [The output cap's name](#1-the-output-caps-name) | OpenAI, and every other vendor the other way | `NameOutputCap` | OpenAI |
 | [Usage on every chunk](#2-usage-on-every-chunk-of-a-stream) | OpenAI refuses the option | `UsagePerChunk` | OpenAI |
-| [A tool typed `custom`](#3-a-tool-typed-custom) | DeepSeek | `UntypedTools` | Anthropic |
+| [A tool typed `custom`](#3-a-tool-typed-custom) | DeepSeek | `UntypeCustomTools` | Anthropic |
 | [A `developer` message](#4-a-developer-message) | DeepSeek | `DeveloperAsSystem` | OpenAI |
-| [A past tool call with no reasoning](#5-a-past-tool-call-with-no-reasoning) | DeepSeek | `BlankReasoning` | both |
-| [A forced tool while thinking](#6-a-forced-tool-while-thinking) | DeepSeek | `UnthinkForcedTool` | both |
-| [An Anthropic front that reads a Bearer](#7-an-anthropic-front-that-reads-a-bearer) | Baseten | none: Baseten's own `Headers` | Anthropic |
+| [A past tool call with no reasoning](#5-a-past-tool-call-with-no-reasoning) | DeepSeek | `BlankReasoningContent`, `BlankThinkingBlock` | both |
+| [A forced tool while thinking](#6-a-forced-tool-while-thinking) | DeepSeek | `UnthinkForcedFunction`, `UnthinkForcedTool` | both |
+| [An Anthropic front that reads a Bearer](#7-an-anthropic-front-that-reads-a-bearer) | Baseten | `Headers` | Anthropic |
 | [A function tool while the model reasons](#8-a-function-tool-while-the-model-reasons) | OpenAI | `UnreasonWithTools` | OpenAI |
 | [A temperature while the model reasons](#9-a-temperature-while-the-model-reasons) | OpenAI | `DefaultSampling` | OpenAI |
-| [Fast mode](#10-fast-mode) | every vendor | none: ours | Anthropic |
+| [Fast mode](#10-fast-mode) | every vendor | none: ours, in `vendorfields` | Anthropic |
 
 Four of these change what the model does: 6, 8, 9 and 10. The caller is told of each on the
 answer, in the `X-Grove-Changed` header. 6 and 8 are not applied when the caller said what they
@@ -313,8 +319,8 @@ It reads the key as `Authorization: Bearer`, the header its OpenAI front takes. 
 as if the caller's key were wrong; it is the vendor's key in a header it does not read. Measured
 2026-10-05, at Baseten directly and through a gateway.
 
-**The rewrite.** A header, not a field: the vendor's key goes out as a Bearer. `anthropic-version`
-is sent as for any Anthropic front.
+**The rewrite.** A header, not a field: the vendor's key goes out as a Bearer, and nothing else —
+Baseten asks no version header; a Model Provider's Extra Headers row would add one.
 
 The caller sends, on `/anthropic/v1/messages`:
 
@@ -327,10 +333,10 @@ Baseten gets:
 
 ```
 Authorization: Bearer <Baseten's key>
-anthropic-version: 2023-06-01
 ```
 
-DeepSeek and Anthropic get `x-api-key: <the vendor's key>`.
+DeepSeek gets `x-api-key: <the vendor's key>`; Anthropic the same plus `anthropic-version: 2023-06-01`,
+the one header its own front requires, from its type.
 
 ---
 
@@ -401,10 +407,9 @@ or `top_p` of 1 is taken. With `reasoning_effort: "none"` every one of them is t
 send a temperature on every request, so they cannot use these models at all. Measured 2026-10-06.
 
 **The rewrite.** Unless reasoning is off, `temperature`, `top_p`, `logprobs` and `top_logprobs` are
-dropped (a `temperature` or `top_p` of 1 is left). It is what Bifrost does. Unlike 6 and 8, this
-overrides something the caller asked for: the other way to make the request work would be to
-switch the reasoning off, and the reasoning is what these models are for. The answer names each
-field that was dropped:
+dropped (a `temperature` or `top_p` of 1 is left). Unlike 6 and 8, this overrides something the
+caller asked for: the other way to make the request work would be to switch the reasoning off, and
+the reasoning is what these models are for. The answer names each field that was dropped:
 
 ```
 X-Grove-Changed: temperature=default, top_p=default
@@ -442,9 +447,14 @@ per-model switch before it is routed.
 1. Measure it through a gateway: the vendor's status and words, and the request that is taken
    instead. A rewrite goes in only if that request means what the caller's did.
 2. Add a row to README.md's "What each upstream was seen to do", with the date.
-3. A field: add a flag to `Quirks` in `vendor.go`, written out on every entry of `known`, and the
-   rewrite beside the others in `vendorfields.go` with a test. A header: a type of that vendor's
-   own in `vendor.go` with its `Headers`, as Baseten has.
+3. A rewrite one of the methods already names: override it on that vendor's type, in its file,
+   and name it in the type's `Quirks`. A new one: add the method to `Vendor` in `vendor.go`, a
+   no-op on `base`, a named slot in `chat` or `messages` there, and the override on the vendor,
+   with a test in `vendorfields_test.go` (`TestEachUpstreamDeclaresTheQuirksItHas` wants the
+   least body it acts on). A header: override `Headers`, as Baseten does. A rewrite that is ours
+   rather than a vendor's refusal (fast mode, the cache partition's `CacheKey`) is a method with no
+   slot and no name: a row cannot switch it off. A new vendor: a file of its name with a type
+   embedding `base`, and a row in `known`.
 4. Add a section here: what the vendor does, the rewrite, what is sent and what the vendor gets.
 
 ## 10. Fast mode
@@ -454,8 +464,8 @@ per-model switch before it is routed.
 that tier, so a caller who sends it would be billed the standard rate for the fast one.
 
 **The rewrite.** `speed` is removed on the Anthropic shape for every vendor: the request runs at the
-standard speed. Not a vendor's quirk but our own refusal to pay for it, so there is no flag in
-`Quirks`. OpenAI's tier is `service_tier`, which the `servicetier` transform drops on every
+standard speed. Not a vendor's quirk but our own refusal to pay for it, so no vendor type has a
+say: it is `vendorfields`' own. OpenAI's tier is `service_tier`, which the `servicetier` transform drops on every
 hop. The answer says so:
 
 ```

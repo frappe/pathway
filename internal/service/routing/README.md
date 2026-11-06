@@ -93,8 +93,9 @@ A fallback is tried, in list order, when:
 
 - `route` finds nowhere for the model to go — no healthy server (503) or every one full (429) —
   before anything is dialled; or
-- the upstream answers 5xx, or with a key failure (429, 401/402/403) after `retry` has walked every
-  key the model has; or
+- the upstream's answer says the model cannot serve here (`domain.MovesModel`: a 5xx, a timeout, a
+  retired model, or a key failure `retry` could not rotate away after walking every key the model
+  has); or
 - the model serving is itself a fallback and refuses the request, with any status from 400 up. A
   stand-in that will not take the request as written costs one dial, not the request: models on one
   shape still differ in what they accept.
