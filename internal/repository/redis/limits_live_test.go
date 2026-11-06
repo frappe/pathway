@@ -20,19 +20,20 @@ func TestLimitsAgainstRealRedis(t *testing.T) {
 	at := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	requests := domain.Limit{Metric: domain.LimitRequests, Window: "1m", Value: 2}
 	tokens := domain.Limit{Metric: domain.LimitTokens, Window: "1h", Value: 200}
-	both := []domain.Limit{requests, tokens}
+	team := domain.Holder{Kind: domain.HolderTeam, ID: "T-1", Model: "m", Limits: []domain.Limit{requests, tokens}}
+	both := []domain.Holder{team}
 
 	for i := 0; i < 2; i++ {
-		if exceeded, err := limits.Admit(ctx, "GU-1", both, at); err != nil || len(exceeded) != 0 {
+		if exceeded, err := limits.Admit(ctx, both, at); err != nil || len(exceeded) != 0 {
 			t.Fatalf("admit %d = %+v, %v", i+1, exceeded, err)
 		}
 	}
-	exceeded, err := limits.Admit(ctx, "GU-1", both, at)
-	if err != nil || len(exceeded) != 1 || exceeded[0] != requests {
+	exceeded, err := limits.Admit(ctx, both, at)
+	if err != nil || len(exceeded) != 1 || exceeded[0].Limit != requests {
 		t.Fatalf("third = %+v, %v; want the request limit", exceeded, err)
 	}
 	label, _, _ := requests.Bucket(at)
-	key := limitKey("GU-1", requests, label)
+	key := limitKey(team, requests, label)
 	if n, _ := client.rdb.Get(ctx, key).Int(); n != 2 {
 		t.Errorf("%s = %d, want 2: a refusal counts nothing", key, n)
 	}
@@ -40,11 +41,11 @@ func TestLimitsAgainstRealRedis(t *testing.T) {
 		t.Errorf("request counter ttl = %s, want two windows", ttl)
 	}
 
-	if err := limits.Debit(ctx, "GU-1", []domain.Limit{tokens}, 240, at); err != nil {
+	if err := limits.Debit(ctx, both, 240, at); err != nil {
 		t.Fatalf("Debit: %v", err)
 	}
 	label, _, _ = tokens.Bucket(at)
-	key = limitKey("GU-1", tokens, label)
+	key = limitKey(team, tokens, label)
 	if n, _ := client.rdb.Get(ctx, key).Int(); n != 240 {
 		t.Errorf("%s = %d, want 240", key, n)
 	}
@@ -52,8 +53,8 @@ func TestLimitsAgainstRealRedis(t *testing.T) {
 		t.Errorf("token counter ttl = %s, want two windows", ttl)
 	}
 	// The next minute has room for requests again, but the hour's tokens are spent.
-	exceeded, err = limits.Admit(ctx, "GU-1", both, at.Add(time.Minute))
-	if err != nil || len(exceeded) != 1 || exceeded[0] != tokens {
+	exceeded, err = limits.Admit(ctx, both, at.Add(time.Minute))
+	if err != nil || len(exceeded) != 1 || exceeded[0].Limit != tokens {
 		t.Fatalf("next minute = %+v, %v; want the token limit", exceeded, err)
 	}
 }

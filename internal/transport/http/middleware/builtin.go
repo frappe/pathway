@@ -207,8 +207,8 @@ func newAuth(deps Deps) (Middleware, error) {
 }
 
 // quota honours the geography pin, the credit flag the control plane pushed, and the cap this
-// box counts against — all read off the key record, before the body is. The rate limits come
-// last: a key refused above must not use up a request.
+// box counts against — all read off the key record, before the body is. The rate limits are per
+// model, so they wait for the body: modelaccess counts them.
 func newQuota(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -218,10 +218,6 @@ func newQuota(deps Deps) (Middleware, error) {
 				return
 			}
 			if err := domain.ExhaustedDenial(identity.Key); err != nil {
-				deny(w, r, err)
-				return
-			}
-			if err := deps.Admission.Admit(r.Context(), identity); err != nil {
 				deny(w, r, err)
 				return
 			}
@@ -339,12 +335,18 @@ func serveNamed(next http.Handler, w http.ResponseWriter, r *http.Request, state
 	next.ServeHTTP(w, r)
 }
 
-// modelaccess is the grant check: the same decision /v1/models filters its list with.
+// modelaccess is the grant check — the same decision /v1/models filters its list with — and then
+// the rate limits, which are per model and so could not run before the body: a request refused
+// the model does not use up a slot, and a fallback below is not counted again.
 func newModelAccess(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state := From(r)
 			if err := deps.Admission.Authorize(state.Identity, state.Model); err != nil {
+				deny(w, r, err)
+				return
+			}
+			if err := deps.Admission.Admit(r.Context(), state.Identity, state.Model); err != nil {
 				deny(w, r, err)
 				return
 			}
@@ -421,7 +423,7 @@ func newMeter(deps Deps) (Middleware, error) {
 					UsageStart:     state.Outcome.UsageStart,
 					Pricing:        state.Decision.Route.Pricing,
 					Budget:         state.Identity.Key.Budget,
-					Limits:         state.Identity.Key.Limits,
+					Holders:        domain.Holders(state.Identity.Key, state.Model),
 					Target:         state.Decision.HealthTarget(),
 					UpstreamStatus: statusText(state.Outcome.Status),
 					Reason:         state.Outcome.Reason,

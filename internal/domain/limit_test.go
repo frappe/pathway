@@ -7,21 +7,66 @@ import (
 )
 
 func TestParseLimits(t *testing.T) {
-	limits, err := ParseLimits("requests:1m:200, total_tokens:1M:50000")
-	want := []Limit{{"requests", "1m", 200}, {"total_tokens", "1M", 50000}}
-	if err != nil || len(limits) != 2 || limits[0] != want[0] || limits[1] != want[1] {
+	limits, err := ParseLimits("requests:1m:200, total_tokens:1M:50000, requests:1m:10:openai/gpt-6-luna")
+	want := []Limit{{"requests", "1m", 200, ""}, {"total_tokens", "1M", 50000, ""}, {"requests", "1m", 10, "openai/gpt-6-luna"}}
+	if err != nil || len(limits) != 3 || limits[0] != want[0] || limits[1] != want[1] || limits[2] != want[2] {
 		t.Fatalf("limits = %+v, err = %v", limits, err)
+	}
+	// The model is the last part, so one holding a colon still reads whole.
+	if limits, err := ParseLimits("requests:1m:1:ns:model"); err != nil || limits[0].Model != "ns:model" {
+		t.Errorf("colon in the model = %+v, %v", limits, err)
 	}
 	if limits, err := ParseLimits(""); err != nil || limits != nil {
 		t.Errorf("blank = %+v, %v; want none", limits, err)
 	}
 	for _, bad := range []string{
 		"requests:1m", "requests:1m:0", "requests:1m:x", "requests:5m:10",
-		"input_tokens:1m:10", "requests:1m:10:extra",
+		"input_tokens:1m:10", "requests:1m:10:",
 	} {
 		if _, err := ParseLimits(bad); err == nil {
 			t.Errorf("ParseLimits(%q) read; want an error", bad)
 		}
+	}
+}
+
+// A row naming the model stands in for the blank one on its metric and window; the other metric
+// keeps the blank row; a model no row reaches has no limit at all.
+func TestLimitsForPrefersTheRowNamingTheModel(t *testing.T) {
+	rows := []Limit{
+		{LimitRequests, "1m", 60, ""}, {LimitTokens, "1m", 300000, ""},
+		{LimitRequests, "1m", 10, "luna"}, {LimitRequests, "1h", 5, "sol"},
+	}
+	if luna := LimitsFor(rows, "luna"); len(luna) != 2 || luna[0] != rows[2] || luna[1] != rows[1] {
+		t.Errorf("luna = %+v", luna)
+	}
+	if sol := LimitsFor(rows, "sol"); len(sol) != 3 || sol[0] != rows[3] || sol[1] != rows[0] || sol[2] != rows[1] {
+		t.Errorf("sol = %+v, want its hour row and both blank rows", sol)
+	}
+	if other := LimitsFor(rows, "other"); len(other) != 2 || other[0] != rows[0] {
+		t.Errorf("other = %+v, want the blank rows", other)
+	}
+	if none := LimitsFor(rows[2:3], "other"); none != nil {
+		t.Errorf("a model no row names = %+v, want none", none)
+	}
+}
+
+// The team's rows and the key's own are two holders, and one that names nothing for the model is
+// not counted at all.
+func TestHoldersSkipsWhatNamesNothing(t *testing.T) {
+	key := KeyRecord{
+		Team: "T-1", KeyPrefix: "abc",
+		Limits:    []Limit{{LimitRequests, "1m", 60, ""}},
+		KeyLimits: []Limit{{LimitRequests, "1m", 5, "luna"}},
+	}
+	luna := Holders(key, "luna")
+	if len(luna) != 2 || luna[0].Counter() != "team:T-1:luna" || luna[1].Counter() != "key:abc:luna" || luna[1].Limits[0].Value != 5 {
+		t.Errorf("luna = %+v", luna)
+	}
+	if other := Holders(key, "other"); len(other) != 1 || other[0].Kind != HolderTeam {
+		t.Errorf("other = %+v, want the team alone", other)
+	}
+	if none := Holders(KeyRecord{Team: "T-1"}, "luna"); none != nil {
+		t.Errorf("no rows = %+v, want none", none)
 	}
 }
 
@@ -64,10 +109,11 @@ func TestAMonthResetsOnTheFirst(t *testing.T) {
 // Waiting out the minute would only meet the hour's limit, so the hour is the one named.
 func TestLimitDenialNamesTheLimitThatResetsLast(t *testing.T) {
 	at := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
-	denial := LimitDenial([]Limit{
-		{LimitRequests, "1m", 200}, {LimitTokens, "1h", 50000},
+	denial := LimitDenial([]Over{
+		{Holder{Kind: HolderTeam, ID: "T-1", Model: "luna"}, Limit{LimitRequests, "1m", 200, ""}},
+		{Holder{Kind: HolderKey, ID: "abc", Model: "luna"}, Limit{LimitTokens, "1h", 50000, ""}},
 	}, at)
-	if denial.Status != 429 || denial.Reason != "rate limit exceeded: 50000 tokens per 1h" || denial.RetryAfter != 3570 {
+	if denial.Status != 429 || denial.Reason != "rate limit exceeded: 50000 tokens per 1h on luna (key)" || denial.RetryAfter != 3570 {
 		t.Errorf("denial = %+v", denial)
 	}
 }

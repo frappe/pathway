@@ -44,20 +44,33 @@ refused it.
 
 ## Rate limiting
 
-Per key, pushed on its record as `limits`: a comma list of `<metric>:<window>:<value>`,
-e.g. `requests:1m:200,total_tokens:1h:50000`. No entry = uncapped. Checked in `quota`, after the
-credit gates, so a key with no balance does not use up a request.
+Per team and model, with the key's own rows as a second gate beneath. Two lists ride the key
+record, each a comma list of `<metric>:<window>:<value>[:<model>]`, e.g.
+`requests:1m:200,total_tokens:1h:50000,requests:1m:10:openai/gpt-6-luna`:
+
+- `limits` — the team's (its tier's rows, the same on every key of the team), counted under
+  `team:<team>`, so however many keys the team holds they draw on one window per model.
+- `key_limits` — this key's own, counted under `key:<prefix>`. Whichever of the two is lower
+  refuses first; nothing checks one against the other.
+
+A row naming a model holds on that model alone; a row naming none is the default on every model.
+For the model asked for, each list resolves on its own (`domain.LimitsFor`): the rows naming it,
+and on every metric and window none of those covers, the blank rows. No row reaching the model =
+no gate from that list. No entry at all = uncapped. Checked in `modelaccess`, after the credit
+gates and the grant: a key with no balance or no grant does not use up a slot, and the limits
+are per model, so they cannot run before the body names one. A fallback picked below is not
+counted again — one request, counted on the model asked for.
 
 | | |
 |---|---|
 | Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |
-| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the key's first request |
-| Counter | `lim:<key prefix>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
-| Refusal | 429 `rate limit exceeded: 200 requests per 1m` (`rate_limit_error`), `Retry-After` = seconds to the window's end. Over several limits at once, the one that resets last is named |
+| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the holder's first request |
+| Counter | `lim:<team\|key>:<id>:<model>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
+| Refusal | 429 `rate limit exceeded: 200 requests per 1m on openai/gpt-6-luna (team)` (`rate_limit_error`), `Retry-After` = seconds to the window's end. Over several limits at once, the one that resets last is named, with whose it is |
 
-**Requests are exact, tokens are check-then-debit.** One Lua script reads every counter and, only
-when all have room, counts the request — so a refusal counts nothing and two requests cannot both
-take the last slot. Tokens are unknown until the answer: `meter` adds them to the window the answer
+**Requests are exact, tokens are check-then-debit.** One Lua script reads every counter of both
+holders and, only when all have room, counts the request — so a refusal counts nothing, on either,
+and two requests cannot both take the last slot. Tokens are unknown until the answer: `meter` adds them to the window the answer
 ended in. The request that crosses a token limit completes; the overshoot is the requests in flight
 times their size. A request with no token usage (audio seconds) moves only the request limits.
 

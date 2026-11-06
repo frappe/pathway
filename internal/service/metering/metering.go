@@ -31,8 +31,9 @@ type Report struct {
 	// is reported against.
 	Pricing *domain.Pricing
 	Budget  int64
-	// Limits is the key's rate limits: the answer's tokens are debited from the token ones.
-	Limits []domain.Limit
+	// Holders is whose limits the request was admitted under — the team's and the key's own, for
+	// the model asked for: the answer's tokens are debited from their token limits.
+	Holders []domain.Holder
 	// How the hop went: the upstream's status, which decides whether the request is accounted at
 	// all (domain.IsServed) and, with the X-Grove-Reason an ingress sets when it is healthy but has
 	// no replica for this model, how the target is scored for passive ejection.
@@ -59,14 +60,20 @@ func New(usage repository.Usage, limits repository.Limits, health repository.Hea
 	return &Service{usage: usage, limits: limits, health: health, log: log, Now: time.Now}
 }
 
-// debit charges the answer's tokens to the key's token limits, in the window the answer ended
-// in. Never spooled: replayed later, it would land in a window the tokens were not used in.
+// debit charges the answer's tokens to the token limits the request ran under, in the window the
+// answer ended in. Never spooled: replayed later, it would land in a window the tokens were not
+// used in.
 func (s *Service) debit(ctx context.Context, rep Report, tokens int64) {
-	limits := domain.LimitsOn(rep.Limits, domain.LimitTokens)
-	if tokens == 0 || len(limits) == 0 {
+	var holders []domain.Holder
+	for _, holder := range rep.Holders {
+		if len(domain.LimitsOn(holder.Limits, domain.LimitTokens)) > 0 {
+			holders = append(holders, holder)
+		}
+	}
+	if tokens == 0 || len(holders) == 0 {
 		return
 	}
-	if err := s.limits.Debit(ctx, rep.Prefix, limits, tokens, s.Now()); err != nil {
+	if err := s.limits.Debit(ctx, holders, tokens, s.Now()); err != nil {
 		s.log.Error("token limits not debited", "key", rep.Prefix, "tokens", tokens, "err", err)
 	}
 }
