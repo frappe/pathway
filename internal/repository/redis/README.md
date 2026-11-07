@@ -102,7 +102,8 @@ that carries one is refused like any unknown field.
 a request costs 0.
 
 A `kind: "provider"` row dials a third-party vendor instead of anything we run, and carries its
-own fields. A model's rows are all provider rows or none; a mixed push is a 400:
+own fields. A model's rows are all provider rows or none; a mixed push is a 400, and so is one whose
+`vendor` the gateway has not met (`vendor.Names()`), before any of it lands:
 
 ```json
 [{
@@ -115,11 +116,23 @@ own fields. A model's rows are all provider rows or none; a mixed push is a 400:
   "vendor":         "anthropic",
   "kind":           "provider",
   "upstream_model": "claude-sonnet-4-5-20250929",
-  "api_version":    "2023-06-01",
+  "headers":        {"anthropic-beta": "interleaved-thinking-2025-05-14"},
   "dialect":        "anthropic",
-  "denied_tools":   ["web_search_20250305", "web_search_20260209", "code_execution_20260521"]
+  "denied_tools":   ["web_search_20250305", "web_search_20260209", "code_execution_20260521"],
+  "skip_quirks":    []
 }]
 ```
+
+`skip_quirks` names the rewrites of the vendor's type (`internal/service/vendor/`, one type per
+vendor) this model is not given: the type says what the vendor does, the row says which of its
+models does otherwise — an OpenAI model that does not reason keeps its `temperature`
+(`default_sampling`) and its tools need no `reasoning_effort: "none"` (`unreason_with_tools`).
+A name is the method's in snake case; `vendor.QuirkNames()` is every name, each vendor type's
+`Quirks()` the ones that vendor has (the rest change nothing for its models, so there is nothing
+to switch off), and a push naming one the gateway does not know is a 400 before any of it lands,
+like a mixed push. Empty, or absent on a
+row pushed before the field existed, gives every rewrite. It works on a row we run too
+(`usage_per_chunk`).
 
 `denied_tools` is what the vendor would run on its own side and bill outside the token counts,
 which nothing here meters: a `tools[].type` or a top-level request field, as the control plane's
@@ -137,8 +150,9 @@ id. A realtime upgrade carries its model in the query string and has no body for
 rewrite, so the same substitution is applied to `?model=` in the transform stage. Access, routing, metering and `/v1/models` all key on the id the caller sent, so the rewrite
 cannot desync a grant from a route. On a provider hop the client's `Authorization` is deleted
 rather than replaced, the vendor's own key goes in the header its `dialect` expects (`x-api-key`
-plus `anthropic-version` for an Anthropic front, a Bearer for an OpenAI-compatible one and for an
-Anthropic front whose `vendor.Headers` says it reads one), and the
+for an Anthropic-shaped front, plus `anthropic-version` on Anthropic's own; a Bearer for an
+OpenAI-compatible one and for an Anthropic front whose `vendor.Headers` says it reads one), the
+row's own `headers` go on first so the type's win, and the
 certificate is verified whatever `upstream_tls_verify` says — that hop leaves our network carrying
 someone else's key.
 
@@ -151,19 +165,23 @@ each take even turns without agreeing on whose it is. `key_selection` is carried
 is a second strategy. A session still changes key between requests, so a vendor's prompt cache is
 per credential, and per tenant within one (`cachekey`). The `retry` stage then walks on round the
 ring from the loser, on the key's own
-failures only: a **429** spends the key — each is tried once, then the rate-limited ones are opened
-once more, since a quota window may have slid — and a **401/402/403** retires it for the rest of the
-request. A provider row's 400 or 429 is read to its end (64 KiB) before it is classed, because an
-exhausted account hides under both — OpenAI's 429 `insufficient_quota`, Anthropic's 400 "credit
-balance" — and reads as the 402 it is (`domain.ClassifyUpstream`). A second 429 exhaustion is the
-client's answer, headers and body as the vendor sent them. A 401/402/403 the ring cannot move off —
-every key refused, a single key, an engine's own — never is: the client gets the gateway's **502**
-`api_error` `upstream unavailable`, which refusal it was told to nobody outside; the access line
-says `reason="credential unauthorized|unpaid|forbidden"`
-with the vendor's status in `upstream_status`, and the error log keeps the vendor's own words with
-the key id (`upstream refused the credential`). Nothing else is retried: a 502 on one key is a 502
-on the next. A held attempt leaks nothing to the client; the request is billed once whatever it
-walked, and the access line's `attempts` counts the dials. Every attempt lands in `pk:<key id>`
+failures only (`domain.Rotates`): a **rate limit** spends the key — each is tried once, then the
+rate-limited ones are opened once more, since a quota window may have slid — and a **rejected
+key, an exhausted account, a model or a region the key is refused** retires it for the rest of the
+request (`domain.Retires`). A provider row's 4xx is read to its end (64 KiB) before it is classed,
+because each of those hides under one status or another — OpenAI's 429 `insufficient_quota`,
+Anthropic's 400 "credit balance", a 404 `model_not_found` — and is classed on what it says
+(`domain.FailureClass`; the classes are on the [access line](../../transport/http/middleware/README.md#correlation)).
+A second rate-limit exhaustion, and every key refused the model or the region, is the client's
+answer, headers and body as the vendor sent them. A rejected key or an exhausted account the ring
+cannot move off — every key refused, a single key, an engine's own — never is (`domain.Exhausts`):
+the client gets the gateway's **502** `api_error` `upstream unavailable`, which refusal it was told
+to nobody outside; the access line says `failure_class="credential|quota"` with the vendor's
+status in `upstream_status`, and the error log keeps the vendor's own words with the key id
+(`upstream failed`, the line every failure of the upstream's leaves). Nothing else is retried: a
+502 on one key is a 502 on the next. A held attempt leaks nothing to the client; the request is
+billed once whatever it walked, and the access line's `attempts` counts the dials. Every attempt
+lands in `pk:<key id>`
 (`requests`, `ok`, `rate_limited`, `unauthorized`, `unpaid`, `forbidden`, `rejected` — the three
 before it together — `failed`, `last_used`, `last_rate_limited`) until
 `GET /grove-admin/provider-keys?ids=a,b` takes it.

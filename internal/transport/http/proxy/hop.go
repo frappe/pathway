@@ -21,6 +21,10 @@ type Hop struct {
 	chunks int
 	last   time.Time
 	gapMax time.Duration
+	// reads is when each of those reads arrived, from the first: the stream's timeline, kept only
+	// when timed — the stream_timeline tunable is on — for the one line it goes to.
+	timed bool
+	reads []time.Duration
 }
 
 const (
@@ -51,9 +55,27 @@ func (h *Hop) read() {
 	} else {
 		h.gapMax = max(h.gapMax, now.Sub(h.last))
 	}
+	if h.timed {
+		h.reads = append(h.reads, now.Sub(h.at[hopFirstBody]))
+	}
 	h.last = now
 	h.chunks++
 	h.mu.Unlock()
+}
+
+// Timeline is when each read that brought bytes arrived, ms from the first: the stream as it came,
+// for the `stream timeline` line. Nil unless the hop was timed.
+func (h *Hop) Timeline() []float64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reads == nil {
+		return nil
+	}
+	at := make([]float64, len(h.reads))
+	for i, d := range h.reads {
+		at[i] = float64(d.Microseconds()) / 1000
+	}
+	return at
 }
 
 // trace is the hop's events as the transport reports them. Last wins: the transport retries a

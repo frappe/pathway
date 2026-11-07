@@ -514,20 +514,20 @@ func TestNextKeyWalksTheRingPastTheSpent(t *testing.T) {
 	}
 }
 
-// The ring walks every key once on a 429, opens once more, and never again; a rejected key stays
-// out through the re-opening.
+// The ring walks every key once on a rate limit, opens once more, and never again; a rejected key
+// stays out through the re-opening.
 func TestKeyRingSpendsRetiresAndReopensOnce(t *testing.T) {
 	a, b := domain.Credential{ID: "a"}, domain.Credential{ID: "b"}
 	ring := NewKeyRing([]domain.Credential{a, b})
 
-	if next := ring.Next(a, 429); next.ID != "b" {
-		t.Fatalf("after a's 429 got %q, want b", next.ID)
+	if next := ring.Next(a, domain.ClassRateLimit); next.ID != "b" {
+		t.Fatalf("after a's rate limit got %q, want b", next.ID)
 	}
-	if next := ring.Next(b, 401); next.ID != "a" {
-		t.Fatalf("after b's 401 got %q, want a once more (the ring re-opened)", next.ID)
+	if next := ring.Next(b, domain.ClassCredential); next.ID != "a" {
+		t.Fatalf("after b's rejection got %q, want a once more (the ring re-opened)", next.ID)
 	}
-	if next := ring.Next(a, 429); next.ID != "" {
-		t.Fatalf("after a's second 429 got %q, want nothing: b is dead and the ring opened already", next.ID)
+	if next := ring.Next(a, domain.ClassRateLimit); next.ID != "" {
+		t.Fatalf("after a's second rate limit got %q, want nothing: b is dead and the ring opened already", next.ID)
 	}
 }
 

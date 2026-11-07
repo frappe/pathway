@@ -2,9 +2,9 @@ package redis
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/frappe/pathway/internal/domain"
@@ -126,7 +126,7 @@ func applyRoutes(ctx context.Context, p redis.Pipeliner, push repository.RoutesP
 		if len(table) == 0 {
 			continue // equivalent to absent — the prune below retires it
 		}
-		encoded, err := json.Marshal(table)
+		encoded, err := sonic.Marshal(table)
 		if err != nil {
 			return err
 		}

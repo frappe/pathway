@@ -2,11 +2,11 @@ package redis
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/frappe/pathway/internal/domain"
@@ -25,7 +25,7 @@ func (r routes) Get(ctx context.Context, model string) ([]domain.Route, error) {
 		return nil, err
 	}
 	var out []domain.Route
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+	if err := sonic.Unmarshal([]byte(raw), &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -59,7 +59,7 @@ func (r routes) Models(ctx context.Context) ([]string, error) {
 }
 
 func (r routes) Replace(ctx context.Context, model string, table []domain.Route) error {
-	encoded, err := json.Marshal(table)
+	encoded, err := sonic.Marshal(table)
 	if err != nil {
 		return err
 	}

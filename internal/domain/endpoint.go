@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+
+	"github.com/bytedance/sonic"
 )
 
 // endpointOutputs is the output a model must give to answer on a path. Only the paths one kind of
@@ -55,7 +57,7 @@ func SentInputs(body map[string]json.RawMessage) []string {
 	var messages []struct {
 		Content json.RawMessage `json:"content"`
 	}
-	_ = JSON.Unmarshal(body["messages"], &messages)
+	_ = sonic.Unmarshal(body["messages"], &messages)
 	var sent []string
 	for _, message := range messages {
 		sent = partsInputs(message.Content, sent)
@@ -76,7 +78,7 @@ func partsInputs(content json.RawMessage, sent []string) []string {
 	}
 	// The error is not read: a string is text and decodes to no parts, and a part with a field of
 	// the wrong shape must not hide the ones beside it.
-	_ = JSON.Unmarshal(content, &parts)
+	_ = sonic.Unmarshal(content, &parts)
 	for _, part := range parts {
 		if input, known := partInputs[part.Type]; known && !slices.Contains(sent, input) {
 			sent = append(sent, input)
@@ -115,10 +117,10 @@ func SentTools(body map[string]json.RawMessage) []string {
 	slices.Sort(sent)
 
 	var tools []map[string]json.RawMessage
-	_ = JSON.Unmarshal(body["tools"], &tools)
+	_ = sonic.Unmarshal(body["tools"], &tools)
 	for _, tool := range tools {
 		var kind string
-		if JSON.Unmarshal(tool["type"], &kind) == nil && kind != "" && !slices.Contains(sent, kind) {
+		if sonic.Unmarshal(tool["type"], &kind) == nil && kind != "" && !slices.Contains(sent, kind) {
 			sent = append(sent, kind)
 		}
 	}

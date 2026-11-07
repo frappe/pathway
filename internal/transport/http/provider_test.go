@@ -29,7 +29,7 @@ func providerFixtureAnswering(t *testing.T, engineHandler http.HandlerFunc) *fix
 	f.store.Routes["anthropic/claude-4-5"] = []domain.Route{{
 		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
 		Vendor: "anthropic", Kind: "provider", Dialect: "anthropic",
-		UpstreamModel: "claude-sonnet-4-5-20250929", APIVersion: "2023-06-01",
+		UpstreamModel: "claude-sonnet-4-5-20250929",
 	}}
 	return f
 }
@@ -54,21 +54,36 @@ func TestAProviderRouteGetsTheVendorsOwnCredential(t *testing.T) {
 	}
 }
 
+// A row's own headers reach the vendor; the credential it also names does not, since the vendor
+// type's goes on after it.
+func TestARowsOwnHeadersGoUnderTheCredential(t *testing.T) {
+	f := providerFixture(t)
+	f.store.Routes["anthropic/claude-4-5"][0].Headers = map[string]string{"anthropic-beta": "beta-1", "x-api-key": "stolen"}
+	f.post("/anthropic/v1/messages", `{"model":"anthropic/claude-4-5","max_tokens":16}`)
+
+	if got := f.seen.headers.Get("anthropic-beta"); got != "beta-1" {
+		t.Errorf("anthropic-beta = %q, want the row's", got)
+	}
+	if f.seen.apiKey != "vendor-key" {
+		t.Errorf("x-api-key = %q, want the vendor type's over the row's", f.seen.apiKey)
+	}
+}
+
 // Baseten's Anthropic front reads the key as a Bearer and 401s on x-api-key.
 func TestAnAnthropicFrontThatReadsABearerGetsOne(t *testing.T) {
 	f := providerFixture(t)
 	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("baseten/flash")}
 	f.store.Routes["baseten/flash"] = []domain.Route{{
 		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
-		Vendor: "baseten", Kind: "provider", Dialect: "anthropic", APIVersion: "2023-06-01",
+		Vendor: "baseten", Kind: "provider", Dialect: "anthropic",
 	}}
 	f.post("/anthropic/v1/messages", `{"model":"baseten/flash","max_tokens":16}`)
 
 	if f.seen.authorization != "Bearer vendor-key" || f.seen.apiKey != "" {
 		t.Errorf("Authorization = %q, x-api-key = %q, want the key as a Bearer only", f.seen.authorization, f.seen.apiKey)
 	}
-	if f.seen.apiVersion != "2023-06-01" {
-		t.Errorf("anthropic-version = %q", f.seen.apiVersion)
+	if f.seen.apiVersion != "" {
+		t.Errorf("anthropic-version = %q, want none: Baseten asks no version, a row would say so", f.seen.apiVersion)
 	}
 }
 
@@ -93,6 +108,26 @@ func TestTheCallerIsToldWhatTheGatewayChanged(t *testing.T) {
 	resp = f.post("/openai/v1/chat/completions", `{"model":"openai/luna"}`)
 	if got := resp.Header().Get("X-Grove-Changed"); got != "" {
 		t.Errorf("X-Grove-Changed = %q on a request nothing was changed in", got)
+	}
+}
+
+// The control plane switches a vendor's rewrite off for one model on the row, and that model
+// gets the field as the caller sent it, with nothing to tell.
+func TestTheRowSwitchesAQuirkOffForOneModel(t *testing.T) {
+	f := providerFixture(t)
+	f.store.Groups["acme"] = domain.GroupRecord{Models: domain.ModelSet("openai/chat")}
+	f.store.Routes["openai/chat"] = []domain.Route{{
+		EngineURL: f.engine.URL, InternalKey: "vendor-key", Healthy: true,
+		Vendor: "openai", Kind: "provider", Dialect: "openai", UpstreamModel: "chat",
+		SkipQuirks: []string{"unreason_with_tools", "default_sampling"},
+	}}
+	resp := f.post("/openai/v1/chat/completions", `{"model":"openai/chat","temperature":0.2,"tools":[{"type":"function","function":{"name":"a"}}]}`)
+
+	if got := resp.Header().Get("X-Grove-Changed"); got != "" {
+		t.Errorf("X-Grove-Changed = %q on a model the row exempts", got)
+	}
+	if body := string(f.seen.body); !strings.Contains(body, `"temperature":0.2`) || strings.Contains(body, "reasoning_effort") {
+		t.Errorf("upstream body = %s", body)
 	}
 }
 

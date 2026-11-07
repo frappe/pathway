@@ -1,10 +1,13 @@
 // Package proxy forwards an admitted request to the engine that was picked for it, and reads the
-// usage frame out of the response on the way back without touching a byte of it — save two: on a
-// route whose upstream answers under its own model id, that id is swapped back to the client's; and
-// an event stream the upstream abandons gets one error event appended, so the client is told why.
+// usage frame out of the response on the way back without touching a byte of it — save three:
+// what the upstream's own type puts right on its answer (vendor.Relay; nothing, for every type
+// today); on a route whose upstream answers under its own model id, that id is swapped back to the
+// client's; and an event stream the upstream abandons gets one error event appended, so the client
+// is told why.
 package proxy
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -16,12 +19,12 @@ import (
 	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/service/vendor"
 	"github.com/frappe/pathway/internal/transport/respond"
 )
 
@@ -36,21 +39,10 @@ type Outcome struct {
 	// UsageStart is the first usage line of a response that carried more than one: where an
 	// Anthropic stream reports its prompt.
 	UsageStart string
-	// UpstreamRID is the upstream's own request id, off whichever of upstreamRIDHeaders it sent:
-	// what a ticket to a vendor quotes. Blank on our engines, which run without request-id headers.
-	UpstreamRID string
-	// UpstreamMS is the hop as the vendor timed it, off openai-processing-ms: what of ttft was the
-	// vendor's, the rest being the wire and the gateway. 0 from a vendor that sends none.
-	UpstreamMS int
-	// UpstreamAttempts is how many times Baseten ran the request on its side, off
-	// X-Baseten-Model-Prediction-Attempts: more than 1 is where a slow ttft went. 0 from anyone else.
-	UpstreamAttempts int
-	// RetryAfter is the vendor's Retry-After as sent, seconds, on a refusal that carried one.
-	RetryAfter string
-	// RemainingRequests and RemainingTokens are the vendor's rate-limit headroom when it refused,
-	// off x-ratelimit-remaining-* or anthropic-ratelimit-*-remaining: which of the two ran out on
-	// a 429. Blank on an answer, where they would only say how close the key is, on every line.
-	RemainingRequests, RemainingTokens string
+	// Answer is the vendor's own account of the hop, as its type reads it off the response
+	// headers (vendor.Answered): its request id, its timing, its retries, and on a refusal its
+	// back-off and headroom. Blank on our engines, which run without them.
+	vendor.Answer
 	// Deployment is the placement an ingress chose, off its response header. On a direct route the
 	// gateway already knows; this is the only way usage reaches a placement it never picked.
 	Deployment string
@@ -61,6 +53,10 @@ type Outcome struct {
 	// Cut names who ended a response that did not finish: one of domain's Cut values. Blank on a
 	// response that finished, and on a hop that never produced one.
 	Cut string
+	// Class is what went wrong, one of domain's failure classes; blank on an answer that was no
+	// failure. From the status alone here, and from the hop's own end when it had no status or
+	// did not finish; the retry stage refines a provider's 4xx from its body.
+	Class string
 	// Hop is when each event of the dial and the exchange happened, for the access line. Nil
 	// when the target could not even be parsed.
 	Hop *Hop
@@ -88,6 +84,10 @@ type Options struct {
 	// died without a FIN is never idle under traffic, and would keep taking requests without it.
 	PingAfter   time.Duration
 	PingTimeout time.Duration
+	// StreamTimeline keeps when each read of a body arrived and leaves it as one `stream timeline`
+	// line per hop: the one thing of the hop that is not a fixed-size record, so it is a knob and
+	// never on the access line.
+	StreamTimeline bool
 }
 
 func (o Options) withDefaults() Options {
@@ -132,16 +132,19 @@ func (p *Proxy) Reconfigure(opts Options) {
 }
 
 // Forward proxies to target (a base URL; the client's path is appended) and fills outcome with what
-// the hop did. The Outcome is filled even on a dial failure — a hop with no status is itself the
+// the hop did. `upstream` is the type of what answers there: it reads what the answer says of
+// the hop, classes a refusal, and puts right what it writes differently. The Outcome is filled even on a dial failure — a hop with no status is itself the
 // signal that ejects a dead engine.
 //
 // The caller owns the Outcome instead of taking it as a return value: ReverseProxy panics with
 // http.ErrAbortHandler when a client hangs up mid-stream, and the unwind discards a return value
 // along with whatever usage the tee had already captured.
-func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, external bool, swap ModelSwap, outcome *Outcome) {
+func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, external bool, upstream vendor.Vendor, swap ModelSwap, outcome *Outcome) {
+	// Stamped on the hop by the route stage; the request state lives a package up.
+	rid := r.Header.Get("X-Request-Id")
 	base, err := url.Parse(target)
 	if err != nil || base.Host == "" {
-		p.log.Error("unroutable target", "target", target, "err", err)
+		p.log.Error("unroutable target", "rid", rid, "target", target, "err", err)
 		return
 	}
 
@@ -149,7 +152,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	// while the client is still there, and the two told apart afterwards.
 	hop, cancel := context.WithCancelCause(r.Context())
 	defer cancel(nil)
-	events := &Hop{}
+	events := &Hop{timed: p.streamTimeline()}
 	outcome.Hop = events
 
 	var tee *usageTee
@@ -161,6 +164,18 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			outcome.ServedModel = tee.Model()
 		}
 		outcome.Cut = cutBy(hop, r.Context(), tee)
+		// A hop that did not finish is classed by who ended it, whatever its headers said.
+		switch outcome.Cut {
+		case domain.CutClientLeft:
+			outcome.Class = domain.ClassCancelled
+		case domain.CutUpstreamIdle:
+			outcome.Class = domain.ClassTimeout
+		case domain.CutUpstream:
+			outcome.Class = domain.ClassTransient
+		}
+		if events.timed {
+			p.log.Info("stream timeline", "rid", rid, "target", target, "cut", cmp.Or(outcome.Cut, "-"), "reads_ms", events.Timeline())
+		}
 	}()
 
 	reverse := &httputil.ReverseProxy{
@@ -189,20 +204,12 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {
 			outcome.Status = resp.StatusCode
+			outcome.Class = upstream.Classify(resp.StatusCode, nil)
 			outcome.Deployment = resp.Header.Get("X-Grove-Engine")
 			outcome.Reason = resp.Header.Get("X-Grove-Reason")
-			// A vendor's id and its own account of the hop are kept for the access line; an engine
-			// or ingress only echoes our id and has none of the rest.
-			if external {
-				outcome.UpstreamRID = first(resp.Header, upstreamRIDHeaders...)
-				outcome.UpstreamMS, _ = strconv.Atoi(resp.Header.Get("Openai-Processing-Ms"))
-				outcome.UpstreamAttempts, _ = strconv.Atoi(resp.Header.Get("X-Baseten-Model-Prediction-Attempts"))
-				if resp.StatusCode >= http.StatusBadRequest {
-					outcome.RetryAfter = resp.Header.Get("Retry-After")
-					outcome.RemainingRequests = first(resp.Header, "X-Ratelimit-Remaining-Requests", "Anthropic-Ratelimit-Requests-Remaining")
-					outcome.RemainingTokens = first(resp.Header, "X-Ratelimit-Remaining-Tokens", "Anthropic-Ratelimit-Tokens-Remaining")
-				}
-			}
+			// What the upstream says of the hop in its headers, as its type reads it, is kept for
+			// the access line; an engine or ingress only echoes our id and has nothing to say.
+			outcome.Answer = upstream.Answered(resp.StatusCode, resp.Header)
 			keepRelayed(resp.Header)
 			// A 101 hands the connection to ReverseProxy, which needs the body to stay an
 			// io.ReadWriteCloser to write back to the engine. The tee is read-only and would fail
@@ -213,12 +220,19 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			idle := newIdleBody(resp.Body, p.readTimeout(), func() { cancel(errUpstreamIdle) }, events)
 			tee = newUsageTee(idle, isEventStream(resp))
 			resp.Body = tee
-			if swap.active() {
-				// The tee stays innermost so usage is scraped off the raw upstream bytes. The two
-				// ids differ in length, so the declared length cannot survive the rewrite.
+			// The tee stays innermost so usage is scraped off the raw upstream bytes. Each rewrite
+			// outside it may change the length, so the declared one does not survive one. First the
+			// upstream's own, then the model id: the swap must see what the vendor's type wrote.
+			if body := upstream.Relay(resp.StatusCode, isEventStream(resp), tee); body != tee {
 				resp.Header.Del("Content-Length")
 				resp.ContentLength = -1
-				resp.Body = newModelSwapReader(tee, swap)
+				resp.Body = body
+			}
+			if swap.active() {
+				// The two ids differ in length, so the declared length cannot survive the rewrite.
+				resp.Header.Del("Content-Length")
+				resp.ContentLength = -1
+				resp.Body = newModelSwapReader(resp.Body, swap)
 			}
 			if isEventStream(resp) {
 				// Outermost, and the declared length dropped: the closing event adds bytes.
@@ -233,20 +247,21 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			// hop says nothing about the upstream.
 			if r.Context().Err() != nil {
 				p.log.Debug("client left before the upstream answered", "target", target)
+				outcome.Class = domain.ClassCancelled
 				w.WriteHeader(statusClientClosed)
 				return
 			}
 			// Status stays 0, which is what marks the hop failed: the connection never got far
 			// enough to have one.
-			p.log.Warn("upstream hop failed", "target", target, "err", err)
+			p.log.Warn("upstream hop failed", "rid", rid, "target", target, "err", err)
 			// A dial or header wait that ran out is a timeout and says so; anything else is a
 			// connection that was refused or broken.
-			status, message := http.StatusBadGateway, "upstream unavailable"
+			status, message, class := http.StatusBadGateway, "upstream unavailable", domain.ClassTransient
 			var timeout net.Error
 			if errors.As(err, &timeout) && timeout.Timeout() {
-				status, message = http.StatusGatewayTimeout, "upstream timed out"
+				status, message, class = http.StatusGatewayTimeout, "upstream timed out", domain.ClassTimeout
 			}
-			outcome.Reason = message
+			outcome.Reason, outcome.Class = message, class
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			if respond.Dialect(r.Context()) == domain.DialectAnthropic {
@@ -260,20 +275,6 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 	// ReverseProxy clones the outbound request off this context and composes its own trace with
 	// the one already there, so the hop's events are reported without touching Rewrite.
 	reverse.ServeHTTP(w, r.WithContext(httptrace.WithClientTrace(hop, events.trace())))
-}
-
-// upstreamRIDHeaders is where each vendor puts its own request id, first match wins: OpenAI and
-// most of the field use X-Request-Id, Anthropic Request-Id, Baseten X-Baseten-Request-Id.
-var upstreamRIDHeaders = []string{"X-Request-Id", "Request-Id", "X-Baseten-Request-Id"}
-
-// first is the first of `names` the header carries, blank when none.
-func first(header http.Header, names ...string) string {
-	for _, name := range names {
-		if value := header.Get(name); value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 // relayed is what a client is shown of an upstream's response headers: what it needs to read the
@@ -315,6 +316,12 @@ func (p *Proxy) readTimeout() time.Duration {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.opts.ReadTimeout
+}
+
+func (p *Proxy) streamTimeline() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.opts.StreamTimeline
 }
 
 // isEventStream reports whether the upstream answered with server-sent events, which is what

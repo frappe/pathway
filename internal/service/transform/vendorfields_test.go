@@ -78,6 +78,31 @@ func TestACustomToolLosesItsTypeForAVendorThatRefusesIt(t *testing.T) {
 	}
 }
 
+// The route row switches a quirk off for one model by name, and the transforms leave that
+// field as the caller sent it: a model of a reasoning vendor that does not reason keeps its
+// sampling, and one whose stream is not asked for usage on every chunk is not.
+func TestAQuirkTheRowSwitchesOffIsNotRun(t *testing.T) {
+	var told []string
+	body := decode(t, `{"model":"m","stream":true,"temperature":0.2,"tools":[{"type":"function","function":{"name":"a"}}]}`)
+	ctx := Context{Path: "/v1/chat/completions", Provider: true, Vendor: "openai", Changed: &told,
+		SkipQuirks: []string{"default_sampling", "unreason_with_tools"}}
+	if _, err := chain(t, "streamusage", "vendorfields").Apply(ctx, body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body["temperature"]) != "0.2" || body["reasoning_effort"] != nil || len(told) != 0 {
+		t.Errorf("skipped quirks ran: body = %v, told %v", body, told)
+	}
+
+	body = decode(t, `{"model":"m","stream":true}`)
+	ctx = Context{Path: "/v1/chat/completions", Provider: true, Vendor: "baseten", SkipQuirks: []string{"usage_per_chunk"}}
+	if _, err := chain(t, "streamusage").Apply(ctx, body); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body["stream_options"]); got != `{"include_usage":true}` {
+		t.Errorf("usage_per_chunk skipped, stream_options = %s", got)
+	}
+}
+
 // apply runs vendorfields for one vendor and returns the body's field after it.
 func apply(t *testing.T, path, vendor, raw, field string) (bool, string) {
 	t.Helper()
@@ -145,7 +170,7 @@ func TestSamplingIsDroppedWhileOpenAIReasons(t *testing.T) {
 			t.Fatal(err)
 		}
 		var kept []string
-		for _, field := range sampling {
+		for _, field := range []string{"temperature", "top_p", "logprobs", "top_logprobs"} {
 			if _, present := body[field]; present {
 				kept = append(kept, field)
 			}

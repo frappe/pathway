@@ -22,8 +22,11 @@ Each hop's events — connect, TLS handshake, request written, first response by
 stamped off `net/http/httptrace` into `Outcome.Hop` and reach the access line as `hop`, with the whole
 as `latency.upstream_ms`. The body's reads are counted on the way (`idleBody` tells the hop of each
 one that brought bytes) and the longest silence between two of them kept: `hop.chunks` and
-`hop.gap_max`, which is where a stream that stalled short of the read timeout shows. The trace
-rides the hop's context, which ReverseProxy clones into the outbound request and composes with
+`hop.gap_max`, which is where a stream that stalled short of the read timeout shows. Where in the
+stream it stalled is the timeline: with the `stream_timeline` tunable on the hop also keeps when each
+read arrived and leaves one `stream timeline` line on the process log (`rid`, `target`, `cut`,
+`reads_ms` as offsets from the first body byte). Off, nothing is kept, and the access line never
+carries it: a line per request stays a fixed-size record. The trace rides the hop's context, which ReverseProxy clones into the outbound request and composes with
 its own. Two callbacks can fire after `Forward` has returned (a dial outlives a cancelled request;
 a body is still being written when the server answers early), so `Hop` is locked and held by
 pointer.

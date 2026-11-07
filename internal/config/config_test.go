@@ -205,6 +205,24 @@ func TestMaintenanceIsAReloadableKnob(t *testing.T) {
 	}
 }
 
+// The stream timeline is a knob like maintenance: on and off by an edit and a signal.
+func TestStreamTimelineIsAReloadableKnob(t *testing.T) {
+	path := write(t, `{}`)
+	live, err := Open(path, Defaults(), quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, on := range []bool{true, false} {
+		if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"stream_timeline":%t}`, on)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, next, changed, err := live.Reload()
+		if err != nil || next.StreamTimeline != on || !SameList(changed, []string{"stream_timeline"}) {
+			t.Errorf("stream_timeline=%t: next=%t changed=%v err=%v", on, next.StreamTimeline, changed, err)
+		}
+	}
+}
+
 // A reload that changes nothing should say so rather than reporting a change.
 func TestReloadingAnUnchangedFileReportsNoChange(t *testing.T) {
 	live, _ := Open(write(t, `{"log_level":"warn"}`), Defaults(), quiet())
@@ -270,6 +288,7 @@ func sameResolved(a, b Resolved) bool {
 		a.UpstreamTLSVerify == b.UpstreamTLSVerify &&
 		a.Maintenance == b.Maintenance &&
 		a.IsolateCaches == b.IsolateCaches &&
+		a.StreamTimeline == b.StreamTimeline &&
 		a.DrainTimeout == b.DrainTimeout &&
 		a.LameDuck == b.LameDuck &&
 		a.UpgradeTimeout == b.UpgradeTimeout &&

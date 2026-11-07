@@ -12,6 +12,7 @@ import (
 
 	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/service/vendor"
 )
 
 type Service struct {
@@ -62,7 +63,7 @@ func (s *Service) UpsertGroups(ctx context.Context, records []repository.GroupUp
 // makes it 503 rather than keep a stale placement. `prune` says the payload is the COMPLETE table,
 // so anything unnamed is deleted — otherwise retiring one model means naming all of them.
 func (s *Service) ReplaceRoutes(ctx context.Context, table map[string][]domain.Route, prune bool) (models, pruned int, err error) {
-	if err := s.oneKindEach(table); err != nil {
+	if err := s.wellFormed(table); err != nil {
 		return 0, 0, err
 	}
 	var retired []string
@@ -146,7 +147,7 @@ func (s *Service) StateHashes(ctx context.Context) (map[string]string, error) {
 // means none of it landed, and the control plane retries on its next tick.
 func (s *Service) ApplyState(ctx context.Context, push repository.StatePush) (repository.StateCounts, error) {
 	if push.Routes != nil {
-		if err := s.oneKindEach(push.Routes.Table); err != nil {
+		if err := s.wellFormed(push.Routes.Table); err != nil {
 			return repository.StateCounts{}, err
 		}
 	}
@@ -154,16 +155,31 @@ func (s *Service) ApplyState(ctx context.Context, push repository.StatePush) (re
 	return counts, s.landed(err)
 }
 
-// oneKindEach refuses a push before any of it lands when a model's rows are both a vendor's and
-// ours (domain.MixedKinds): routing hands a whole table to one router. The whole push, not the one
-// model: a push is one transaction, and the control plane retries it each tick until the row is
-// fixed — so the model is named here too, where an operator with no control-plane access looks.
-// Models are walked in order so the one named is the same on every push.
-func (s *Service) oneKindEach(table map[string][]domain.Route) error {
+// wellFormed refuses a push before any of it lands when a model's rows are both a vendor's and
+// ours (domain.MixedKinds), since routing hands a whole table to one router, or when a row switches
+// off a quirk this gateway does not know (vendor.QuirkNames), since a misspelt one would silently
+// leave the rewrite on, or when a vendor row names a vendor it has not met (vendor.Names), whose
+// quirks nobody has checked. The whole push, not the one model: a push is one transaction, and the
+// control plane retries it each tick until the row is fixed — so the model is named here too,
+// where an operator with no control-plane access looks. Models are walked in order so the one
+// named is the same on every push.
+func (s *Service) wellFormed(table map[string][]domain.Route) error {
 	for _, model := range slices.Sorted(maps.Keys(table)) {
 		if domain.MixedKinds(table[model]) {
 			s.log.Warn("routes push refused: model mixes vendor and self-hosted rows", "model", model)
 			return domain.Deny(400, model+" mixes vendor and self-hosted rows")
+		}
+		for _, route := range table[model] {
+			if route.IsProvider() && !vendor.IsVendor(route.Vendor) {
+				s.log.Warn("routes push refused: unknown vendor", "model", model, "vendor", route.Vendor, "known", vendor.Names())
+				return domain.Deny(400, model+" names a vendor this gateway does not know: "+route.Vendor)
+			}
+			for _, name := range route.SkipQuirks {
+				if !vendor.IsQuirk(name) {
+					s.log.Warn("routes push refused: unknown quirk", "model", model, "quirk", name, "known", vendor.QuirkNames())
+					return domain.Deny(400, model+" skips a quirk this gateway does not know: "+name)
+				}
+			}
 		}
 	}
 	return nil

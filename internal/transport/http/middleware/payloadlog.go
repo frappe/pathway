@@ -2,11 +2,12 @@ package middleware
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/bytedance/sonic"
 )
 
 func init() {
@@ -41,7 +42,7 @@ func newPayloadLog(deps Deps) (Middleware, error) {
 				if state.Raw == nil {
 					// An upload: what the form said, never the file. Its size is the whole form's,
 					// -1 when the client sent it chunked.
-					prompt, _ = json.Marshal(state.Form)
+					prompt, _ = sonic.Marshal(state.Form)
 					promptBytes = r.ContentLength
 				}
 				attrs := []slog.Attr{

@@ -37,6 +37,9 @@ func TestTheAccessLineSaysWhereTheTimeWent(t *testing.T) {
 	if _, present := line["upstream_ms"]; present {
 		t.Error("upstream_ms still on the line; the vendor's clock is latency.vendor_ms now")
 	}
+	if line["failure_class"] != "-" {
+		t.Errorf("failure_class = %v on an answer that was no failure", line["failure_class"])
+	}
 	latency := group(t, line, "latency")
 	total, gateway, upstream := latency["total_ms"].(float64), latency["gateway_ms"].(float64), latency["upstream_ms"].(float64)
 	if math.Abs(total-(gateway+upstream)) > 0.002 || upstream < 20 || gateway <= 0 {

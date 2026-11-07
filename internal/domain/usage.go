@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+
+	"github.com/bytedance/sonic"
 )
 
 // Usage is a token count normalized across the OpenAI and Anthropic response shapes, so both mean
@@ -37,11 +39,11 @@ type Usage struct {
 func ParseUsage(raw []byte) (Usage, bool) {
 	raw = TrimSSE(raw)
 	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) == nil {
+	if sonic.Unmarshal(raw, &m) == nil {
 		// Unwrap a nested "usage" object if present.
 		if uraw, ok := m["usage"]; ok {
 			var um map[string]json.RawMessage
-			if json.Unmarshal(uraw, &um) == nil {
+			if sonic.Unmarshal(uraw, &um) == nil {
 				m = um
 			}
 		}
@@ -104,7 +106,7 @@ func usageFrom(m map[string]json.RawMessage) (Usage, bool) {
 		for _, k := range keys {
 			if r, ok := m[k]; ok {
 				var n int
-				if json.Unmarshal(r, &n) == nil {
+				if sonic.Unmarshal(r, &n) == nil {
 					return n, true
 				}
 			}
@@ -124,7 +126,7 @@ func usageFrom(m map[string]json.RawMessage) (Usage, bool) {
 	cacheCreate, ccok := geti("cache_creation_input_tokens")
 	if !pok && !cok && !tok && !crok && !ccok {
 		var duration float64
-		if raw, ok := m["duration"]; ok && json.Unmarshal(raw, &duration) == nil {
+		if raw, ok := m["duration"]; ok && sonic.Unmarshal(raw, &duration) == nil {
 			return Usage{Seconds: int(math.Ceil(duration))}, true
 		}
 		return Usage{}, false
@@ -162,11 +164,11 @@ func usageFrom(m map[string]json.RawMessage) (Usage, bool) {
 // nestedInt reads object[key], 0 when the object is absent, null, or not carrying the key.
 func nestedInt(m map[string]json.RawMessage, object, key string) int {
 	var inner map[string]json.RawMessage
-	if json.Unmarshal(m[object], &inner) != nil {
+	if sonic.Unmarshal(m[object], &inner) != nil {
 		return 0
 	}
 	var n int
-	_ = json.Unmarshal(inner[key], &n)
+	_ = sonic.Unmarshal(inner[key], &n)
 	return n
 }
 

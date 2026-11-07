@@ -148,7 +148,7 @@ func (s *Server) DataHandler(chain []string) (http.Handler, error) {
 	mux.Handle("/anthropic/", s.surface("/anthropic", domain.DialectAnthropic, servesAnthropic, &s.chain))
 	// Root holds only the gateway's own answers: the holder's credit as this store counts it, and
 	// the banner. A vendor path at root is sent to its base.
-	mux.Handle("GET /v1/credits", drain(http.HandlerFunc(s.handleCredits)))
+	mux.Handle("GET /v1/key/balance", drain(http.HandlerFunc(s.handleKeyBalance)))
 	mux.Handle("/v1/", http.HandlerFunc(rootRefusal))
 	mux.Handle("GET /{$}", drain(http.HandlerFunc(root)))
 	// The whole surface behind recover+accesslog, so the routes the mux answers itself — the model

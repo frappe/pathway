@@ -1,6 +1,6 @@
 package transform
 
-import "encoding/json"
+import "github.com/bytedance/sonic"
 
 func init() {
 	Register(modelMap{})
@@ -24,7 +24,7 @@ func (modelMap) Apply(ctx Context, body Body) (bool, error) {
 		// Nothing to rewrite. Adding the field would change a request the caller did not make.
 		return false, nil
 	}
-	encoded, err := json.Marshal(ctx.UpstreamModel)
+	encoded, err := sonic.Marshal(ctx.UpstreamModel)
 	if err != nil {
 		return false, err
 	}
