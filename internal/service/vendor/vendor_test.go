@@ -77,8 +77,8 @@ func TestARowSwitchesAQuirkOffByName(t *testing.T) {
 		t.Errorf("skipping default_sampling: body = %v", req.Body)
 	}
 	want := []string{"blank_reasoning_content", "blank_thinking_block", "default_sampling", "developer_as_system",
-		"name_output_cap", "unreason_with_tools", "unthink_forced_function", "unthink_forced_tool",
-		"untype_custom_tools", "usage_per_chunk"}
+		"fold_tool_changes", "name_output_cap", "unreason_with_tools", "unthink_forced_function",
+		"unthink_forced_tool", "untype_custom_tools", "usage_per_chunk"}
 	if got := QuirkNames(); !slices.Equal(got, want) {
 		t.Errorf("QuirkNames() = %v, want %v", got, want)
 	}
@@ -99,6 +99,7 @@ func TestEachUpstreamDeclaresTheQuirksItHas(t *testing.T) {
 		"unreason_with_tools":     `{"tools":[{"type":"function","function":{"name":"a"}}]}`,
 		"default_sampling":        `{"temperature":0.2}`,
 		"untype_custom_tools":     `{"tools":[{"type":"custom","name":"a"}]}`,
+		"fold_tool_changes":       `{"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"a","input_schema":{"type":"object"}}}}]}]}`,
 		"unthink_forced_tool":     `{"tool_choice":{"type":"tool","name":"a"}}`,
 		"blank_thinking_block":    `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"a","input":{}}]}]}`,
 	}
@@ -127,6 +128,52 @@ func TestEachUpstreamDeclaresTheQuirksItHas(t *testing.T) {
 		if has := slices.Contains(declared, QuirkUsagePerChunk); v.UsagePerChunk() != has {
 			t.Errorf("%s: usage per chunk %v, declared %v", name, v.UsagePerChunk(), has)
 		}
+	}
+}
+
+// Morph takes a system turn of text alone, so the turn Claude Code adds a tool with is folded: the
+// definition into `tools`, a removal out of them, the text and its breakpoint where they were. A
+// turn of plain text and every other message stay as sent, and the caller is told nothing.
+func TestMorphFoldsAMidConversationToolChangeIntoTools(t *testing.T) {
+	body := map[string]json.RawMessage{}
+	sent := `{"tools":[{"name":"old","input_schema":{"type":"object"}}],"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"system","content":[
+			{"type":"text","text":"reminder","cache_control":{"type":"ephemeral","ttl":"1h"}},
+			{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"new","description":"d","input_schema":{"type":"object"}}}},
+			{"type":"tool_removal","tool":{"type":"tool_reference","name":"old"}}]},
+		{"role":"system","content":"a plain one"}]}`
+	if err := json.Unmarshal([]byte(sent), &body); err != nil {
+		t.Fatal(err)
+	}
+	req := &Request{Body: body}
+	changed, err := RewriteMessages(For("morph"), req)
+	if err != nil || !changed || len(req.Changed) != 0 {
+		t.Fatalf("changed %v, err %v, told %v", changed, err, req.Changed)
+	}
+	var tools []struct{ Name string }
+	if err := json.Unmarshal(req.Body["tools"], &tools); err != nil || len(tools) != 1 || tools[0].Name != "new" {
+		t.Errorf("tools = %s, want the added one alone", req.Body["tools"])
+	}
+	var messages []struct {
+		Role    string
+		Content json.RawMessage
+	}
+	if err := json.Unmarshal(req.Body["messages"], &messages); err != nil || len(messages) != 3 {
+		t.Fatalf("messages = %s", req.Body["messages"])
+	}
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(messages[1].Content, &blocks); err != nil || len(blocks) != 1 ||
+		string(blocks[0]["text"]) != `"reminder"` || string(blocks[0]["cache_control"]) != `{"type":"ephemeral","ttl":"1h"}` {
+		t.Errorf("system turn = %s, want its text and breakpoint alone", messages[1].Content)
+	}
+	if string(messages[0].Content) != `"hi"` || string(messages[2].Content) != `"a plain one"` {
+		t.Errorf("other messages changed: %s", req.Body["messages"])
+	}
+
+	untouched := &Request{Body: map[string]json.RawMessage{"messages": json.RawMessage(`[{"role":"system","content":"text"}]`)}}
+	if changed, _ := RewriteMessages(For("morph"), untouched); changed {
+		t.Error("a request with no tool change was rewritten")
 	}
 }
 

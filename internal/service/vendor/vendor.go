@@ -61,6 +61,9 @@ type Chat interface {
 
 // Messages is each rewrite on the Anthropic messages shape.
 type Messages interface {
+	// FoldToolChanges moves each `tool_addition` of a system turn in `messages` into `tools`, takes
+	// the tool a `tool_removal` names out, and leaves the turn its text.
+	FoldToolChanges(*Request) (bool, error)
 	// UntypeCustomTools sends a caller's own tool without `"type":"custom"`. A tool with no type
 	// means the same.
 	UntypeCustomTools(*Request) (bool, error)
@@ -160,7 +163,8 @@ type quirk struct {
 // The rewrites of each shape, in the one order they compose: thinking is switched off before a
 // past turn is given blank reasoning, since an upstream that is not thinking asks for none;
 // sampling is judged after the tools rule, so a request it switched reasoning off for keeps its
-// own.
+// own; a tool added mid-conversation joins `tools` before a tool typed custom is untyped, so it
+// is untyped with the rest.
 var (
 	chat = []quirk{
 		{"name_output_cap", Vendor.NameOutputCap},
@@ -171,6 +175,7 @@ var (
 		{"default_sampling", Vendor.DefaultSampling},
 	}
 	messages = []quirk{
+		{"fold_tool_changes", Vendor.FoldToolChanges},
 		{"untype_custom_tools", Vendor.UntypeCustomTools},
 		{"unthink_forced_tool", Vendor.UnthinkForcedTool},
 		{"blank_thinking_block", Vendor.BlankThinkingBlock},

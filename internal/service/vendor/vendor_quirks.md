@@ -483,3 +483,44 @@ The vendor gets:
 ```json
 {"max_tokens": 64, "messages": [{"role": "user", "content": "hi"}], "model": "claude-opus-5-5"}
 ```
+
+## 11. A tool added mid-conversation
+
+**What the vendor does.** Claude Code 2.1 loads a deferred tool with a `role: system` turn in
+`messages` holding `tool_addition` blocks (`{"type": "tool_addition", "tool": {"type":
+"tool_definition", "definition": {"name": …, "description": …, "input_schema": …}}}`), or a
+`tool_removal` naming one, beside the turn's text: Anthropic's mid-conversation tool changes.
+Anthropic takes it. Morph answers 400 `system blocks must be of type 'text'` (2026-11-09), on
+every Claude Code turn that carries one.
+
+**The rewrite.** `fold_tool_changes`, Morph's: each definition joins `tools`, a removal takes the
+tool it names out, and the turn keeps its text and its `cache_control` where they were, so the
+cached prefix behind it stands. The caller is told nothing: the model is offered the same tools.
+Measured 2026-11-09: with the blocks folded Morph answers 200 whether the text stays a system
+turn, moves into `system` or becomes a user turn, so it stays.
+
+Not `defer_loading`, which would keep the added tool out of the prompt: Morph takes the field and
+ignores it, the deferred tool is in the prompt all the same (asked which tools it sees, the model names it,
+2026-11-09), and its tool search tool is taken and not run. So the added tool goes in outright, and Morph's
+cached prefix behind `tools` is lost for that one request, the turn a tool is added on.
+
+The caller sends, on `/anthropic/v1/messages`:
+
+```json
+{"model": "morph/deepseek-v4.1-flash-1017", "max_tokens": 64,
+ "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+ "messages": [{"role": "user", "content": "hi"},
+  {"role": "system", "content": [
+    {"type": "text", "text": "a reminder", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": {"name": "grep", "input_schema": {"type": "object"}}}}]}]}
+```
+
+The vendor gets:
+
+```json
+{"model": "deepseek-v4.1-flash-1017", "max_tokens": 64,
+ "tools": [{"name": "read", "input_schema": {"type": "object"}}, {"name": "grep", "input_schema": {"type": "object"}}],
+ "messages": [{"role": "user", "content": "hi"},
+  {"role": "system", "content": [
+    {"type": "text", "text": "a reminder", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}]}
+```
