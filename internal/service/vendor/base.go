@@ -36,6 +36,7 @@ func (base) UnthinkForcedFunction(*Request) (bool, error) { return false, nil }
 func (base) BlankReasoningContent(*Request) (bool, error) { return false, nil }
 func (base) UnreasonWithTools(*Request) (bool, error)     { return false, nil }
 func (base) DefaultSampling(*Request) (bool, error)       { return false, nil }
+func (base) FoldToolChanges(*Request) (bool, error)       { return false, nil }
 func (base) UntypeCustomTools(*Request) (bool, error)     { return false, nil }
 func (base) UnthinkForcedTool(*Request) (bool, error)     { return false, nil }
 func (base) BlankThinkingBlock(*Request) (bool, error)    { return false, nil }

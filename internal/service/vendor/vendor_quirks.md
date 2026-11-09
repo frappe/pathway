@@ -483,3 +483,43 @@ The vendor gets:
 ```json
 {"max_tokens": 64, "messages": [{"role": "user", "content": "hi"}], "model": "claude-opus-5-5"}
 ```
+
+## 11. A tool added mid-conversation
+
+**What the vendor does.** Claude Code 2.1 adds a tool mid-conversation with a `role: system`
+message in `messages`. The message holds `tool_addition` blocks (`{"type": "tool_addition",
+"tool": {"type": "tool_definition", "definition": {"name": …, "description": …, "input_schema":
+…}}}`), or a `tool_removal` naming a tool, next to its text. Anthropic accepts this. Morph answers
+400 `system blocks must be of type 'text'` (2026-11-09), on every such message.
+
+**The rewrite.** `fold_tool_changes`, on Morph: each definition is added to `tools`, a removal
+takes its tool out of `tools`, and the message keeps its text and `cache_control` as sent. The
+caller is not told: the model gets the same tools either way. Measured 2026-11-09: with the blocks
+removed, Morph answers 200 whether the text stays a system message, moves into `system` or becomes
+a user message. It stays.
+
+`defer_loading` would keep the added tool out of the prompt, but Morph accepts the field and
+ignores it: the model lists a deferred tool when asked which tools it has (2026-11-09), and Morph's
+tool search tool is accepted and not run. So the tool is added outright, and Morph's prompt cache
+misses on that one request, the one that adds the tool.
+
+The caller sends, on `/anthropic/v1/messages`:
+
+```json
+{"model": "morph/deepseek-v4.1-flash-1017", "max_tokens": 64,
+ "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+ "messages": [{"role": "user", "content": "hi"},
+  {"role": "system", "content": [
+    {"type": "text", "text": "a reminder", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": {"name": "grep", "input_schema": {"type": "object"}}}}]}]}
+```
+
+The vendor gets:
+
+```json
+{"model": "deepseek-v4.1-flash-1017", "max_tokens": 64,
+ "tools": [{"name": "read", "input_schema": {"type": "object"}}, {"name": "grep", "input_schema": {"type": "object"}}],
+ "messages": [{"role": "user", "content": "hi"},
+  {"role": "system", "content": [
+    {"type": "text", "text": "a reminder", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}]}
+```
