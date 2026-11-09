@@ -43,12 +43,12 @@ func logged(t *testing.T, c *Chain, ctx Context, raw string) string {
 // did it, and never by value: nothing upstream errors on a field that is not there.
 func TestEveryDroppedFieldIsWarnedOncePerTeam(t *testing.T) {
 	c := chain(t, "modelmap", "cachesalt", "servicetier")
-	vendor := Context{Path: "/v1/chat/completions", Team: "u1", Provider: true, UpstreamModel: "upstream-m"}
+	vendor := Context{Path: "/v1/chat/completions", RequestID: "req-1", Team: "u1", Provider: true, UpstreamModel: "upstream-m"}
 	const sent = `{"model":"m","cache_salt":"team-secret","service_tier":"priority"}`
 
 	first := logged(t, c, vendor, sent)
 	for _, want := range []string{
-		"level=WARN", "team=u1",
+		"level=WARN", "rid=req-1", "team=u1",
 		"field=cache_salt transform=cachesalt",
 		"field=service_tier transform=servicetier",
 	} {
