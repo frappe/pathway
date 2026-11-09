@@ -155,7 +155,7 @@ func TestAKeysPushCarriesTheCapAndLeavesSpentAlone(t *testing.T) {
 }
 
 // GET /v1/key/balance is the key's own balance on this store, in dollars — its cap less what it
-// spent, nothing of the team's — overspent or not, since that is when it is asked.
+// spent, floored at zero, nothing of the team's — overspent or not, since that is when it is asked.
 func TestTheBalanceIsTheKeysOwn(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -166,8 +166,8 @@ func TestTheBalanceIsTheKeysOwn(t *testing.T) {
 	}{
 		{"funded", "active", func(k *domain.KeyRecord) { k.Budget, k.Spent = 15_750_000_000, 3_250_000_000 },
 			200, `{"balance":12.50,"spent":3.25}`},
-		{"overspent still reads", "active", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1_000_000_000, 1_500_000_000 },
-			200, `{"balance":-0.50,"spent":1.50}`},
+		{"overspent reads zero, spent says by how much", "active", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1_000_000_000, 1_500_000_000 },
+			200, `{"balance":0.00,"spent":1.50}`},
 		{"rounded to the cent", "active", func(k *domain.KeyRecord) { k.Budget, k.Spent = 1_000_000_000, 123_456_789 },
 			200, `{"balance":0.88,"spent":0.12}`},
 		{"no cap yet", "active", func(k *domain.KeyRecord) { k.Budget = 0 }, 200, `{"balance":0.00,"spent":0.00}`},

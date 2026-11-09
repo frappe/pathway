@@ -14,17 +14,14 @@ const nanoPerCent = 1e7
 type usd int64
 
 func (u usd) MarshalJSON() ([]byte, error) {
-	v := math.Round(float64(u)/nanoPerCent) / 100
-	if v == 0 {
-		v = 0 // never "-0.00"
-	}
-	return strconv.AppendFloat(nil, v, 'f', 2, 64), nil
+	return strconv.AppendFloat(nil, math.Round(float64(u)/nanoPerCent)/100, 'f', 2, 64), nil
 }
 
 // keyBalanceBody is GET /v1/key/balance, in US dollars to the cent: what this key has left of its
 // cap on this store over its window — this month, or for life. The key's, never the team's: the
 // path names the calling key, which the bearer identifies. The names are the control plane's own,
-// so a holder reads one shape from either side.
+// so a holder reads one shape from either side. Balance is what may still be spent, so it floors
+// at zero: a key one streamed answer past its cap reads 0.00, and spent says by how much.
 type keyBalanceBody struct {
 	Balance usd `json:"balance"`
 	Spent   usd `json:"spent"`
@@ -40,7 +37,7 @@ func (s *Server) handleKeyBalance(w http.ResponseWriter, r *http.Request) {
 	}
 	key := identity.Key
 	respond.JSON(w, keyBalanceBody{
-		Balance: usd(key.Budget - key.Spent),
+		Balance: usd(max(key.Budget-key.Spent, 0)),
 		Spent:   usd(key.Spent),
 	})
 }
