@@ -15,12 +15,12 @@ func (s *Service) pickEngine(ctx context.Context, req Request, table []domain.Ro
 	if session != "" {
 		stickyURL, _ = s.sessions.Engine(ctx, session)
 	}
-	s.fillInFlight(ctx, table)
+	s.fillInFlight(ctx, table, req.RequestID)
 	s.markUnhealthy(ctx, table)
 
 	route, status := domain.PickRoute(table, stickyURL, s.region)
 	if status == 429 {
-		route, status = s.waitForRoom(ctx, table, stickyURL)
+		route, status = s.waitForRoom(ctx, table, stickyURL, req.RequestID)
 	}
 	if status == 429 {
 		return Decision{}, domain.Deny(429, "every replica of "+req.Model+" is at capacity")
@@ -65,7 +65,7 @@ const capacityPoll = 50 * time.Millisecond
 // claimed while waiting, and this sits above meter, so a request that gives up bills nothing.
 // ponytail: polls the in-flight store every capacityPoll per waiting request; a release
 // notification is the upgrade if many requests wait at once.
-func (s *Service) waitForRoom(ctx context.Context, table []domain.Route, stickyURL string) (domain.Route, int) {
+func (s *Service) waitForRoom(ctx context.Context, table []domain.Route, stickyURL, requestID string) (domain.Route, int) {
 	var wait time.Duration
 	if s.capacityWait != nil {
 		wait = s.capacityWait()
@@ -79,7 +79,7 @@ func (s *Service) waitForRoom(ctx context.Context, table []domain.Route, stickyU
 			return domain.Route{}, 429
 		case <-timer.C:
 		}
-		s.fillInFlight(ctx, table)
+		s.fillInFlight(ctx, table, requestID)
 		if route, status := domain.PickRoute(table, stickyURL, s.region); status != 429 {
 			return route, status
 		}
@@ -97,7 +97,7 @@ func (s *Service) PickReplica(ctx context.Context, model, sessionKey, requestID 
 		return domain.Route{}, domain.Deny(503, "no-replica")
 	}
 	table = s.oneKind(model, table)
-	s.fillInFlight(ctx, table)
+	s.fillInFlight(ctx, table, requestID)
 
 	var stickyURL string
 	if sessionKey != "" {
@@ -134,14 +134,14 @@ func (s *Service) Release(ctx context.Context, route domain.Route, requestID str
 // fillInFlight sets each engine's InFlight to what it is running now. A store failure leaves every
 // count at zero, degrading to the first healthy route — refusing instead would 503 a working engine
 // over an unreadable counter.
-func (s *Service) fillInFlight(ctx context.Context, table []domain.Route) {
+func (s *Service) fillInFlight(ctx context.Context, table []domain.Route, requestID string) {
 	urls := make([]string, len(table))
 	for i, r := range table {
 		urls[i] = r.EngineURL
 	}
 	counts, err := s.inFlight.Counts(ctx, urls)
 	if err != nil {
-		s.log.Warn("in-flight counts unavailable, falling back to the first healthy route", "err", err)
+		s.log.Warn("in-flight counts unavailable, falling back to the first healthy route", "rid", requestID, "err", err)
 		return
 	}
 	for i := range table {

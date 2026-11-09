@@ -455,6 +455,7 @@ func newTransform(deps Deps) (Middleware, error) {
 			var changes []string
 			changed, err := deps.Transform.Apply(transform.Context{
 				Path:          r.URL.Path,
+				RequestID:     state.RequestID,
 				UpstreamModel: state.Decision.Route.UpstreamModel,
 				Team:          state.Identity.Key.Team,
 				Provider:      state.Decision.Route.IsProvider(),

@@ -18,6 +18,8 @@ type Body map[string]json.RawMessage
 // Context is what a transform may know about the request beyond its body.
 type Context struct {
 	Path string
+	// RequestID is the request's id, for a log line to be found by.
+	RequestID string
 	// UpstreamModel is what the chosen route says this upstream answers to, pushed by the control
 	// plane. Blank means send the caller's `model` unchanged, which is every route we run ourselves.
 	UpstreamModel string
@@ -156,7 +158,7 @@ func (c *Chain) Apply(ctx Context, body Body) (bool, error) {
 			return changed, fmt.Errorf("transform %s: %w", t.Name(), err)
 		}
 		if did {
-			c.warnDropped(ctx.Team, t.Name(), sent, body)
+			c.warnDropped(ctx, t.Name(), sent, body)
 		}
 		changed = changed || did
 	}
@@ -165,16 +167,17 @@ func (c *Chain) Apply(ctx Context, body Body) (bool, error) {
 
 // warnDropped logs each field sent and no longer there, once per team and field: nothing upstream
 // errors on a missing field, so this line is the only sign the caller asked for it. The name
-// only, never the value — that is the caller's, and a cache salt is a secret.
+// only, never the value — that is the caller's, and a cache salt is a secret. The rid is the first
+// request seen to lose it.
 // ponytail: top-level fields only, and the seen set is bounded because transforms name what they
 // drop; one that strips whatever it does not know needs a cap here and a diff that recurses.
-func (c *Chain) warnDropped(team, transform string, sent []string, body Body) {
+func (c *Chain) warnDropped(ctx Context, transform string, sent []string, body Body) {
 	for _, field := range sent {
 		if _, kept := body[field]; kept {
 			continue
 		}
-		if _, seen := c.warned.LoadOrStore(team+"\x00"+field, true); !seen {
-			slog.Warn("request field dropped", "team", team, "field", field, "transform", transform)
+		if _, seen := c.warned.LoadOrStore(ctx.Team+"\x00"+field, true); !seen {
+			slog.Warn("request field dropped", "rid", ctx.RequestID, "team", ctx.Team, "field", field, "transform", transform)
 		}
 	}
 }
