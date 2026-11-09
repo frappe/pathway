@@ -486,23 +486,22 @@ The vendor gets:
 
 ## 11. A tool added mid-conversation
 
-**What the vendor does.** Claude Code 2.1 loads a deferred tool with a `role: system` turn in
-`messages` holding `tool_addition` blocks (`{"type": "tool_addition", "tool": {"type":
-"tool_definition", "definition": {"name": …, "description": …, "input_schema": …}}}`), or a
-`tool_removal` naming one, beside the turn's text: Anthropic's mid-conversation tool changes.
-Anthropic takes it. Morph answers 400 `system blocks must be of type 'text'` (2026-11-09), on
-every Claude Code turn that carries one.
+**What the vendor does.** Claude Code 2.1 adds a tool mid-conversation with a `role: system`
+message in `messages`. The message holds `tool_addition` blocks (`{"type": "tool_addition",
+"tool": {"type": "tool_definition", "definition": {"name": …, "description": …, "input_schema":
+…}}}`), or a `tool_removal` naming a tool, next to its text. Anthropic accepts this. Morph answers
+400 `system blocks must be of type 'text'` (2026-11-09), on every such message.
 
-**The rewrite.** `fold_tool_changes`, Morph's: each definition joins `tools`, a removal takes the
-tool it names out, and the turn keeps its text and its `cache_control` where they were, so the
-cached prefix behind it stands. The caller is told nothing: the model is offered the same tools.
-Measured 2026-11-09: with the blocks folded Morph answers 200 whether the text stays a system
-turn, moves into `system` or becomes a user turn, so it stays.
+**The rewrite.** `fold_tool_changes`, on Morph: each definition is added to `tools`, a removal
+takes its tool out of `tools`, and the message keeps its text and `cache_control` as sent. The
+caller is not told: the model gets the same tools either way. Measured 2026-11-09: with the blocks
+removed, Morph answers 200 whether the text stays a system message, moves into `system` or becomes
+a user message. It stays.
 
-Not `defer_loading`, which would keep the added tool out of the prompt: Morph takes the field and
-ignores it, the deferred tool is in the prompt all the same (asked which tools it sees, the model names it,
-2026-11-09), and its tool search tool is taken and not run. So the added tool goes in outright, and Morph's
-cached prefix behind `tools` is lost for that one request, the turn a tool is added on.
+`defer_loading` would keep the added tool out of the prompt, but Morph accepts the field and
+ignores it: the model lists a deferred tool when asked which tools it has (2026-11-09), and Morph's
+tool search tool is accepted and not run. So the tool is added outright, and Morph's prompt cache
+misses on that one request, the one that adds the tool.
 
 The caller sends, on `/anthropic/v1/messages`:
 
