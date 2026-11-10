@@ -193,15 +193,18 @@ func TestAVendorsAccountOfTheHopIsReadUnderItsOwnNames(t *testing.T) {
 		status int
 		want   Answer
 	}{
-		{"an unmet vendor answering", Default, 200, Answer{UpstreamRID: "theirs", UpstreamMS: 123}},
-		{"an unmet vendor refusing", Default, 429, Answer{UpstreamRID: "theirs", UpstreamMS: 123,
+		{"an unmet vendor answering", Default, 200, Answer{UpstreamRID: "theirs", UpstreamMS: 123, UpstreamTimed: true}},
+		{"an unmet vendor refusing", Default, 429, Answer{UpstreamRID: "theirs", UpstreamMS: 123, UpstreamTimed: true,
 			RetryAfter: "7", RemainingRequests: "0", RemainingTokens: "15000"}},
-		{"baseten", For("baseten"), 200, Answer{UpstreamRID: "theirs", UpstreamMS: 123, UpstreamAttempts: 2}},
+		{"baseten", For("baseten"), 200, Answer{UpstreamRID: "theirs", UpstreamMS: 123, UpstreamTimed: true, UpstreamAttempts: 2}},
 		{"an engine of ours", Engine, 429, Answer{}},
 	} {
 		if got := tc.v.Answered(tc.status, sent); got != tc.want {
 			t.Errorf("%s: answered %+v, want %+v", tc.name, got, tc.want)
 		}
+	}
+	if got := Default.Answered(200, header{"Openai-Processing-Ms": "0"}); got.UpstreamMS != 0 || !got.UpstreamTimed {
+		t.Errorf("a vendor's own 0ms read as no clock: %+v", got)
 	}
 	own := header{"X-Baseten-Request-Id": "b"}
 	if got := For("baseten").Answered(200, own).UpstreamRID; got != "b" {

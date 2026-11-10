@@ -185,7 +185,7 @@ status carries which fact:
 Where the time went is on the line as three groups, in milliseconds, none of which reaches the
 client. `latency` is the split: `total_ms` = `gateway_ms` + `upstream_ms`, with `ttfb_ms` the
 client's first byte (what `ttft` is in seconds) and `vendor_ms` the hop as the vendor's own clock
-had it (`openai-processing-ms`, 0 from one that sends none). `gateway` is our share by stage —
+had it (`openai-processing-ms`, `-` from one that sends none). `gateway` is our share by stage —
 `auth`, `quota`, `body`, `route` (its capacity wait included), `fallback` and `retry` (holding the
 attempts they discarded, each of which has an attempt line), `transform`, `upstreamauth` — then
 `respond`, ours between the upstream's first body byte and the client's, and `other`, every stage

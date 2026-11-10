@@ -48,7 +48,7 @@ func TestTheAccessLineSaysWhereTheTimeWent(t *testing.T) {
 	if ttfb, _ := latency["ttfb_ms"].(float64); ttfb < 20 || ttfb > total {
 		t.Errorf("latency.ttfb_ms = %v, want between the upstream's 20ms and the total", latency["ttfb_ms"])
 	}
-	if latency["vendor_ms"] != float64(0) {
+	if latency["vendor_ms"] != "-" {
 		t.Errorf("latency.vendor_ms = %v from a vendor that sends no clock", latency["vendor_ms"])
 	}
 	stages := group(t, line, "gateway")

@@ -743,7 +743,12 @@ func timing(state *State, started, clientFirstByte time.Time) []slog.Attr {
 	if !clientFirstByte.IsZero() {
 		latency = append(latency, slog.Float64("ttfb_ms", ms(clientFirstByte.Sub(started))))
 	}
-	latency = append(latency, slog.Int("vendor_ms", state.Outcome.UpstreamMS))
+	// A vendor that sends no clock reads "-", as every absent value on the line does; its own 0 stays 0.
+	if state.Outcome.UpstreamTimed {
+		latency = append(latency, slog.Int("vendor_ms", state.Outcome.UpstreamMS))
+	} else {
+		latency = append(latency, slog.String("vendor_ms", "-"))
+	}
 
 	// A stage's own time runs from when the request reached it to when it reached the next; the
 	// last one reached runs to now.
