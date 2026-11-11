@@ -55,7 +55,9 @@ func (base) Quirks() []string { return []string{"name_output_cap"} }
 // on a refusal its back-off and the headroom that ran out, under either shape's name.
 func (base) Answered(status int, header Header) Answer {
 	answer := Answer{UpstreamRID: first(header, "X-Request-Id", "Request-Id")}
-	answer.UpstreamMS, _ = strconv.Atoi(header.Get("Openai-Processing-Ms"))
+	if ms, err := strconv.Atoi(header.Get("Openai-Processing-Ms")); err == nil {
+		answer.UpstreamMS, answer.UpstreamTimed = ms, true
+	}
 	if status >= 400 {
 		answer.RetryAfter = header.Get("Retry-After")
 		answer.RemainingRequests = first(header, "X-Ratelimit-Remaining-Requests", "Anthropic-Ratelimit-Requests-Remaining")

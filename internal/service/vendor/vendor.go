@@ -112,8 +112,9 @@ type Answer struct {
 	// UpstreamRID is the upstream's own request id: what a ticket to a vendor quotes.
 	UpstreamRID string
 	// UpstreamMS is the hop as the vendor timed it: what of ttft was the vendor's, the rest being
-	// the wire and the gateway. 0 from a vendor that sends none.
-	UpstreamMS int
+	// the wire and the gateway. UpstreamTimed says the vendor sent one, so its 0 is told from none.
+	UpstreamMS    int
+	UpstreamTimed bool
 	// UpstreamAttempts is how many times the vendor ran the request on its side: more than 1 is
 	// where a slow ttft went. 0 from one that does not say.
 	UpstreamAttempts int
