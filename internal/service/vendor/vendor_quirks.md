@@ -452,8 +452,8 @@ per-model switch before it is routed.
    no-op on `base`, a named slot in `chat` or `messages` there, and the override on the vendor,
    with a test in `vendorfields_test.go` (`TestEachUpstreamDeclaresTheQuirksItHas` wants the
    least body it acts on). A header: override `Headers`, as Baseten does. A rewrite that is ours
-   rather than a vendor's refusal (fast mode, the cache partition's `CacheKey`) is a method with no
-   slot and no name: a row cannot switch it off. A new vendor: a file of its name with a type
+   rather than a vendor's refusal (fast mode, the cache partition's `CacheKey`, a field a vendor is
+   not sent in its `DroppedFields`) is a method with no slot and no name: a row cannot switch it off. A new vendor: a file of its name with a type
    embedding `base`, and a row in `known`.
 4. Add a section here: what the vendor does, the rewrite, what is sent and what the vendor gets.
 
@@ -522,4 +522,59 @@ The vendor gets:
  "messages": [{"role": "user", "content": "hi"},
   {"role": "system", "content": [
     {"type": "text", "text": "a reminder", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}]}
+```
+
+## 12. A cache read counted inside input_tokens
+
+**What the vendor does.** On the Anthropic shape, Anthropic counts a cache read beside
+`input_tokens`, not inside it: the whole prompt is `input_tokens` + `cache_read_input_tokens` +
+`cache_creation_input_tokens`, and metering adds the three. Morph's `/v1/messages` counts the read
+inside `input_tokens`, as its chat shape does inside `prompt_tokens`. One request sent twice
+(2026-11-17) answered:
+
+```json
+{"input_tokens": 8057, "output_tokens": 40, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+{"input_tokens": 8057, "output_tokens": 39, "cache_read_input_tokens": 4480, "cache_creation_input_tokens": 0}
+```
+
+Anthropic would have answered `input_tokens` 3577 the second time. Morph reports no cache write. A
+stream's `message_start` carries a part of the prompt (`input_tokens` 8887) and its last event the
+whole (47067, 2026-11-09).
+
+**The reading.** Nothing is rewritten: the answer reaches the caller as Morph sent it. Morph's type
+says `InputCountsCache`, and metering keeps `input_tokens` as the prompt. Read as Anthropic counts
+it, the second answer was a prompt of 12537 tokens with 4480 cached, so each cached token was
+charged at the plain rate and at the cached rate. It is now a prompt of 8057 with 4480 cached. Not
+a quirk a row switches off: it is how the vendor counts, not a rewrite of the request.
+
+## 13. A run tag
+
+**What the vendor does.** Morph schedules a tool-calling loop as one run when each of its requests
+carries the same `run_id`: the run is pinned to the worker holding its cache, and a request with
+`run_final: true` releases it without calling the model. `parent_run_id` names the run a subagent
+came from. It reads the same three as `program_id`, `parent_program_id` and `program_final`. Its
+reference reads them for Kimi K3.1 alone: `morph-glm53flash` and `morph-dsv41flash-1017` answered a
+`run_final` call as any other request, tokens and all (2026-11-17).
+
+**The rewrite.** All six are removed on a hop to Morph, on either shape. Morph does not say what a
+run id is scoped by, and every team dials it with one key: two teams sending one id could be
+scheduled as one run, and one's release could end the other's. Not a quirk a row switches off: the
+reason is ours, so it is the type's `DroppedFields`, taken off by `vendorfields` ahead of the
+quirks. A release call reaches Morph as an ordinary request and is answered and billed as one, as
+it already was on these two models. The answer says so:
+
+```
+X-Grove-Changed: run_id=none
+```
+
+The caller sends, on `/openai/v1/chat/completions`:
+
+```json
+{"model": "morph/glm-5.3-flash", "max_tokens": 64, "run_id": "run-8f2c1a", "messages": [{"role": "user", "content": "hi"}]}
+```
+
+The vendor gets:
+
+```json
+{"max_tokens": 64, "messages": [{"role": "user", "content": "hi"}], "model": "morph-glm53flash"}
 ```

@@ -492,6 +492,32 @@ func TestAPromptOfExactly272kIsNotAbove(t *testing.T) {
 	}
 }
 
+// An upstream whose input_tokens already holds its cache reads (Morph) is counted once: the prompt
+// as sent, the cached part beside it. Its stream opens with a part of the prompt and closes with
+// the whole (8887, then 47067, measured 2026-11-09), and the whole is what counts.
+func TestUsageFieldsWhereInputCountsTheCache(t *testing.T) {
+	usage := `{"usage":{"input_tokens":8057,"output_tokens":39,"cache_read_input_tokens":4480,"cache_creation_input_tokens":0}}`
+	fields, trusted := UsageFields(Report{Model: "glm", Usage: usage, InputCountsCache: true})
+	if !trusted {
+		t.Error("a consistent response was flagged")
+	}
+	for field, want := range map[string]int64{
+		"prompt_tokens": 8057, "cached_tokens": 4480, "completion_tokens": 39, "total_tokens": 8096,
+	} {
+		if fields[field] != want {
+			t.Errorf("%s = %d, want %d", field, fields[field], want)
+		}
+	}
+
+	start := `data: {"type":"message_start","message":{"usage":{"input_tokens":8887,"output_tokens":0}}}`
+	last := `data: {"type":"message_delta","usage":{"input_tokens":47067,"output_tokens":1,` +
+		`"cache_read_input_tokens":8960,"cache_creation_input_tokens":0}}`
+	fields, _ = UsageFields(Report{Model: "glm", UsageStart: start, Usage: last, InputCountsCache: true})
+	if fields["prompt_tokens"] != 47067 || fields["cached_tokens"] != 8960 || fields["total_tokens"] != 47068 {
+		t.Errorf("a split stream: %v", fields)
+	}
+}
+
 // The first usage line carries what the last one left out; one with nothing to read is ignored.
 func TestUsageFieldsMergesTheFirstUsageLine(t *testing.T) {
 	start := `data: {"type":"message_start","message":{"usage":{"input_tokens":66,"cache_read_input_tokens":2,` +

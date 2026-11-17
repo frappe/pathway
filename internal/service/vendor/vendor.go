@@ -29,6 +29,9 @@ type Vendor interface {
 	// UsagePerChunk asks a stream for usage on every chunk (`continuous_usage_stats`), so one that
 	// is cut is still billed for what it had generated.
 	UsagePerChunk() bool
+	// DroppedFields is each top-level field of a request this vendor reads and is not sent, on
+	// either shape. Ours and not a quirk, so a row cannot switch it off.
+	DroppedFields() []string
 	// Quirks names each of the rewrites above this vendor has, by the names QuirkNames lists: what
 	// the control plane offers to switch off per model. The rest are the shape's, and this
 	// vendor's methods for them change nothing.
@@ -100,6 +103,11 @@ type Response interface {
 	// Relay wraps the body on its way to the client, after usage was read off the raw bytes and
 	// before the model id is swapped back. The body as it came when nothing differs.
 	Relay(status int, stream bool, body io.ReadCloser) io.ReadCloser
+	// InputCountsCache says `input_tokens` of an Anthropic-shape usage already holds the cache
+	// buckets beside it (`cache_read_input_tokens`, `cache_creation_input_tokens`). Anthropic's
+	// does not, so metering adds them to the prompt; where this is true it must not, or each
+	// cached token is charged as a plain one as well.
+	InputCountsCache() bool
 }
 
 // Header is what a response's headers answer. net/http's Header satisfies it; this package may not
@@ -208,10 +216,10 @@ func RewriteChat(v Vendor, req *Request) (bool, error) { return run(v, req, chat
 // RewriteMessages is RewriteChat on the Anthropic messages shape.
 func RewriteMessages(v Vendor, req *Request) (bool, error) { return run(v, req, messages) }
 
-// run reports whether any rewrite changed the body, and stops at the first error with what was
-// changed so far.
+// run takes off what the vendor is not sent, then runs each rewrite. It reports whether the body
+// changed, and stops at the first error with what was changed so far.
 func run(v Vendor, req *Request, quirks []quirk) (bool, error) {
-	changed := false
+	changed := dropFields(v, req)
 	for _, q := range quirks {
 		if req.Skips(q.name) {
 			continue
@@ -223,6 +231,19 @@ func run(v Vendor, req *Request, quirks []quirk) (bool, error) {
 		changed = changed || did
 	}
 	return changed, nil
+}
+
+// dropFields takes each of the vendor's DroppedFields off the body, and the caller is told of each.
+func dropFields(v Vendor, req *Request) bool {
+	dropped := false
+	for _, field := range v.DroppedFields() {
+		if _, sent := req.Body[field]; sent {
+			delete(req.Body, field)
+			req.Tell(field + "=none")
+			dropped = true
+		}
+	}
+	return dropped
 }
 
 // Default is a third party the table does not name: the shape as documented, nothing a named

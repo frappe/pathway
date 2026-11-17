@@ -214,6 +214,27 @@ func TestMergeUsageOfASplitAnthropicStream(t *testing.T) {
 	}
 }
 
+// Morph's /v1/messages counts a cache read inside input_tokens (measured 2026-11-17: one request
+// sent twice answered input_tokens 8057 both times, the second with 4480 read from the cache). Read
+// as Anthropic counts it, those 4480 are in the prompt twice.
+func TestReadUsageWhereInputCountsTheCache(t *testing.T) {
+	raw := []byte(`{"usage":{"input_tokens":8057,"output_tokens":39,"cache_read_input_tokens":4480,"cache_creation_input_tokens":0}}`)
+
+	want := Usage{Prompt: 8057, Completion: 39, Total: 8096, Cached: 4480}
+	if got, ok := ReadUsage(raw, true); !ok || got != want {
+		t.Fatalf("got %+v ok=%v, want %+v", got, ok, want)
+	}
+	if anthropic, _ := ParseUsage(raw); anthropic.Prompt != 8057+4480 {
+		t.Fatalf("Anthropic's own count moved: %+v", anthropic)
+	}
+	// The OpenAI shape says where its cache is, so the reading changes nothing there.
+	chat := []byte(`{"usage":{"prompt_tokens":8057,"completion_tokens":40,"prompt_tokens_details":{"cached_tokens":4480}}}`)
+	plain, _ := ParseUsage(chat)
+	if got, _ := ReadUsage(chat, true); got != plain || got.Prompt != 8057 {
+		t.Fatalf("the chat shape read differently: %+v, %+v", got, plain)
+	}
+}
+
 // OpenAI reports a cache write inside prompt_tokens, beside the cached read.
 func TestParseUsageOpenAICacheWrite(t *testing.T) {
 	raw := []byte(`{"usage":{"prompt_tokens":300,"completion_tokens":8,"total_tokens":308,` +

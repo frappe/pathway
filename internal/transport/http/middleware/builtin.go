@@ -20,6 +20,7 @@ import (
 	"github.com/frappe/pathway/internal/service/metering"
 	"github.com/frappe/pathway/internal/service/routing"
 	"github.com/frappe/pathway/internal/service/transform"
+	"github.com/frappe/pathway/internal/service/vendor"
 	"github.com/frappe/pathway/internal/transport/http/proxy"
 	"github.com/frappe/pathway/internal/transport/respond"
 )
@@ -416,20 +417,21 @@ func newMeter(deps Deps) (Middleware, error) {
 				ctx := withoutCancel(r.Context())
 				deps.Routing.Release(ctx, state.Decision.Route, state.Decision.RequestID)
 				deps.Metering.Record(ctx, metering.Report{
-					RequestID:      state.RequestID,
-					Prefix:         state.Identity.Prefix(),
-					MeterID:        state.Identity.MeterID,
-					Model:          state.ServingModel(),
-					Deployment:     or(state.Outcome.Deployment, state.Decision.Route.Deployment),
-					Usage:          state.Outcome.Usage,
-					UsageStart:     state.Outcome.UsageStart,
-					Pricing:        state.Decision.Route.Pricing,
-					Budget:         state.Identity.Key.Budget,
-					Limits:         state.Identity.Key.Limits,
-					Target:         state.Decision.HealthTarget(),
-					UpstreamStatus: statusText(state.Outcome.Status),
-					Reason:         state.Outcome.Reason,
-					Cut:            state.Outcome.Cut,
+					RequestID:        state.RequestID,
+					Prefix:           state.Identity.Prefix(),
+					MeterID:          state.Identity.MeterID,
+					Model:            state.ServingModel(),
+					Deployment:       or(state.Outcome.Deployment, state.Decision.Route.Deployment),
+					Usage:            state.Outcome.Usage,
+					UsageStart:       state.Outcome.UsageStart,
+					InputCountsCache: vendor.Of(state.Decision.Route).InputCountsCache(),
+					Pricing:          state.Decision.Route.Pricing,
+					Budget:           state.Identity.Key.Budget,
+					Limits:           state.Identity.Key.Limits,
+					Target:           state.Decision.HealthTarget(),
+					UpstreamStatus:   statusText(state.Outcome.Status),
+					Reason:           state.Outcome.Reason,
+					Cut:              state.Outcome.Cut,
 				})
 			}()
 			next.ServeHTTP(w, r)

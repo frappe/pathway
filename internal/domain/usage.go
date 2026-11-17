@@ -36,7 +36,12 @@ type Usage struct {
 // ParseUsage reads a token count from a full response, a bare usage object, or the tail of a
 // response the tee truncated, in either key dialect. ok=false when no token fields are present — a
 // streaming chunk before the final frame.
-func ParseUsage(raw []byte) (Usage, bool) {
+func ParseUsage(raw []byte) (Usage, bool) { return ReadUsage(raw, false) }
+
+// ReadUsage is ParseUsage for an upstream that may count the Anthropic shape its own way.
+// inputCountsCache says its `input_tokens` already holds the cache buckets beside it, so they are
+// not added to the prompt a second time.
+func ReadUsage(raw []byte, inputCountsCache bool) (Usage, bool) {
 	raw = TrimSSE(raw)
 	var m map[string]json.RawMessage
 	if sonic.Unmarshal(raw, &m) == nil {
@@ -47,11 +52,11 @@ func ParseUsage(raw []byte) (Usage, bool) {
 				m = um
 			}
 		}
-		if u, ok := usageFrom(m); ok {
+		if u, ok := usageFrom(m, inputCountsCache); ok {
 			return u, true
 		}
 	}
-	return lastUsage(raw)
+	return lastUsage(raw, inputCountsCache)
 }
 
 // MergeUsage folds two usage reports of one request into one: the larger of each field, because
@@ -77,7 +82,7 @@ func MergeUsage(a, b Usage) Usage {
 // usage object at its tail is whole — or one that nests it deeper. Backwards, because the real one
 // is last. The ':' skips a token whose TEXT is "usage": a bare value is followed by ',' or '}', and
 // inside a string the quotes arrive escaped and never match.
-func lastUsage(raw []byte) (Usage, bool) {
+func lastUsage(raw []byte, inputCountsCache bool) (Usage, bool) {
 	key := []byte(`"usage"`)
 	for end := len(raw); ; {
 		at := bytes.LastIndex(raw[:end], key)
@@ -94,14 +99,14 @@ func lastUsage(raw []byte) (Usage, bool) {
 		if json.NewDecoder(bytes.NewReader(value)).Decode(&object) != nil {
 			continue
 		}
-		if u, ok := usageFrom(object); ok {
+		if u, ok := usageFrom(object, inputCountsCache); ok {
 			return u, true
 		}
 	}
 }
 
 // usageFrom normalizes one usage object, in either key dialect.
-func usageFrom(m map[string]json.RawMessage) (Usage, bool) {
+func usageFrom(m map[string]json.RawMessage, inputCountsCache bool) (Usage, bool) {
 	geti := func(keys ...string) (int, bool) {
 		for _, k := range keys {
 			if r, ok := m[k]; ok {
@@ -138,6 +143,9 @@ func usageFrom(m map[string]json.RawMessage) (Usage, bool) {
 		// in so Prompt/Total are the full processed input (matches OpenAI shape).
 		// Credit reads only — cache_creation is a write, billed.
 		u.Prompt = p + cacheRead + cacheCreate
+		if inputCountsCache {
+			u.Prompt = p
+		}
 		u.Cached = cacheRead
 		u.CacheWrite = cacheCreate
 		u.CacheWrite1h = min(nestedInt(m, "cache_creation", "ephemeral_1h_input_tokens"), cacheCreate)

@@ -42,6 +42,11 @@ Both are normalised to: `Prompt` = the full input processed, `Total` = `Prompt +
 `Cached ⊆ Prompt`. Cache **creation** is a write, so it lands in `Prompt` but not in `Cached`.
 Billable is then `Total - Cached` on either shape.
 
+A vendor may count the Anthropic shape its own way. Morph's `input_tokens` already holds its cache
+reads, so its type says so (`vendor.Response.InputCountsCache`, carried on the report) and its
+`input_tokens` is the prompt as it stands: adding the cache bucket again would charge each cached
+token as a plain one as well.
+
 `cached_tokens` is only non-zero when the engine was started with
 `--enable-prompt-tokens-details`. Without it every request bills as uncached.
 
