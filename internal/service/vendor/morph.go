@@ -14,6 +14,12 @@ type morph struct{ base }
 
 func (morph) Quirks() []string { return []string{"name_output_cap", "fold_tool_changes"} }
 
+// InputCountsCache: Morph's /v1/messages counts a cache read inside `input_tokens`, as its chat
+// shape does inside `prompt_tokens`. One request sent twice answered `input_tokens` 8057 both
+// times, `cache_read_input_tokens` 0 and then 4480 (2026-11-17); Anthropic would have answered 3577
+// the second time. It reports no cache write.
+func (morph) InputCountsCache() bool { return true }
+
 // FoldToolChanges: Morph answers 400 `system blocks must be of type 'text'` to the turn Claude
 // Code 2.1 loads a deferred tool with, a `role: system` message of `tool_addition` blocks
 // (`{"tool": {"type": "tool_definition", "definition": {...}}}`) beside its text. Each definition

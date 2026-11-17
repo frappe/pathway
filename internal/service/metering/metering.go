@@ -27,6 +27,9 @@ type Report struct {
 	Usage string
 	// UsageStart is the first usage line of a response that carried more than one. May be empty.
 	UsageStart string
+	// InputCountsCache is the upstream's own reading of the Anthropic shape (vendor.Response): its
+	// `input_tokens` already holds the cache buckets beside it.
+	InputCountsCache bool
 	// What it cost: the pricing that charges it (nil = unpriced), and the cap the key's balance
 	// is reported against.
 	Pricing *domain.Pricing
@@ -138,9 +141,9 @@ func UsageFields(rep Report) (fields map[string]int64, trusted bool) {
 	}
 
 	bump("request_count", 1)
-	u, ok := domain.ParseUsage([]byte(rep.Usage))
+	u, ok := domain.ReadUsage([]byte(rep.Usage), rep.InputCountsCache)
 	// A first line with nothing to read (OpenAI's "usage":null chunks) is ignored.
-	if start, split := domain.ParseUsage([]byte(rep.UsageStart)); split {
+	if start, split := domain.ReadUsage([]byte(rep.UsageStart), rep.InputCountsCache); split {
 		u, ok = domain.MergeUsage(start, u), true
 	}
 	if !ok {

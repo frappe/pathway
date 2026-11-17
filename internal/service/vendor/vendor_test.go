@@ -233,6 +233,22 @@ func TestARefusalIsPeekedAndClassedPerUpstream(t *testing.T) {
 // Each upstream puts the tenant where it partitions its prompt cache, prefixes a value the caller
 // sent, and writes nothing with no tenant to name; one with no such field changes nothing. Only
 // DeepSeek reads one on the Anthropic shape, inside metadata, whose other keys keep their bytes.
+// Only Morph was seen to count a cache read inside input_tokens on the Anthropic shape; every
+// other upstream is read as Anthropic counts it.
+func TestOnlyMorphCountsTheCacheInsideInputTokens(t *testing.T) {
+	for name, v := range map[string]Vendor{
+		"an engine of ours": Engine, "openai": For("openai"), "deepseek": For("deepseek"),
+		"baseten": For("baseten"), "anthropic": For("anthropic"), "an unmet vendor": Default,
+	} {
+		if v.InputCountsCache() {
+			t.Errorf("%s: read as counting the cache inside input_tokens", name)
+		}
+	}
+	if !For("morph").InputCountsCache() {
+		t.Error("morph: its cache reads would be counted twice")
+	}
+}
+
 func TestEachUpstreamPartitionsItsCacheWhereItReadsIt(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

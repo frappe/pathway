@@ -100,6 +100,11 @@ type Response interface {
 	// Relay wraps the body on its way to the client, after usage was read off the raw bytes and
 	// before the model id is swapped back. The body as it came when nothing differs.
 	Relay(status int, stream bool, body io.ReadCloser) io.ReadCloser
+	// InputCountsCache says `input_tokens` of an Anthropic-shape usage already holds the cache
+	// buckets beside it (`cache_read_input_tokens`, `cache_creation_input_tokens`). Anthropic's
+	// does not, so metering adds them to the prompt; where this is true it must not, or each
+	// cached token is charged as a plain one as well.
+	InputCountsCache() bool
 }
 
 // Header is what a response's headers answer. net/http's Header satisfies it; this package may not

@@ -87,3 +87,6 @@ func (base) Classify(status int, body []byte) string { return domain.FailureClas
 // Relay: the body as it came. Responses are not rewritten; a vendor that writes something the
 // shape does not would wrap the reader here.
 func (base) Relay(_ int, _ bool, body io.ReadCloser) io.ReadCloser { return body }
+
+// InputCountsCache: as Anthropic counts it, the cache buckets beside `input_tokens`.
+func (base) InputCountsCache() bool { return false }

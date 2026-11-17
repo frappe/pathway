@@ -523,3 +523,26 @@ The vendor gets:
   {"role": "system", "content": [
     {"type": "text", "text": "a reminder", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}]}
 ```
+
+## 12. A cache read counted inside input_tokens
+
+**What the vendor does.** On the Anthropic shape, Anthropic counts a cache read beside
+`input_tokens`, not inside it: the whole prompt is `input_tokens` + `cache_read_input_tokens` +
+`cache_creation_input_tokens`, and metering adds the three. Morph's `/v1/messages` counts the read
+inside `input_tokens`, as its chat shape does inside `prompt_tokens`. One request sent twice
+(2026-11-17) answered:
+
+```json
+{"input_tokens": 8057, "output_tokens": 40, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+{"input_tokens": 8057, "output_tokens": 39, "cache_read_input_tokens": 4480, "cache_creation_input_tokens": 0}
+```
+
+Anthropic would have answered `input_tokens` 3577 the second time. Morph reports no cache write. A
+stream's `message_start` carries a part of the prompt (`input_tokens` 8887) and its last event the
+whole (47067, 2026-11-09).
+
+**The reading.** Nothing is rewritten: the answer reaches the caller as Morph sent it. Morph's type
+says `InputCountsCache`, and metering keeps `input_tokens` as the prompt. Read as Anthropic counts
+it, the second answer was a prompt of 12537 tokens with 4480 cached, so each cached token was
+charged at the plain rate and at the cached rate. It is now a prompt of 8057 with 4480 cached. Not
+a quirk a row switches off: it is how the vendor counts, not a rewrite of the request.
