@@ -47,6 +47,9 @@ func (base) MetadataCacheKey(*Request) (bool, error) { return false, nil }
 
 func (base) UsagePerChunk() bool { return false }
 
+// DroppedFields: none. A field the shape does not name is the upstream's to read or refuse.
+func (base) DroppedFields() []string { return nil }
+
 // Quirks: the cap's name is every third party's; nothing else here changes a body.
 func (base) Quirks() []string { return []string{"name_output_cap"} }
 

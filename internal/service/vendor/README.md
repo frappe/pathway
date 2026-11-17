@@ -30,6 +30,7 @@ What a vendor is sent in place of what the client sent:
 | `service_tier` | dropped: it picks the vendor's price class, which nothing here prices. The caller is told: `X-Grove-Changed: service_tier=default` (`servicetier`) |
 | `prompt_cache_key` (OpenAI shape) | at OpenAI the tenant, or `<team>:<value>` when the caller sent one: a key's cache accounting is the team's, and no team can land in another's (`cachekey`, from the type's `CacheKey`) |
 | `user_id` (OpenAI shape), `metadata.user_id` (Anthropic shape) | at DeepSeek the tenant, or `<team>:<value>` when the caller sent one: its KV cache isolation is per team (`cachekey`, from the type's `CacheKey` and `MetadataCacheKey`) |
+| `run_id`, `parent_run_id`, `run_final`, and the same three as `program_id`, `parent_program_id`, `program_final` | removed at Morph, whose scheduler reads them: every team dials it with one key, so one team's run id could be another's. The caller is told: `X-Grove-Changed: run_id=none` (`vendorfields`, from the type's `DroppedFields`) |
 | every other field, listed above or not | as the client sent it |
 
 - **A field not on the list is forwarded**, not dropped and not refused: the list is what the
@@ -61,7 +62,7 @@ What a vendor is sent in place of what the client sent:
   (`Answered`: Baseten's own request id and retries), which refusals are read to the end before
   they are classed and what they mean (`Peeks`, `Classify`), and a rewrite of the answer itself
   (`Relay`, which no vendor needs yet). How it counts a cache read on the Anthropic shape is the
-  type's as well (`InputCountsCache`: Morph's `input_tokens` already holds it), read by metering. Where it partitions its prompt cache is the type's too
+  type's as well (`InputCountsCache`: Morph's `input_tokens` already holds it), read by metering. A field it reads and is not sent is the type's as well (`DroppedFields`: Morph's run tags). Where it partitions its prompt cache is the type's too
   (`CacheKey`, `MetadataCacheKey`: an engine's `cache_salt`, OpenAI's `prompt_cache_key`,
   DeepSeek's `user_id`), set to the tenant by `cachesalt` and `cachekey` when `isolate_caches` is
   on — ours, not a quirk, so no row switches it off. [vendor_quirks.md](vendor_quirks.md) shows each rewrite
@@ -105,5 +106,6 @@ one list of it: add a row or a column when a new difference shows up, with the d
 | A `role: system` message inside `messages` with `tool_addition` / `tool_removal` blocks next to its text (Anthropic shape; Claude Code 2.1 adds a tool mid-conversation this way) | not checked | no such shape | not checked | not checked | 400 `system blocks must be of type 'text'` (2026-11-09); 200 once the blocks are removed and the text stays | `vendorfields`, from `vendor`: Morph's `fold_tool_changes` adds each definition to `tools`, takes a removed one out, and keeps the message's text |
 | `defer_loading` on a tool, and the `tool_search_tool_regex_20251119` server tool (Anthropic shape) | not checked | no such shape | not checked | not checked | accepted and ignored: a deferred tool is in the prompt anyway, the model lists it when asked which tools it has (2026-11-09); the search tool is accepted and not run | not handled: there is nothing to defer to, so `fold_tool_changes` adds the tool outright and Morph's prompt cache misses on that one request |
 | Where a cache read is counted in an Anthropic-shape usage | not checked | no such shape | not checked | not checked | inside `input_tokens`: one request sent twice answered `input_tokens` 8057 both times, `cache_read_input_tokens` 0 then 4480 (2026-11-17), where Anthropic's own count leaves the read out; `cache_creation_input_tokens` is always 0; a stream's `message_start` carries a part of the prompt (8887) and its last event the whole (47067, 2026-11-09) | metering, from `vendor`: Morph's `InputCountsCache` keeps `input_tokens` as the prompt; the larger of a stream's two counts is kept for every upstream |
+| A run tag on the request: `run_id`, `parent_run_id`, `run_final`, or the same three as `program_id`, `parent_program_id`, `program_final` | not checked | not checked | not checked | not checked | its scheduler's, for Kimi K3.1 alone by its reference: requests sharing an id are scheduled as one run, and a `run_final` call releases it without calling the model. `morph-glm53flash` and `morph-dsv41flash-1017` answered a `run_final` call as any other, tokens and all (2026-11-17) | `vendorfields`, from `vendor`: Morph's `DroppedFields` takes all six off, and the caller is told |
 
 What Baseten bills for a stream that was cut has not been compared with its own usage report.

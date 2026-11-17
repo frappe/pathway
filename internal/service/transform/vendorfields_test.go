@@ -317,6 +317,38 @@ func TestFastModeIsTakenOffARequestToAVendor(t *testing.T) {
 	}
 }
 
+// Morph schedules requests that share a run id as one run, and every team dials it with one key:
+// its run tags are taken off either shape, under both of their names, and the caller is told. Any
+// other upstream is sent them as they came.
+func TestARunTagIsTakenOffARequestToMorph(t *testing.T) {
+	const tagged = `{"max_tokens":16,"run_id":"r","parent_run_id":"p","run_final":true,"program_id":"r","parent_program_id":"p","program_final":true}`
+	told := []string{"run_id=none", "parent_run_id=none", "run_final=none", "program_id=none", "parent_program_id=none", "program_final=none"}
+	for _, tc := range []struct {
+		path, vendor, raw, want string
+		told                    []string
+	}{
+		{"/v1/chat/completions", "morph", tagged, `{"max_tokens":16}`, told},
+		{"/v1/messages", "morph", tagged, `{"max_tokens":16}`, told},
+		{"/v1/messages", "morph", `{"max_tokens":16,"run_final":false}`, `{"max_tokens":16}`, []string{"run_final=none"}},
+		{"/v1/messages", "morph", `{"max_tokens":16}`, `{"max_tokens":16}`, nil},
+		{"/v1/chat/completions", "deepseek", `{"max_tokens":16,"run_id":"r"}`, `{"max_tokens":16,"run_id":"r"}`, nil},
+		{"/v1/messages", "anthropic", `{"max_tokens":16,"run_id":"r"}`, `{"max_tokens":16,"run_id":"r"}`, nil},
+		{"/v1/chat/completions", "", `{"max_tokens":16,"run_id":"r"}`, `{"max_tokens":16,"run_id":"r"}`, nil},
+	} {
+		body, got := decode(t, tc.raw), []string{}
+		changed, err := (vendorFields{}).Apply(Context{Path: tc.path, Provider: tc.vendor != "", Vendor: tc.vendor, Changed: &got}, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sent, _ := json.Marshal(body); string(sent) != tc.want || changed != (len(tc.told) > 0) {
+			t.Errorf("%s %q %s: body = %s, want %s (changed %v)", tc.path, tc.vendor, tc.raw, sent, tc.want, changed)
+		}
+		if !slices.Equal(got, tc.told) {
+			t.Errorf("%s %q %s: told %v, want %v", tc.path, tc.vendor, tc.raw, got, tc.told)
+		}
+	}
+}
+
 // Registered is not running: the rename only happens while the default list names it.
 func TestVendorFieldsRunsByDefault(t *testing.T) {
 	body := decode(t, `{"max_tokens":16}`)

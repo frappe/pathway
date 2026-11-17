@@ -452,8 +452,8 @@ per-model switch before it is routed.
    no-op on `base`, a named slot in `chat` or `messages` there, and the override on the vendor,
    with a test in `vendorfields_test.go` (`TestEachUpstreamDeclaresTheQuirksItHas` wants the
    least body it acts on). A header: override `Headers`, as Baseten does. A rewrite that is ours
-   rather than a vendor's refusal (fast mode, the cache partition's `CacheKey`) is a method with no
-   slot and no name: a row cannot switch it off. A new vendor: a file of its name with a type
+   rather than a vendor's refusal (fast mode, the cache partition's `CacheKey`, a field a vendor is
+   not sent in its `DroppedFields`) is a method with no slot and no name: a row cannot switch it off. A new vendor: a file of its name with a type
    embedding `base`, and a row in `known`.
 4. Add a section here: what the vendor does, the rewrite, what is sent and what the vendor gets.
 
@@ -546,3 +546,35 @@ says `InputCountsCache`, and metering keeps `input_tokens` as the prompt. Read a
 it, the second answer was a prompt of 12537 tokens with 4480 cached, so each cached token was
 charged at the plain rate and at the cached rate. It is now a prompt of 8057 with 4480 cached. Not
 a quirk a row switches off: it is how the vendor counts, not a rewrite of the request.
+
+## 13. A run tag
+
+**What the vendor does.** Morph schedules a tool-calling loop as one run when each of its requests
+carries the same `run_id`: the run is pinned to the worker holding its cache, and a request with
+`run_final: true` releases it without calling the model. `parent_run_id` names the run a subagent
+came from. It reads the same three as `program_id`, `parent_program_id` and `program_final`. Its
+reference reads them for Kimi K3.1 alone: `morph-glm53flash` and `morph-dsv41flash-1017` answered a
+`run_final` call as any other request, tokens and all (2026-11-17).
+
+**The rewrite.** All six are removed on a hop to Morph, on either shape. Morph does not say what a
+run id is scoped by, and every team dials it with one key: two teams sending one id could be
+scheduled as one run, and one's release could end the other's. Not a quirk a row switches off: the
+reason is ours, so it is the type's `DroppedFields`, taken off by `vendorfields` ahead of the
+quirks. A release call reaches Morph as an ordinary request and is answered and billed as one, as
+it already was on these two models. The answer says so:
+
+```
+X-Grove-Changed: run_id=none
+```
+
+The caller sends, on `/openai/v1/chat/completions`:
+
+```json
+{"model": "morph/glm-5.3-flash", "max_tokens": 64, "run_id": "run-8f2c1a", "messages": [{"role": "user", "content": "hi"}]}
+```
+
+The vendor gets:
+
+```json
+{"max_tokens": 64, "messages": [{"role": "user", "content": "hi"}], "model": "morph-glm53flash"}
+```
