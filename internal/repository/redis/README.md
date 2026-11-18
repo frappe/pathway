@@ -183,8 +183,7 @@ status in `upstream_status`, and the error log keeps the vendor's own words with
 billed once whatever it walked, and the access line's `attempts` counts the dials. Every attempt
 lands in `pk:<key id>`
 (`requests`, `ok`, `rate_limited`, `unauthorized`, `unpaid`, `forbidden`, `rejected` — the three
-before it together — `failed`, `cancelled` for a hop the client left before the vendor answered,
-`last_used`, `last_rate_limited`) until
+before it together — `failed`, `last_used`, `last_rate_limited`) until
 `GET /grove-admin/provider-keys?ids=a,b` takes it.
 
 `dialect` is the API shape the row speaks, `openai` or `anthropic`, and nothing translates between

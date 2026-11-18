@@ -140,13 +140,9 @@ func aSuccessClearsTheFailures(t *testing.T, store repository.Store) {
 func providerKeysTakeClears(t *testing.T, store repository.Store) {
 	must(t, store.ProviderKeys.Count(ctx, "p1", 200))
 	must(t, store.ProviderKeys.Count(ctx, "p1", 429))
-	must(t, store.ProviderKeys.Count(ctx, "p1", domain.StatusClientClosed))
 	stats, err := store.ProviderKeys.Take(ctx, []string{"p1", "never"})
-	if err != nil || stats["p1"].Requests != 3 || stats["p1"].OK != 1 || stats["p1"].RateLimited != 1 || stats["never"].Requests != 0 {
+	if err != nil || stats["p1"].Requests != 2 || stats["p1"].OK != 1 || stats["p1"].RateLimited != 1 || stats["never"].Requests != 0 {
 		t.Fatalf("Take = %+v, %v", stats, err)
-	}
-	if stats["p1"].Cancelled != 1 || stats["p1"].Failed != 0 {
-		t.Fatalf("a client that left = %+v, want cancelled 1, failed 0", stats["p1"])
 	}
 	if again, _ := store.ProviderKeys.Take(ctx, []string{"p1"}); again["p1"].Requests != 0 {
 		t.Fatalf("second Take = %+v, want zero", again["p1"])

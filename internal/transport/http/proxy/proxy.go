@@ -64,7 +64,7 @@ type Outcome struct {
 
 // statusClientClosed is what the access line shows for a client that left before the upstream
 // answered. Nobody receives it; it keeps those requests out of the 502s.
-const statusClientClosed = domain.StatusClientClosed
+const statusClientClosed = 499
 
 // errUpstreamIdle is why the hop was cancelled when the upstream went silent after its headers.
 var errUpstreamIdle = errors.New("the upstream sent nothing for the read timeout")

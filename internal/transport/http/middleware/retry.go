@@ -92,11 +92,15 @@ func newRetry(deps Deps) (Middleware, error) {
 
 // keyedAttempt is serveAttempt with the attempt landed on the key it dialled with, under what its
 // answer meant and how the hop ended. Deferred: an abort that goes on up, a client hanging up
-// mid-stream, is still the key's attempt.
+// mid-stream, is still the key's attempt. A client that left before any answer is not: that says
+// nothing of the key, and the access line has it.
 func keyedAttempt(deps Deps, next http.Handler, writer *attemptWriter, r *http.Request) {
 	defer func() {
 		state := From(r)
 		writer.decide()
+		if state.Outcome.Status == 0 && state.Outcome.Cut == domain.CutClientLeft {
+			return
+		}
 		countAttempt(deps, r, state.Decision.Key, domain.CountedStatus(writer.class, state.Outcome.Status, state.Outcome.Cut))
 	}()
 	serveAttempt(next, writer, r)

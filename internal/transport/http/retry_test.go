@@ -127,9 +127,9 @@ func TestARateLimitedKeyIsSwappedForAnother(t *testing.T) {
 	}
 }
 
-// A client that leaves before the vendor answers says nothing of the key: the hop is counted
-// cancelled, not failed.
-func TestAClientThatLeftIsNotAFailedKey(t *testing.T) {
+// A client that leaves before the vendor answers says nothing of the key: the hop is not counted
+// on it at all, least of all as a failure. The access line has it.
+func TestAClientThatLeftBeforeAnAnswerIsNotCountedOnTheKey(t *testing.T) {
 	f, vendor := keyedFixture(t, nil, "A")
 	ctx, leave := context.WithCancel(context.Background())
 	vendor.onDial = func(_ http.ResponseWriter, r *http.Request) { leave(); <-r.Context().Done() }
@@ -138,8 +138,11 @@ func TestAClientThatLeftIsNotAFailedKey(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	f.handler.ServeHTTP(httptest.NewRecorder(), r)
 
-	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["cancelled"] != 1 || got["failed"] != 0 {
-		t.Errorf("stats = %v, want one cancelled attempt", got)
+	if len(vendor.keys) != 1 {
+		t.Fatalf("the vendor was dialled %d times, want once", len(vendor.keys))
+	}
+	if got := f.keyCounts(t, "A"); got["requests"] != 0 || got["failed"] != 0 {
+		t.Errorf("stats = %v, want nothing counted", got)
 	}
 }
 
@@ -171,7 +174,7 @@ func TestAClientThatLeftMidStreamLeavesTheKeyItsAnswer(t *testing.T) {
 	// Close waits for the handler to unwind, so the count has landed or never will.
 	gateway.Close()
 
-	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["ok"] != 1 || got["cancelled"] != 0 {
+	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["ok"] != 1 {
 		t.Errorf("stats = %v, want one ok attempt", got)
 	}
 }

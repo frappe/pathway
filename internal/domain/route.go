@@ -97,7 +97,8 @@ func (r Route) Keyring() []Credential {
 // counts it. OK is every
 // answer that was not the key's fault nor the upstream's — a 2xx, or a 4xx the request earned;
 // Failed is a 5xx, a hop that produced no status, or a good answer the upstream began and did
-// not finish; Cancelled a hop the client left before any answer. Timestamps are unix seconds.
+// not finish. A hop the client left before any answer is not counted at all. Timestamps are unix
+// seconds.
 type KeyStats struct {
 	Requests     int64 `json:"requests"`
 	OK           int64 `json:"ok"`
@@ -108,14 +109,9 @@ type KeyStats struct {
 	// Rejected is the three above together: the one count a reader had before they were split.
 	Rejected        int64 `json:"rejected"`
 	Failed          int64 `json:"failed"`
-	Cancelled       int64 `json:"cancelled"`
 	LastUsed        int64 `json:"last_used"`
 	LastRateLimited int64 `json:"last_rate_limited"`
 }
-
-// StatusClientClosed is what the access line shows for a client that left before the upstream
-// answered, and what that hop is counted on its key under. Nobody receives it.
-const StatusClientClosed = 499
 
 // IsKeyRejected reports a status that says the credential is dead for this request: unauthorised,
 // unpaid or forbidden. A rate limit is not — that key may be back once the others are spent. The
@@ -287,14 +283,10 @@ const MaxFallbacks = 3
 // CountedStatus is the status an attempt lands on its key under (KeyStatusClass): the one its
 // class means when the vendor hid it under another — an exhausted account under a 429 or a 400
 // counts unpaid, a key that cannot reach the model forbidden — else the one sent. `cut` is who
-// ended a hop that did not finish: a client that left before any answer is a 499, not a dead
-// connection, and a good answer the upstream began and did not finish is a 502. A client that
-// left in the middle of an answer changes nothing: the answer was the upstream's.
+// ended a hop that did not finish: a good answer the upstream began and did not finish is a 502,
+// and a client that left in the middle of an answer changes nothing, the answer was the upstream's.
 func CountedStatus(class string, status int, cut string) int {
-	switch {
-	case cut == CutClientLeft && status == 0:
-		return StatusClientClosed
-	case (cut == CutUpstream || cut == CutUpstreamIdle) && status < 400:
+	if (cut == CutUpstream || cut == CutUpstreamIdle) && status < 400 {
 		return 502
 	}
 	switch class {
@@ -320,8 +312,6 @@ func KeyStatusClass(status int) string {
 	switch {
 	case status == 429:
 		return "rate_limited"
-	case status == StatusClientClosed:
-		return "cancelled"
 	case status >= 200 && status < 500:
 		return "ok"
 	default:

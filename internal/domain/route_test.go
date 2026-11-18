@@ -271,7 +271,7 @@ func TestKeyStatusClass(t *testing.T) {
 	for status, want := range map[int]string{
 		200: "ok", 400: "ok", 404: "ok", 429: "rate_limited",
 		401: "unauthorized", 402: "unpaid", 403: "forbidden",
-		500: "failed", 502: "failed", 0: "failed", StatusClientClosed: "cancelled",
+		500: "failed", 502: "failed", 0: "failed",
 	} {
 		if got := KeyStatusClass(status); got != want {
 			t.Errorf("KeyStatusClass(%d) = %q, want %q", status, got, want)
@@ -394,8 +394,7 @@ func TestCountedStatus(t *testing.T) {
 		{ClassRateLimit, 503, "", 429},
 		{ClassModelGone, 410, "", 410}, {ClassCallerFault, 400, "", 400}, {ClassTransient, 502, "", 502},
 		{"", 200, "", 200}, {ClassTimeout, 0, "", 0},
-		// The client left: a cancel before any answer, the answer itself once there was one.
-		{ClassCancelled, 0, CutClientLeft, StatusClientClosed},
+		// The client left in the middle of an answer: the answer stands.
 		{ClassCancelled, 200, CutClientLeft, 200}, {ClassRateLimit, 429, CutClientLeft, 429},
 		// A good answer the upstream broke off or let go silent is its failure.
 		{ClassTransient, 200, CutUpstream, 502}, {ClassTimeout, 200, CutUpstreamIdle, 502},
