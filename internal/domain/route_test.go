@@ -383,19 +383,26 @@ func TestUpstreamFault(t *testing.T) {
 // it under.
 func TestCountedStatus(t *testing.T) {
 	for _, tc := range []struct {
-		class        string
-		status, want int
+		class  string
+		status int
+		cut    string
+		want   int
 	}{
-		{ClassQuota, 429, 402}, {ClassQuota, 400, 402},
-		{ClassCredential, 401, 401}, {ClassCredential, 400, 401}, {ClassCredential, 403, 403},
-		{ClassModelAccess, 404, 403}, {ClassRegionBlocked, 403, 403},
-		{ClassRateLimit, 503, 429},
-		{ClassModelGone, 410, 410}, {ClassCallerFault, 400, 400}, {ClassTransient, 502, 502}, {"", 200, 200}, {ClassTimeout, 0, 0},
-		// The client left, before an answer or in the middle of one.
-		{ClassCancelled, 0, StatusClientClosed}, {ClassCancelled, 200, StatusClientClosed},
+		{ClassQuota, 429, "", 402}, {ClassQuota, 400, "", 402},
+		{ClassCredential, 401, "", 401}, {ClassCredential, 400, "", 401}, {ClassCredential, 403, "", 403},
+		{ClassModelAccess, 404, "", 403}, {ClassRegionBlocked, 403, "", 403},
+		{ClassRateLimit, 503, "", 429},
+		{ClassModelGone, 410, "", 410}, {ClassCallerFault, 400, "", 400}, {ClassTransient, 502, "", 502},
+		{"", 200, "", 200}, {ClassTimeout, 0, "", 0},
+		// The client left: a cancel before any answer, the answer itself once there was one.
+		{ClassCancelled, 0, CutClientLeft, StatusClientClosed},
+		{ClassCancelled, 200, CutClientLeft, 200}, {ClassRateLimit, 429, CutClientLeft, 429},
+		// A good answer the upstream broke off or let go silent is its failure.
+		{ClassTransient, 200, CutUpstream, 502}, {ClassTimeout, 200, CutUpstreamIdle, 502},
+		{ClassRateLimit, 429, CutUpstream, 429},
 	} {
-		if got := CountedStatus(tc.class, tc.status); got != tc.want {
-			t.Errorf("CountedStatus(%q, %d) = %d, want %d", tc.class, tc.status, got, tc.want)
+		if got := CountedStatus(tc.class, tc.status, tc.cut); got != tc.want {
+			t.Errorf("CountedStatus(%q, %d, %q) = %d, want %d", tc.class, tc.status, tc.cut, got, tc.want)
 		}
 	}
 }
