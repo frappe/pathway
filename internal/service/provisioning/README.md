@@ -71,7 +71,7 @@ since the process started). The control plane lands or records each dead line an
 ack — `"dead": ["<request id>", ...]` beside `"acks"` — which removes it; `count` includes them.
 
 `GET /grove-admin/provider-keys?ids=a,b` answers `{id: {requests, ok, rate_limited, rejected,
-failed, last_used, last_rate_limited}}` per vendor credential since the last call, and deletes
+failed, cancelled, last_used, last_rate_limited}}` per vendor credential since the last call, and deletes
 each `pk:<key id>` in the same transaction, so the next call starts from zero; an id never dialled
 is zeros. A pull that does not land is lost — these are stats, not usage.
 

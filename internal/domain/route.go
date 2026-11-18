@@ -96,7 +96,8 @@ func (r Route) Keyring() []Credential {
 // KeyStats is what one credential has answered since the control plane last took it, as the store
 // counts it. OK is every
 // answer that was not the key's fault nor the upstream's — a 2xx, or a 4xx the request earned;
-// Failed is a 5xx or a hop that produced no status. Timestamps are unix seconds.
+// Failed is a 5xx or a hop that produced no status; Cancelled a hop the client left, before an
+// answer or in the middle of a good one, which says nothing of the key. Timestamps are unix seconds.
 type KeyStats struct {
 	Requests     int64 `json:"requests"`
 	OK           int64 `json:"ok"`
@@ -107,9 +108,14 @@ type KeyStats struct {
 	// Rejected is the three above together: the one count a reader had before they were split.
 	Rejected        int64 `json:"rejected"`
 	Failed          int64 `json:"failed"`
+	Cancelled       int64 `json:"cancelled"`
 	LastUsed        int64 `json:"last_used"`
 	LastRateLimited int64 `json:"last_rate_limited"`
 }
+
+// StatusClientClosed is what the access line shows for a client that left before the upstream
+// answered, and what a hop the client left is counted on its key under. Nobody receives it.
+const StatusClientClosed = 499
 
 // IsKeyRejected reports a status that says the credential is dead for this request: unauthorised,
 // unpaid or forbidden. A rate limit is not — that key may be back once the others are spent. The
@@ -280,9 +286,12 @@ const MaxFallbacks = 3
 
 // CountedStatus is the status an attempt lands on its key under (KeyStatusClass): the one its
 // class means when the vendor hid it under another — an exhausted account under a 429 or a 400
-// counts unpaid, a key that cannot reach the model forbidden — else the one sent.
+// counts unpaid, a key that cannot reach the model forbidden — else the one sent. A hop the client
+// left counts as a 499, not as a dead connection nor as the answer it never finished.
 func CountedStatus(class string, status int) int {
 	switch class {
+	case ClassCancelled:
+		return StatusClientClosed
 	case ClassQuota:
 		return 402
 	case ClassCredential:
@@ -305,6 +314,8 @@ func KeyStatusClass(status int) string {
 	switch {
 	case status == 429:
 		return "rate_limited"
+	case status == StatusClientClosed:
+		return "cancelled"
 	case status >= 200 && status < 500:
 		return "ok"
 	default:

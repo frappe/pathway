@@ -449,6 +449,8 @@ func (p providerKeys) Count(_ context.Context, id string, status int) error {
 		stats.Forbidden, stats.Rejected = stats.Forbidden+1, stats.Rejected+1
 	case "ok":
 		stats.OK++
+	case "cancelled":
+		stats.Cancelled++
 	default:
 		stats.Failed++
 	}
