@@ -185,7 +185,8 @@ func (p providerKeys) Take(ctx context.Context, ids []string) (map[string]domain
 			RateLimited: counter(fields["rate_limited"]), Rejected: counter(fields["rejected"]),
 			Unauthorized: counter(fields["unauthorized"]), Unpaid: counter(fields["unpaid"]),
 			Forbidden: counter(fields["forbidden"]),
-			Failed:    counter(fields["failed"]), LastUsed: counter(fields["last_used"]),
+			Failed:    counter(fields["failed"]), Cancelled: counter(fields["cancelled"]),
+			LastUsed:        counter(fields["last_used"]),
 			LastRateLimited: counter(fields["last_rate_limited"]),
 		}
 	}

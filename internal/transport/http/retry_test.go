@@ -21,11 +21,16 @@ type keyedVendor struct {
 	// bodies is what a refusal says, per key, when the test cares; else "refused <key>".
 	bodies map[string]string
 	keys   []string
+	// onDial runs before the vendor answers, when a test needs it to hold on.
+	onDial func(w http.ResponseWriter, r *http.Request)
 }
 
 func (v *keyedVendor) handler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	v.keys = append(v.keys, key)
+	if v.onDial != nil {
+		v.onDial(w, r)
+	}
 	if status, refused := v.answers[key]; refused {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", key)
@@ -119,6 +124,55 @@ func TestARateLimitedKeyIsSwappedForAnother(t *testing.T) {
 	}
 	if a, b := f.keyStats("A"), f.keyStats("B"); a.RateLimited != a.Requests || a.LastRateLimited == 0 || b.OK != b.Requests || b.OK == 0 {
 		t.Errorf("stats A=%+v B=%+v", a, b)
+	}
+}
+
+// A client that leaves before the vendor answers says nothing of the key: the hop is counted
+// cancelled, not failed.
+func TestAClientThatLeftIsNotAFailedKey(t *testing.T) {
+	f, vendor := keyedFixture(t, nil, "A")
+	ctx, leave := context.WithCancel(context.Background())
+	vendor.onDial = func(_ http.ResponseWriter, r *http.Request) { leave(); <-r.Context().Done() }
+	r := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(chatBody)).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer "+secret)
+	r.Header.Set("Content-Type", "application/json")
+	f.handler.ServeHTTP(httptest.NewRecorder(), r)
+
+	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["cancelled"] != 1 || got["failed"] != 0 {
+		t.Errorf("stats = %v, want one cancelled attempt", got)
+	}
+}
+
+// A client that leaves in the middle of an answer is counted cancelled too: the status was the
+// vendor's, the ending was not. Over a real server, where the proxy aborts the handler.
+func TestAClientThatLeftMidStreamIsCountedCancelled(t *testing.T) {
+	f, vendor := keyedFixture(t, nil, "A")
+	vendor.onDial = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[]}\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}
+	gateway := httptest.NewServer(f.handler)
+	ctx, leave := context.WithCancel(context.Background())
+	body := `{"model":"deepseek/chat","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, gateway.URL+"/openai/v1/chat/completions", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+secret)
+	r.Header.Set("Content-Type", "application/json")
+	resp, err := gateway.Client().Do(r)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("the stream did not open: %v, %v", resp, err)
+	}
+	if _, err := resp.Body.Read(make([]byte, 16)); err != nil {
+		t.Fatalf("no first chunk: %v", err)
+	}
+	leave()
+	_ = resp.Body.Close()
+	// Close waits for the handler to unwind, so the count has landed or never will.
+	gateway.Close()
+
+	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["cancelled"] != 1 || got["ok"] != 0 {
+		t.Errorf("stats = %v, want one cancelled attempt", got)
 	}
 }
 

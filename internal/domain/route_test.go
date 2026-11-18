@@ -271,7 +271,7 @@ func TestKeyStatusClass(t *testing.T) {
 	for status, want := range map[int]string{
 		200: "ok", 400: "ok", 404: "ok", 429: "rate_limited",
 		401: "unauthorized", 402: "unpaid", 403: "forbidden",
-		500: "failed", 502: "failed", 0: "failed",
+		500: "failed", 502: "failed", 0: "failed", StatusClientClosed: "cancelled",
 	} {
 		if got := KeyStatusClass(status); got != want {
 			t.Errorf("KeyStatusClass(%d) = %q, want %q", status, got, want)
@@ -391,6 +391,8 @@ func TestCountedStatus(t *testing.T) {
 		{ClassModelAccess, 404, 403}, {ClassRegionBlocked, 403, 403},
 		{ClassRateLimit, 503, 429},
 		{ClassModelGone, 410, 410}, {ClassCallerFault, 400, 400}, {ClassTransient, 502, 502}, {"", 200, 200}, {ClassTimeout, 0, 0},
+		// The client left, before an answer or in the middle of one.
+		{ClassCancelled, 0, StatusClientClosed}, {ClassCancelled, 200, StatusClientClosed},
 	} {
 		if got := CountedStatus(tc.class, tc.status); got != tc.want {
 			t.Errorf("CountedStatus(%q, %d) = %d, want %d", tc.class, tc.status, got, tc.want)
