@@ -144,7 +144,8 @@ one grep for it crosses the gateway log, the ingress log and the engine log. Ant
 
 Where it went — key, team, model, deployment, engine, upstream — is on the access line under
 `rid`, not in the id. So is how it ended, as `cut`: `-` for a response that finished, else who ended it —
-`client_left`, `upstream_idle` (silent for the read timeout) or `upstream` (its body broke off).
+`client_left` (gone, or took nothing for the read timeout), `upstream_idle` (silent for the read
+timeout) or `upstream` (its body broke off).
 An upstream that ends a stream early but cleanly cannot be told from one that finished, and reads
 `-`. On a provider route the vendor's own id is `upstream_rid` on that line and never reaches
 the client; ours never reaches the vendor. `attempts` is how many times an upstream was dialled
@@ -178,7 +179,7 @@ status carries which fact:
 | `model_gone` | the vendor retired the model: a 410, "deprecated", `model_decommissioned` | the vendor's answer; a fallback model |
 | `transient` | the upstream broke: a 5xx, a connection refused or reset, a body that broke off | the vendor's answer, or 502; a fallback model |
 | `timeout` | nothing came for `upstream_read_timeout`, before the headers (504) or after them (`cut=upstream_idle`) | a fallback model when before the headers |
-| `cancelled` | the client left while the hop was in flight (`cut=client_left`) | nothing |
+| `cancelled` | the client left while the hop was in flight, or took none of its answer for `upstream_read_timeout` (`cut=client_left`) | nothing |
 | `caller_fault` | the request itself was refused: a 400/409/413/415/422 with an error body | the vendor's answer, as sent |
 | `unknown` | a 4xx carrying nothing recognised — an HTML 404 from a proxy in the way | the vendor's answer, as sent |
 
