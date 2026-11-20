@@ -506,6 +506,92 @@ func TestAnAbandonedStreamEndsInAnErrorEvent(t *testing.T) {
 	}
 }
 
+// stalledClient takes the first write and then nothing until released: a client that stopped
+// reading while its connection stayed open.
+type stalledClient struct {
+	*httptest.ResponseRecorder
+	writes  int
+	release chan struct{}
+}
+
+func (c *stalledClient) Write(p []byte) (int, error) {
+	if c.writes++; c.writes > 1 {
+		<-c.release
+	}
+	return c.ResponseRecorder.Write(p)
+}
+
+// A client that stops taking a stream is not the upstream's silence. The upstream is still let go
+// after the read timeout, but the cut is the client's, the hop counts against nobody, and a client
+// that comes back is told it was the one that stopped.
+func TestAClientThatStopsReadingIsNotTheUpstreamsSilence(t *testing.T) {
+	const limit = 100 * time.Millisecond
+	frame := `data: {"choices":[{"delta":{"content":"w"}}],"usage":null}` + "\n\n"
+	told := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for r.Context().Err() == nil {
+			_, _ = io.WriteString(w, frame)
+			w.(http.Flusher).Flush()
+			time.Sleep(limit / 10)
+		}
+		close(told)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &stalledClient{ResponseRecorder: httptest.NewRecorder(), release: make(chan struct{})}
+	// The client comes back only once the upstream has been let go, or never is.
+	go func() {
+		select {
+		case <-told:
+		case <-time.After(20 * limit):
+		}
+		close(client.release)
+	}()
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	var out Outcome
+	New(Options{ReadTimeout: limit}, quiet()).Forward(client, r, server.URL, false, vendor.Engine, ModelSwap{}, &out)
+
+	if out.Cut != domain.CutClientLeft || out.Class != domain.ClassCancelled || domain.IsHopFailure("200", "", out.Cut) {
+		t.Errorf("cut %q, class %q, want the client's cut and a hop that counts against nobody", out.Cut, out.Class)
+	}
+	select {
+	case <-told:
+	default:
+		t.Error("the upstream was never let go")
+	}
+	want := `data: {"error":{"message":"client stopped reading the stream","type":"api_error"}}` + "\n\n"
+	if got := client.Body.String(); !strings.HasSuffix(got, want) {
+		t.Errorf("client got ...%q, want it to end in %q", got[max(0, len(got)-len(want)):], want)
+	}
+}
+
+// A slow client does not use up the upstream's wait: each side has the whole limit to itself.
+func TestASlowClientDoesNotUseUpTheUpstreamsWait(t *testing.T) {
+	const limit = 300 * time.Millisecond
+	upstream, feed := io.Pipe()
+	cut := make(chan error, 1)
+	body := newIdleBody(upstream, limit, func(cause error) { cut <- cause }, &Hop{})
+	t.Cleanup(func() { _ = body.Close() })
+
+	go func() { _, _ = feed.Write([]byte("first")) }()
+	if _, err := body.Read(make([]byte, 8)); err != nil {
+		t.Fatal(err)
+	}
+	// The client takes 0.6 of the limit over what was read, the upstream 0.6 over its next bytes.
+	time.Sleep(6 * limit / 10)
+	time.AfterFunc(6*limit/10, func() { _, _ = feed.Write([]byte("second")) })
+	if _, err := body.Read(make([]byte, 8)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case cause := <-cut:
+		t.Errorf("cut for %q with neither side silent for the limit", cause)
+	default:
+	}
+}
+
 // A vendor's request id is read under whichever name that vendor's type says it sends it. An
 // engine echoes our own id under those names, which is not a vendor's, so an internal hop keeps none.
 func TestTheUpstreamRequestIDIsReadUnderEachVendorsName(t *testing.T) {

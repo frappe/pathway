@@ -67,8 +67,12 @@ func (s *streamEnd) closing() []byte {
 		out = append(out, "\n\n"...)
 	}
 	status, message := http.StatusBadGateway, "upstream broke off the stream"
-	if context.Cause(s.hop) == errUpstreamIdle {
+	switch context.Cause(s.hop) {
+	case errUpstreamIdle:
 		status, message = http.StatusGatewayTimeout, "upstream went silent"
+	case errClientIdle:
+		// Only a client that came back reads this: its upstream was let go while it took nothing.
+		status, message = http.StatusRequestTimeout, "client stopped reading the stream"
 	}
 	if s.anthropic {
 		out = append(out, "event: error\ndata: "...)
