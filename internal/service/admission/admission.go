@@ -42,7 +42,7 @@ func (s *Service) Admit(ctx context.Context, id Identity) error {
 	now := s.Now()
 	exceeded, err := s.limits.Admit(ctx, id.Prefix(), id.Key.Limits, now)
 	if err != nil {
-		return domain.Deny(503, "limit store error")
+		return domain.StoreError("limit store error", err)
 	}
 	if len(exceeded) > 0 {
 		return domain.LimitDenial(exceeded, now)
@@ -63,7 +63,7 @@ func (s *Service) Identify(ctx context.Context, authorization string) (Identity,
 
 	holder, found, err := s.keys.Resolve(ctx, meterID)
 	if err != nil {
-		return Identity{}, domain.Deny(503, "key store error")
+		return Identity{}, domain.StoreError("key store error", err)
 	}
 	if !found {
 		return Identity{}, domain.Deny(401, "unknown api key")
@@ -71,7 +71,7 @@ func (s *Service) Identify(ctx context.Context, authorization string) (Identity,
 
 	grant, err := s.grant(ctx, holder.Key.Groups, holder.Groups)
 	if err != nil {
-		return Identity{}, domain.Deny(503, "group store error")
+		return Identity{}, domain.StoreError("group store error", err)
 	}
 	key := holder.Key
 	if holder.Team != nil {

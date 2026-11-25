@@ -9,8 +9,16 @@ type Denial struct {
 	Reason string
 	// RetryAfter is the seconds until the same request could pass; 0 names none.
 	RetryAfter int
+	Cause      error
 }
 
 func (d Denial) Error() string { return d.Reason }
 
+func (d Denial) Unwrap() error { return d.Cause }
+
 func Deny(status int, reason string) Denial { return Denial{Status: status, Reason: reason} }
+
+// StoreError is the 503 for a store call that failed, carrying why.
+func StoreError(reason string, cause error) Denial {
+	return Denial{Status: 503, Reason: reason, Cause: cause}
+}

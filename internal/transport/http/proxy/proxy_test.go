@@ -244,7 +244,7 @@ func TestAClientThatLeavesBeforeTheAnswerIsNotAFailedHop(t *testing.T) {
 	var out Outcome
 	New(Options{}, quiet()).Forward(recorder, r, server.URL, false, vendor.Engine, ModelSwap{}, &out)
 
-	if out.Cut != domain.CutClientLeft || out.Class != domain.ClassCancelled || out.Status != 0 || recorder.Code != statusClientClosed {
+	if out.Cut != domain.CutClientLeft || out.Class != domain.ClassCancelled || out.Status != 0 || recorder.Code != StatusClientClosed {
 		t.Errorf("cut %q, class %q, upstream status %d, answered %d", out.Cut, out.Class, out.Status, recorder.Code)
 	}
 	select {

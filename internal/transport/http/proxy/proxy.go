@@ -62,9 +62,9 @@ type Outcome struct {
 	Hop *Hop
 }
 
-// statusClientClosed is what the access line shows for a client that left before the upstream
-// answered. Nobody receives it; it keeps those requests out of the 502s.
-const statusClientClosed = 499
+// StatusClientClosed is what the access line shows for a client that left before it was answered.
+// Nobody receives it; it keeps those requests out of the 502s and 503s.
+const StatusClientClosed = 499
 
 // Why the hop was cancelled after its headers: the upstream went silent, or the client stopped
 // taking the body while the upstream was still sending it.
@@ -253,7 +253,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			if r.Context().Err() != nil {
 				p.log.Debug("client left before the upstream answered", "target", target)
 				outcome.Class = domain.ClassCancelled
-				w.WriteHeader(statusClientClosed)
+				w.WriteHeader(StatusClientClosed)
 				return
 			}
 			// Status stays 0, which is what marks the hop failed: the connection never got far
