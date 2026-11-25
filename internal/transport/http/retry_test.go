@@ -127,9 +127,9 @@ func TestARateLimitedKeyIsSwappedForAnother(t *testing.T) {
 	}
 }
 
-// A client that leaves before the vendor answers says nothing of the key: the hop is counted
-// cancelled, not failed.
-func TestAClientThatLeftIsNotAFailedKey(t *testing.T) {
+// A client that leaves before the vendor answers says nothing of the key: the hop is not counted
+// on it at all, least of all as a failure. The access line has it.
+func TestAClientThatLeftBeforeAnAnswerIsNotCountedOnTheKey(t *testing.T) {
 	f, vendor := keyedFixture(t, nil, "A")
 	ctx, leave := context.WithCancel(context.Background())
 	vendor.onDial = func(_ http.ResponseWriter, r *http.Request) { leave(); <-r.Context().Done() }
@@ -138,14 +138,17 @@ func TestAClientThatLeftIsNotAFailedKey(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	f.handler.ServeHTTP(httptest.NewRecorder(), r)
 
-	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["cancelled"] != 1 || got["failed"] != 0 {
-		t.Errorf("stats = %v, want one cancelled attempt", got)
+	if len(vendor.keys) != 1 {
+		t.Fatalf("the vendor was dialled %d times, want once", len(vendor.keys))
+	}
+	if got := f.keyCounts(t, "A"); got["requests"] != 0 || got["failed"] != 0 {
+		t.Errorf("stats = %v, want nothing counted", got)
 	}
 }
 
-// A client that leaves in the middle of an answer is counted cancelled too: the status was the
-// vendor's, the ending was not. Over a real server, where the proxy aborts the handler.
-func TestAClientThatLeftMidStreamIsCountedCancelled(t *testing.T) {
+// A client that leaves in the middle of a good answer leaves the key its answer: the vendor did
+// nothing wrong. Over a real server, where the proxy aborts the handler and the count must still land.
+func TestAClientThatLeftMidStreamLeavesTheKeyItsAnswer(t *testing.T) {
 	f, vendor := keyedFixture(t, nil, "A")
 	vendor.onDial = func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -171,8 +174,29 @@ func TestAClientThatLeftMidStreamIsCountedCancelled(t *testing.T) {
 	// Close waits for the handler to unwind, so the count has landed or never will.
 	gateway.Close()
 
-	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["cancelled"] != 1 || got["ok"] != 0 {
-		t.Errorf("stats = %v, want one cancelled attempt", got)
+	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["ok"] != 1 {
+		t.Errorf("stats = %v, want one ok attempt", got)
+	}
+}
+
+// A vendor that answers 200 and then drops the stream failed, whatever status it had sent.
+func TestAStreamTheVendorBrokeOffIsAFailedKey(t *testing.T) {
+	f, vendor := keyedFixture(t, nil, "A")
+	vendor.onDial = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[]}\n\n"))
+		w.(http.Flusher).Flush()
+		// Closed in the middle of the chunked body: no final chunk ever comes.
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		_ = conn.Close()
+	}
+	body := `{"model":"deepseek/chat","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	if resp := f.post("/openai/v1/chat/completions", body); resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body)
+	}
+
+	if got := f.keyCounts(t, "A"); got["requests"] != 1 || got["failed"] != 1 || got["ok"] != 0 {
+		t.Errorf("stats = %v, want one failed attempt", got)
 	}
 }
 

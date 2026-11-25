@@ -141,10 +141,11 @@ func (s *Service) Pick(ctx context.Context, req Request) (Decision, error) {
 	}
 
 	table, err := s.routes.Get(ctx, req.Model)
-	if err != nil || len(table) == 0 {
-		if err != nil {
-			s.log.Error("route store unreadable", "rid", req.RequestID, "model", req.Model, "err", err)
-		}
+	if err != nil {
+		s.log.Error("route store unreadable", "rid", req.RequestID, "model", req.Model, "err", err)
+		return Decision{}, domain.StoreError("model unavailable", err)
+	}
+	if len(table) == 0 {
 		return Decision{}, domain.Deny(503, "model unavailable")
 	}
 

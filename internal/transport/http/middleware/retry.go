@@ -90,13 +90,18 @@ func newRetry(deps Deps) (Middleware, error) {
 	}, nil
 }
 
-// keyedAttempt is serveAttempt with the attempt landed on the key it dialled with. Deferred: an
-// abort that goes on up, a client hanging up mid-stream, is still the key's attempt.
+// keyedAttempt is serveAttempt with the attempt landed on the key it dialled with, under what its
+// answer meant and how the hop ended. Deferred: an abort that goes on up, a client hanging up
+// mid-stream, is still the key's attempt. A client that left before any answer is not: that says
+// nothing of the key, and the access line has it.
 func keyedAttempt(deps Deps, next http.Handler, writer *attemptWriter, r *http.Request) {
 	defer func() {
 		state := From(r)
 		writer.decide()
-		countAttempt(deps, r, state.Decision.Key, domain.CountedStatus(countedClass(writer.class, state.Outcome), state.Outcome.Status))
+		if state.Outcome.Status == 0 && state.Outcome.Cut == domain.CutClientLeft {
+			return
+		}
+		countAttempt(deps, r, state.Decision.Key, domain.CountedStatus(writer.class, state.Outcome.Status, state.Outcome.Cut))
 	}()
 	serveAttempt(next, writer, r)
 }
@@ -112,16 +117,6 @@ func serveAttempt(next http.Handler, writer *attemptWriter, r *http.Request) {
 		}
 	}()
 	next.ServeHTTP(writer, r)
-}
-
-// countedClass is the class an attempt lands on its key under: the writer's, unless the client
-// left before an answer or in the middle of a good one, which only the proxy knows. A refusal
-// the client left on stands.
-func countedClass(class string, outcome proxy.Outcome) string {
-	if outcome.Class == domain.ClassCancelled && outcome.Status < 400 {
-		return domain.ClassCancelled
-	}
-	return class
 }
 
 // logAttempt is the access log's record of an attempt the client never saw: where it went, how

@@ -195,7 +195,9 @@ having to learn a second vocabulary.
 
 No metrics-per-anything. The access log carries what a request did; the process log carries why.
 Warnings and worse are mirrored into `error.log` as well, pinned at Warn so moving the process log
-level while hunting a failure never changes what that file holds.
+level while hunting a failure never changes what that file holds. Every log names its `level` in
+lower case as the log store the files ship to does (`debug`, `info`, `warning`, `error`), not slog's
+`WARN`: that store refuses a whole batch for a level it does not name.
 A Prometheus surface is a middleware whenever someone wants one.
 
 ### State, and who owns it
@@ -328,7 +330,9 @@ was unreadable turns one broken dependency into an outage.
 | the engine is dead | **502** `upstream unavailable`, and the hop counts against the target — three in a row and it leaves rotation |
 | the engine accepts the connection but sends no headers | **504** `upstream timed out` after `upstream_read_timeout` (a dial that runs out is a 504 too); counts against the target |
 | the client leaves before the upstream answers | the upstream call is cancelled at once; the access line reads **499** `cut=client_left`, and the hop does not count against the target |
+| the client leaves before a hop, and its cancel fails a store read | the access line reads **499** `failure_class=cancelled`, `reason=client closed request`, not the 503 the read would be; `error.log` still names the read. A 503 that was decided (no placement, none healthy) or a store that failed on its own stays a 503. Neither tries a fallback for a client that left |
 | the client leaves in the middle of a response | the upstream call is cancelled at once; `cut=client_left`. What the upstream had reported by then is metered, the rest is not |
+| the client stops reading a response | once it has taken nothing for `upstream_read_timeout` the upstream call is cancelled; `cut=client_left`, and the hop does not count against the target. An event stream it comes back to ends in a `client stopped reading the stream` error event. The request itself ends when the client's connection does |
 | the upstream goes silent after its headers | cut after `upstream_read_timeout` of silence, `cut=upstream_idle`, and the hop counts against the target. An event stream ends in an `upstream went silent` error event; any other body is dropped. A stream that keeps talking is never cut, however long it runs |
 | an HTTP/2 upstream connection dies without closing | pinged after 15s with nothing received and closed 90s later: a request waiting on it gets **502** `upstream unavailable` and counts against the target, and the next one dials a fresh connection |
 | pathway outgrows the unit's `MemoryMax` | the kernel kills it inside its own cgroup and systemd starts it again 2s later: live streams drop, the rest of the box is untouched. Without a cap the whole box runs out and the kernel picks what dies |

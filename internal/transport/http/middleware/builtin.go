@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"errors"
 	"io"
@@ -366,9 +367,10 @@ func newRoute(deps Deps) (Middleware, error) {
 			state, started := From(r), time.Now()
 			decision, err := deps.Routing.Pick(r.Context(), pickRequest(r, state, state.Model, state.Session))
 			// A model with nowhere to go hands the request to the caller's fallbacks before any
-			// dial; a pick refused for the request's own fault (the wrong surface) does not.
+			// dial; a pick refused for the request's own fault (the wrong surface) does not, nor
+			// one whose client has left.
 			var denial domain.Denial
-			if errors.As(err, &denial) && domain.MovesModel(domain.FailureClass(denial.Status, nil)) {
+			if r.Context().Err() == nil && errors.As(err, &denial) && domain.MovesModel(domain.FailureClass(denial.Status, nil)) {
 				if winner, model := nextFallback(deps, r, state); model != "" {
 					logAttempt(deps, r, state, started, denial.Reason, "model", model)
 					serveFallback(w, r, state, model, winner)
@@ -613,6 +615,14 @@ func deny(w http.ResponseWriter, r *http.Request, err error) {
 	var denial domain.Denial
 	if errors.As(err, &denial) {
 		state := From(r)
+		// A store read the leaving client cancelled is not our 503, and nobody is there to answer.
+		// A 503 that was decided, or a store that failed on its own, stays ours.
+		if errors.Is(denial, context.Canceled) {
+			state.Denied, state.DeniedReason = proxy.StatusClientClosed, "client closed request"
+			state.Outcome.Class = domain.ClassCancelled
+			w.WriteHeader(proxy.StatusClientClosed)
+			return
+		}
 		state.Denied, state.DeniedReason = denial.Status, denial.Reason
 	}
 	respond.DenialFor(w, r, err)

@@ -62,17 +62,22 @@ type Outcome struct {
 	Hop *Hop
 }
 
-// statusClientClosed is what the access line shows for a client that left before the upstream
-// answered. Nobody receives it; it keeps those requests out of the 502s.
-const statusClientClosed = domain.StatusClientClosed
+// StatusClientClosed is what the access line shows for a client that left before it was answered.
+// Nobody receives it; it keeps those requests out of the 502s and 503s.
+const StatusClientClosed = 499
 
-// errUpstreamIdle is why the hop was cancelled when the upstream went silent after its headers.
-var errUpstreamIdle = errors.New("the upstream sent nothing for the read timeout")
+// Why the hop was cancelled after its headers: the upstream went silent, or the client stopped
+// taking the body while the upstream was still sending it.
+var (
+	errUpstreamIdle = errors.New("the upstream sent nothing for the read timeout")
+	errClientIdle   = errors.New("the client took nothing for the read timeout")
+)
 
 // Options are the dials that used to be nginx directives.
 type Options struct {
 	// ReadTimeout bounds the upstream's silence: the wait for its headers, and every wait for
 	// more of its body after them. Long: a model may think for minutes before its first token.
+	// A client that takes none of that body is given the same wait before the upstream is let go.
 	ReadTimeout time.Duration
 	DialTimeout time.Duration
 	// VerifyUpstream turns on certificate verification for engine and ingress hops. Per target here,
@@ -217,7 +222,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			if resp.StatusCode == http.StatusSwitchingProtocols {
 				return nil
 			}
-			idle := newIdleBody(resp.Body, p.readTimeout(), func() { cancel(errUpstreamIdle) }, events)
+			idle := newIdleBody(resp.Body, p.readTimeout(), cancel, events)
 			tee = newUsageTee(idle, isEventStream(resp))
 			resp.Body = tee
 			// The tee stays innermost so usage is scraped off the raw upstream bytes. Each rewrite
@@ -248,7 +253,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, target string, e
 			if r.Context().Err() != nil {
 				p.log.Debug("client left before the upstream answered", "target", target)
 				outcome.Class = domain.ClassCancelled
-				w.WriteHeader(statusClientClosed)
+				w.WriteHeader(StatusClientClosed)
 				return
 			}
 			// Status stays 0, which is what marks the hop failed: the connection never got far
@@ -299,12 +304,13 @@ func keepRelayed(header http.Header) {
 
 // cutBy names who ended a response that did not finish, blank for one that did. In this order: a
 // silent upstream is cancelled by us, and a client that left cancels everything under it, so
-// either can also look like a body that broke off.
+// either can also look like a body that broke off. So can a client that stopped reading: we let
+// its upstream go, and it is the client's cut like one that left.
 func cutBy(hop, client context.Context, tee *usageTee) string {
 	switch {
 	case context.Cause(hop) == errUpstreamIdle:
 		return domain.CutUpstreamIdle
-	case client.Err() != nil:
+	case client.Err() != nil, context.Cause(hop) == errClientIdle:
 		return domain.CutClientLeft
 	case tee != nil && tee.failed:
 		return domain.CutUpstream

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -51,7 +52,7 @@ func New(opts Options) (Loggers, func(), error) {
 		}
 	}
 
-	handlers := []slog.Handler{slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})}
+	handlers := []slog.Handler{slog.NewJSONHandler(os.Stdout, handlerOptions(level))}
 	if opts.ErrorLogPath != "" {
 		file, err := openLog(opts.ErrorLogPath)
 		if err != nil {
@@ -61,7 +62,7 @@ func New(opts Options) (Loggers, func(), error) {
 		open = append(open, file)
 		// Pinned at Warn: the point of a separate file is that turning the process log down to Error
 		// or up to Debug does not change what a failure hunt finds in it.
-		handlers = append(handlers, slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		handlers = append(handlers, slog.NewJSONHandler(file, handlerOptions(slog.LevelWarn)))
 	}
 	process := slog.New(fanout{handlers: handlers})
 
@@ -74,7 +75,7 @@ func New(opts Options) (Loggers, func(), error) {
 		}
 		open = append(open, file)
 		// Always at Info: the access line is the record, and a level change is about diagnostics.
-		loggers.Access = slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		loggers.Access = slog.New(slog.NewJSONHandler(file, handlerOptions(slog.LevelInfo)))
 	}
 	if opts.PayloadLogPath != "" {
 		file, err := openLog(opts.PayloadLogPath)
@@ -83,9 +84,24 @@ func New(opts Options) (Loggers, func(), error) {
 			return Loggers{}, func() {}, err
 		}
 		open = append(open, file)
-		loggers.Payload = slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		loggers.Payload = slog.New(slog.NewJSONHandler(file, handlerOptions(slog.LevelInfo)))
 	}
 	return loggers, closeAll, nil
+}
+
+// handlerOptions names a level as the log store the files ship to does — debug, info, warning,
+// error — since it refuses a whole batch for one it does not name, slog's `warn` among them.
+func handlerOptions(level slog.Leveler) *slog.HandlerOptions {
+	return &slog.HandlerOptions{Level: level, ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
+		if written, ok := attr.Value.Any().(slog.Level); ok && len(groups) == 0 && attr.Key == slog.LevelKey {
+			name := strings.ToLower(written.String())
+			if written == slog.LevelWarn {
+				name = "warning"
+			}
+			attr.Value = slog.StringValue(name)
+		}
+		return attr
+	}}
 }
 
 func openLog(path string) (*reopener, error) {

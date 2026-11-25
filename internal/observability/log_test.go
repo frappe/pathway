@@ -23,11 +23,13 @@ func read(t *testing.T, path string) string {
 func TestTheErrorLogTakesWarningsAndWorseOnly(t *testing.T) {
 	dir := t.TempDir()
 	errorLog := filepath.Join(dir, "error.log")
-	logs, closeAll, err := New(Options{ErrorLogPath: errorLog, AccessLogPath: filepath.Join(dir, "access.log")})
+	accessLog := filepath.Join(dir, "access.log")
+	logs, closeAll, err := New(Options{ErrorLogPath: errorLog, AccessLogPath: accessLog})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
+	logs.Access.Info("access")
 	logs.Process.Debug("a debug line")
 	logs.Process.Info("an info line")
 	logs.Process.Warn("a warn line")
@@ -44,6 +46,13 @@ func TestTheErrorLogTakesWarningsAndWorseOnly(t *testing.T) {
 		if strings.Contains(body, unwanted) {
 			t.Errorf("error.log picked up %q, which belongs on stdout only", unwanted)
 		}
+	}
+	// Levels are named as the log store takes them: it refuses a whole batch for slog's WARN.
+	if !strings.Contains(body, `"level":"warning"`) || !strings.Contains(body, `"level":"error"`) {
+		t.Errorf("error.log levels are not warning and error: %s", body)
+	}
+	if line := read(t, accessLog); !strings.Contains(line, `"level":"info"`) {
+		t.Errorf("access.log level is not info: %s", line)
 	}
 }
 

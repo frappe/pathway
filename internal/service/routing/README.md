@@ -56,7 +56,8 @@ a healthy model away from everyone for a minute. It moves the count in neither d
 
 An upstream that answered and then did not finish is a failure, whatever status it had sent: its
 body broke off (`cut=upstream`), or it went silent for the read timeout (`cut=upstream_idle`). A
-client leaving in the middle of a good answer is not, and clears the count like any served request.
+client leaving in the middle of a good answer is not, nor is one that stops reading it for the read
+timeout: either clears the count like any served request.
 One that ends a stream early but cleanly cannot be told from one that finished, and counts as served.
 
 This is cheaper than active probing and strictly better informed: a probe tests a path no customer

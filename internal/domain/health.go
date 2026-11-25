@@ -18,7 +18,8 @@ const (
 
 // Who ended a response that did not finish. Blank on one that did.
 const (
-	// CutClientLeft: the client closed the connection, before the answer or in the middle of it.
+	// CutClientLeft: the client closed the connection, before the answer or in the middle of it, or
+	// took none of the answer for the read timeout.
 	CutClientLeft = "client_left"
 	// CutUpstreamIdle: the upstream sent its headers, then nothing for the read timeout.
 	CutUpstreamIdle = "upstream_idle"

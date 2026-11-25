@@ -13,6 +13,9 @@ import (
 
 	"github.com/frappe/pathway/internal/config"
 	"github.com/frappe/pathway/internal/domain"
+	"github.com/frappe/pathway/internal/observability"
+	"github.com/frappe/pathway/internal/repository"
+	"github.com/frappe/pathway/internal/service/routing"
 )
 
 // backupEngine is a second model's engine: it keeps the bodies it was sent.
@@ -152,6 +155,62 @@ func TestARequestsOwnFaultIsNotMoved(t *testing.T) {
 	}
 	if len(backup.bodies) != 0 {
 		t.Errorf("backup was dialled for a 400: %q", backup.bodies)
+	}
+}
+
+// cancellingRoutes is a route store as a real one reads under a client that has left.
+type cancellingRoutes struct{ repository.Routes }
+
+func (c cancellingRoutes) Get(ctx context.Context, model string) ([]domain.Route, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.Routes.Get(ctx, model)
+}
+
+// A client that has left gets no fallback, and its line says whose doing the refusal was: 499
+// cancelled when its own cancel failed the store read, our 503 when the model had nowhere to go.
+func TestARefusalForAClientThatLeft(t *testing.T) {
+	for name, c := range map[string]struct {
+		routes func(repository.Routes) repository.Routes
+		status int
+		class  string
+		reason string
+	}{
+		"its cancel failed the read": {
+			func(r repository.Routes) repository.Routes { return cancellingRoutes{r} },
+			499, domain.ClassCancelled, "client closed request"},
+		"the model had nowhere to go": {
+			func(r repository.Routes) repository.Routes { return r },
+			http.StatusServiceUnavailable, "-", "model unavailable"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, backup := fallbackFixture(t, jsonEngine(`{`+usageObject+`}`))
+			delete(f.store.Routes, "qwen3-4b")
+			access := &bytes.Buffer{}
+			f.handler = buildHandler(t, f.store, config.Config{}, 0, func(s *Services) {
+				repos := f.store.Repositories()
+				repos.Routes = c.routes(repos.Routes)
+				s.Routing = routing.New(repos, observability.Discard().Process, routing.Options{})
+				s.Access = slog.New(slog.NewJSONHandler(access, nil))
+			})
+
+			ctx, leave := context.WithCancel(context.Background())
+			leave()
+			r := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(fallbackBody)).WithContext(ctx)
+			r.Header.Set("Authorization", "Bearer "+secret)
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			f.handler.ServeHTTP(w, r)
+
+			lines := accessLines(t, access)
+			if len(lines) != 1 || len(backup.bodies) != 0 || lines[0]["fallback"] != "-" {
+				t.Fatalf("access log = %v, backup dialled %d times; want one line and no fallback", lines, len(backup.bodies))
+			}
+			if w.Code != c.status || lines[0]["failure_class"] != c.class || lines[0]["reason"] != c.reason {
+				t.Errorf("status = %d, line = %v; want %d %s %q", w.Code, lines[0], c.status, c.class, c.reason)
+			}
+		})
 	}
 }
 
