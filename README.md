@@ -195,7 +195,9 @@ having to learn a second vocabulary.
 
 No metrics-per-anything. The access log carries what a request did; the process log carries why.
 Warnings and worse are mirrored into `error.log` as well, pinned at Warn so moving the process log
-level while hunting a failure never changes what that file holds.
+level while hunting a failure never changes what that file holds. Every log names its `level` in
+lower case as the log store the files ship to does (`debug`, `info`, `warning`, `error`), not slog's
+`WARN`: that store refuses a whole batch for a level it does not name.
 A Prometheus surface is a middleware whenever someone wants one.
 
 ### State, and who owns it
