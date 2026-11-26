@@ -17,6 +17,7 @@ import (
 	"github.com/frappe/pathway/internal/config"
 	"github.com/frappe/pathway/internal/domain"
 	"github.com/frappe/pathway/internal/observability"
+	"github.com/frappe/pathway/internal/repository"
 	"github.com/frappe/pathway/internal/repository/memory"
 	"github.com/frappe/pathway/internal/service/admission"
 	"github.com/frappe/pathway/internal/service/catalog"
@@ -107,8 +108,13 @@ func buildHandler(t *testing.T, store *memory.Store, cfg config.Config, maxBody 
 // wire lets a test swap one Services field (a captured log, say) without re-stating the rest.
 func newServer(t *testing.T, store *memory.Store, cfg config.Config, maxBody int64, wire ...func(*Services)) *Server {
 	t.Helper()
+	return newServerOver(t, store.Repositories(), cfg, maxBody, wire...)
+}
+
+// newServerOver is newServer over any store, so the same chain runs on the real one.
+func newServerOver(t *testing.T, repos repository.Store, cfg config.Config, maxBody int64, wire ...func(*Services)) *Server {
+	t.Helper()
 	logs := observability.Discard()
-	repos := store.Repositories()
 	transforms, err := transform.NewChain(transform.Default)
 	if err != nil {
 		t.Fatalf("transform chain: %v", err)
