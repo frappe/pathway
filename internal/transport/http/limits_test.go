@@ -227,11 +227,11 @@ func TestKeysOfOneTeamShareTheWindow(t *testing.T) {
 	}
 }
 
-// A key with no limits of its own runs under its team's; one with its own keeps them whatever the
-// team says.
+// A key record carrying no limits runs under its team record's, a row naming a model holding on
+// that model alone; one an older control plane pushed them on keeps those.
 func TestTeamLimitsStandInWhereTheKeyNamesNone(t *testing.T) {
 	clock := time.Date(2026, 10, 13, 12, 0, 30, 0, time.UTC)
-	teamLimit, _ := domain.ParseLimits("requests:1m:1")
+	teamLimit, _ := domain.ParseLimits("requests:1m:1:qwen3-4b,requests:1m:9")
 
 	f := limitedFixture(t, "", &clock)
 	f.store.Teams["test-team"] = domain.TeamRecord{Limits: teamLimit}
@@ -251,5 +251,34 @@ func TestTeamLimitsStandInWhereTheKeyNamesNone(t *testing.T) {
 	}
 	if resp := own.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests {
 		t.Fatalf("third = %d, want 429 from the key's own limit: %s", resp.Code, resp.Body)
+	}
+}
+
+// A fallback is held to its own model's limits, not the first model's: the tokens it answers with
+// land on its counter, and once its window is spent it is passed over like a model not granted.
+func TestAFallbackCountsOnItsOwnModel(t *testing.T) {
+	f, backup := fallbackFixture(t, failing(http.StatusBadGateway))
+	limits, err := domain.ParseLimits("requests:1m:1:backup,total_tokens:1m:1000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.withKey(func(k *domain.KeyRecord) { k.Limits = limits })
+
+	if resp := f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK {
+		t.Fatalf("first = %d: %s", resp.Code, resp.Body)
+	}
+	tokens := map[string]int64{}
+	for key, count := range f.store.Limits {
+		if strings.Contains(key, ":total_tokens:") {
+			tokens[strings.Split(key, ":")[2]] += count
+		}
+	}
+	if tokens["backup"] != 120 || tokens["qwen3-4b"] != 0 {
+		t.Errorf("token counters = %v, want the answer's 120 on backup alone", f.store.Limits)
+	}
+
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
+	if resp.Code != http.StatusBadGateway || len(backup.bodies) != 1 {
+		t.Errorf("second = %d, backup dials = %d; want the primary's 502 and no dial past backup's limit", resp.Code, len(backup.bodies))
 	}
 }

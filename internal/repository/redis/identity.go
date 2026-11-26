@@ -152,6 +152,7 @@ func teamRecord(h map[string]string) (domain.TeamRecord, error) {
 		Limited:     strings.TrimSpace(h["limited"]) == "1",
 		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
 		Limits:      limits,
+		CapMessage:  h["cap_message"],
 	}, nil
 }
 
@@ -160,7 +161,8 @@ func writeTeam(ctx context.Context, p redis.Pipeliner, rec repository.TeamUpsert
 	p.HSet(ctx, "team:"+rec.Team, map[string]any{
 		"limited":      flag(rec.Limited),
 		"log_payloads": flag(rec.LogPayloads),
-		"limits":       rec.Limits, // always written: blank is what clears a removed limit
+		"limits":       rec.Limits,     // always written: blank is what clears a removed limit
+		"cap_message":  rec.CapMessage, // always written: blank is what clears a dropped message
 	})
 }
 

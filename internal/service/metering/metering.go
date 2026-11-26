@@ -35,7 +35,7 @@ type Report struct {
 	Pricing *domain.Pricing
 	Budget  int64
 	// Holders is whose limits the request was admitted under — the team's and the key's own, for
-	// the model asked for: the answer's tokens are debited from their token limits.
+	// the model that answered: its tokens are debited from their token limits.
 	Holders []domain.Holder
 	// How the hop went: the upstream's status, which decides whether the request is accounted at
 	// all (domain.IsServed) and, with the X-Grove-Reason an ingress sets when it is healthy but has

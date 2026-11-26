@@ -214,9 +214,9 @@ type KeyUpsert struct {
 	Budget      int64 // the key's cap, nano-USD
 	// BudgetWindow is what Spent counts against the cap: domain.WindowMonth (blank) or WindowTotal.
 	BudgetWindow string
-	Limits       string // comma list of metric:window:value[:model] — the team's, counted under the team
+	Limits       string // the team's as an older control plane pushed them here; blank = the team record's
 	KeyLimits    string // the key's own, same shape, counted under the key
-	CapMessage   string // the 402 text once the cap is spent; blank = the default
+	CapMessage   string // the 402 text as an older control plane pushed it here; the team record's otherwise
 }
 
 type GroupUpsert struct {
@@ -228,7 +228,8 @@ type TeamUpsert struct {
 	Team        string // Grove Team doc name — the record id
 	Limited     bool
 	LogPayloads bool
-	Limits      string // comma list of metric:window:value; what its keys run under by default
+	Limits      string // comma list of metric:window:value[:model] — the team's, counted under the team
+	CapMessage  string // the 402 text once one of its keys' caps is spent; blank = the default
 }
 
 // Accrual is one metered request. Fields already carry the cost beside the counters; Cost is

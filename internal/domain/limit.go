@@ -9,6 +9,8 @@ import (
 
 // What a Limit counts. A request is counted as it is admitted; tokens only once the answer says how
 // many there were.
+// ponytail: nothing is reserved at admit, so requests in flight together pass a token limit by what
+// they go on to use. Reserve an estimate of the prompt in Admit and settle it in Debit if that hurts.
 const (
 	LimitRequests = "requests"
 	LimitTokens   = "total_tokens"
@@ -21,6 +23,8 @@ var limitWindows = map[string]int64{"1m": 60, "1h": 3600, "1d": 86400, "1M": 0}
 // alone, "<metric>:<window>:<value>:<model>". A blank Model is the holder's default on every
 // model; a row naming one stands in for it there (LimitsFor). A window resets on the UTC clock —
 // top of the minute, the hour, midnight, the 1st — not from the holder's first request.
+// ponytail: a fixed window lets twice the ceiling through across its boundary. The last bucket is
+// kept two windows (Bucket): weigh it into the check if bursts hurt.
 type Limit struct {
 	Metric string
 	Window string

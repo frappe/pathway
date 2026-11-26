@@ -37,15 +37,16 @@ type KeyRecord struct {
 	Budget       int64
 	Spent        int64
 	BudgetWindow string
-	// Limits is the team's rate limits as pushed on this key — its tier's rows — counted per model
-	// under the team, so every key of the team draws on one window. KeyLimits are the key's own,
-	// counted per model under the key: a second gate beneath the team's, the lower refusing first.
-	// Either empty = no gate of that kind (Holders).
+	// Limits is the team's rate limits — its tier's rows — counted per model under the team, so
+	// every key of the team draws on one window. Off the team's record (Under); off this key's own
+	// only when a control plane from before team records pushed them here. KeyLimits are the key's
+	// own, counted per model under the key: a second gate beneath the team's, the lower refusing
+	// first. Either empty = no gate of that kind (Holders).
 	Limits    []Limit
 	KeyLimits []Limit
 	// CapMessage is what the 402 says once this key's cap is spent: the control plane's text for
-	// the team, a trial's "upgrade to go on"; blank is the default. A limited team's keys keep the
-	// default whatever it says — that hold is not the cap's.
+	// the team, a trial's "upgrade to go on", off the team's record (Under); blank is the default.
+	// A limited team's keys keep the default whatever it says — that hold is not the cap's.
 	CapMessage string
 }
 
@@ -56,19 +57,20 @@ type GroupRecord struct {
 }
 
 // TeamRecord is team:<Grove Team id>: what is the team's and holds for every key it owns, so a
-// team suspended is one record, not one field on each of its keys. Verdicts and
-// settings only — nothing here counts; the cap and its spend stay on the key.
+// team suspended is one record, not one field on each of its keys. Verdicts, settings and the
+// limits its keys share — nothing here counts; the cap, its window and its spend stay on the key.
 type TeamRecord struct {
 	Limited     bool    // the team's balance is spent → 402 on every key it holds
 	LogPayloads bool    // its keys' prompts and outputs go to the payload log
-	Limits      []Limit // what a key with no limits of its own runs under; none = uncapped
+	Limits      []Limit // the team's rate limits, its tier's rows; none = uncapped
+	CapMessage  string  // what the 402 says once one of its keys' caps is spent; blank = the default
 }
 
-// Under is the key's policy with its team's applied: the team's verdicts and flags stand in for
-// the copies a key record carried before teams were pushed, and its limits where the key names
-// none of its own.
+// Under is the key's policy with its team's applied: the team's verdicts, flags, cap message and
+// limits stand in for the copies a key record carried before teams were pushed. Limits still on
+// the key record are kept: only a control plane from before team records writes them there.
 func (k KeyRecord) Under(team TeamRecord) KeyRecord {
-	k.Limited, k.LogPayloads = team.Limited, team.LogPayloads
+	k.Limited, k.LogPayloads, k.CapMessage = team.Limited, team.LogPayloads, team.CapMessage
 	if len(k.Limits) == 0 {
 		k.Limits = team.Limits
 	}

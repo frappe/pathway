@@ -38,28 +38,30 @@ Two, both read off the key record before the body is, both answering 402
 `key credits exhausted`. The control plane's: its verdict on the team, flipped as `limited` and
 pushed onto every key of the team. This box's own: `spent >= budget`, the key's monthly
 cap against this month's counter on the record (see [The records themselves](../../repository/redis/README.md#the-records-themselves)). The cap's 402
-says the key's `cap_message` when the control plane pushed one (a trial team's "upgrade to go on");
+says its team's `cap_message` when the control plane pushed one (a trial team's "upgrade to go on");
 the team's verdict keeps the default text. Without a message a client cannot tell which one
 refused it.
 
 ## Rate limiting
 
-Per team and model, with the key's own rows as a second gate beneath. Two lists ride the key
-record, each a comma list of `<metric>:<window>:<value>[:<model>]`, e.g.
+Per team and model, with the key's own rows as a second gate beneath. Two lists, each a comma list
+of `<metric>:<window>:<value>[:<model>]`, e.g.
 `requests:1m:200,total_tokens:1h:50000,requests:1m:10:openai/gpt-6-luna`:
 
-- `limits` — the team's (its tier's rows, the same on every key of the team), counted under
-  `team:<team>`, so however many keys the team holds they draw on one window per model.
-- `key_limits` — this key's own, counted under `key:<prefix>`. Whichever of the two is lower
-  refuses first; nothing checks one against the other.
+- `limits` on the team's record — its tier's rows, counted under `team:<team>`, so however many
+  keys the team holds they draw on one window per model. A key record still carrying `limits`, as
+  a control plane from before team records pushed them, runs under those instead.
+- `key_limits` on the key's record — this key's own, counted under `key:<prefix>`. Whichever of
+  the two is lower refuses first; nothing checks one against the other.
 
 A row naming a model holds on that model alone; a row naming none is the default on every model.
 For the model asked for, each list resolves on its own (`domain.LimitsFor`): the rows naming it,
 and on every metric and window none of those covers, the blank rows. No row reaching the model =
 no gate from that list. No entry at all = uncapped. Checked in `modelaccess`, after the credit
 gates and the grant: a key with no balance or no grant does not use up a slot, and the limits
-are per model, so they cannot run before the body names one. A fallback picked below is not
-counted again — one request, counted on the model asked for.
+are per model, so they cannot run before the body names one. A fallback picked below is admitted
+on its own model's limits (`nextFallback`): one at its ceiling is passed over like one not granted,
+and the answer's tokens are debited from the model that gave it.
 
 | | |
 |---|---|

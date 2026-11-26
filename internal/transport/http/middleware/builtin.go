@@ -343,7 +343,7 @@ func serveNamed(next http.Handler, w http.ResponseWriter, r *http.Request, state
 
 // modelaccess is the grant check — the same decision /v1/models filters its list with — and then
 // the rate limits, which are per model and so could not run before the body: a request refused
-// the model does not use up a slot, and a fallback below is not counted again.
+// the model does not use up a slot. A fallback is counted on its own model (nextFallback).
 func newModelAccess(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -431,7 +431,7 @@ func newMeter(deps Deps) (Middleware, error) {
 					InputCountsCache: vendor.Of(state.Decision.Route).InputCountsCache(),
 					Pricing:          state.Decision.Route.Pricing,
 					Budget:           state.Identity.Key.Budget,
-					Holders:          domain.Holders(state.Identity.Key, state.Model),
+					Holders:          domain.Holders(state.Identity.Key, state.ServingModel()),
 					Target:           state.Decision.HealthTarget(),
 					UpstreamStatus:   statusText(state.Outcome.Status),
 					Reason:           state.Outcome.Reason,

@@ -109,7 +109,7 @@ func (s *Store) putKey(rec repository.KeyUpsert) {
 func (s *Store) putTeam(rec repository.TeamUpsert) {
 	limits, _ := domain.ParseLimits(rec.Limits) // the push handler already refused one that does not read
 	s.Teams[rec.Team] = domain.TeamRecord{
-		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Limits: limits,
+		Limited: rec.Limited, LogPayloads: rec.LogPayloads, Limits: limits, CapMessage: rec.CapMessage,
 	}
 }
 

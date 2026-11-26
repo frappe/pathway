@@ -143,15 +143,24 @@ func TestGeographyDenial(t *testing.T) {
 	}
 }
 
-// The team's record decides what was the team's on the key — the verdicts and the flags — and its
-// limits stand in only where the key names none of its own.
+// The team's record decides what was the team's on the key — the verdicts, the flags and the cap
+// message — and its limits stand in only where the key names none of its own. The cap and its
+// window stay the key's.
 func TestUnderTakesTheTeamsVerdicts(t *testing.T) {
-	stale := KeyRecord{Status: "active", Limited: true, LogPayloads: false, Budget: 1000}
-	team := TeamRecord{Limited: false, LogPayloads: true, Limits: []Limit{{Metric: "requests", Window: "1m", Value: 5}}}
+	stale := KeyRecord{
+		Status: "active", Limited: true, LogPayloads: false, CapMessage: "stale", Budget: 1000, BudgetWindow: WindowTotal,
+	}
+	team := TeamRecord{
+		Limited: false, LogPayloads: true, CapMessage: "trial over",
+		Limits: []Limit{{Metric: "requests", Window: "1m", Value: 5}},
+	}
 
 	got := stale.Under(team)
-	if got.Limited || !got.LogPayloads || got.Budget != 1000 {
-		t.Errorf("under team = %+v, want the team's flags over the key's and the key's budget kept", got)
+	if got.Limited || !got.LogPayloads || got.CapMessage != "trial over" {
+		t.Errorf("under team = %+v, want the team's flags and message over the key's", got)
+	}
+	if got.Budget != 1000 || got.BudgetWindow != WindowTotal {
+		t.Errorf("under team = %+v, want the key's cap and window kept", got)
 	}
 	if len(got.Limits) != 1 || got.Limits[0].Value != 5 {
 		t.Errorf("limits = %+v, want the team's when the key has none", got.Limits)
