@@ -62,6 +62,9 @@ func TestARequestLimitRefusesPastItsCeiling(t *testing.T) {
 	if resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "30" {
 		t.Fatalf("third = %d, Retry-After %q; want 429, 30", resp.Code, resp.Header().Get("Retry-After"))
 	}
+	if value, sent := resp.Header()["X-Should-Retry"]; sent {
+		t.Errorf("X-Should-Retry = %q on a wait of 30s, want a client left to retry", value)
+	}
 	if message, errorType := refusal(t, resp.Body.Bytes()); message != "rate limit exceeded: 2 requests per 1m on qwen3-4b (team)" || errorType != "rate_limit_error" {
 		t.Errorf("error = %q, %q", message, errorType)
 	}
@@ -105,7 +108,8 @@ func TestATokenLimitRefusesOnceADebitCrossesIt(t *testing.T) {
 	}
 }
 
-// Over two limits at once, the answer names the one that resets last.
+// Over two limits at once, the answer names the one that resets last, and with that further off
+// than a client should sit waiting, tells it not to retry by itself.
 func TestTheLimitThatResetsLastIsNamed(t *testing.T) {
 	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	f := limitedFixture(t, "requests:1d:1,requests:1m:1", &clock)
@@ -117,8 +121,9 @@ func TestTheLimitThatResetsLastIsNamed(t *testing.T) {
 	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != "rate limit exceeded: 1 requests per 1d on qwen3-4b (team)" {
 		t.Fatalf("second = %d, %q", resp.Code, message)
 	}
-	if resp.Header().Get("Retry-After") != "43170" {
-		t.Errorf("Retry-After = %q, want the seconds to midnight UTC", resp.Header().Get("Retry-After"))
+	if resp.Header().Get("Retry-After") != "43170" || resp.Header().Get("X-Should-Retry") != "false" {
+		t.Errorf("Retry-After = %q, X-Should-Retry = %q; want the seconds to midnight UTC and no retry",
+			resp.Header().Get("Retry-After"), resp.Header().Get("X-Should-Retry"))
 	}
 }
 
