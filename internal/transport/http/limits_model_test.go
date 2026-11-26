@@ -183,7 +183,8 @@ type ruledRow struct {
 	row      domain.Limit
 }
 
-// ruling is the rows that hold on model: a row naming it, else the blank row of that metric and window.
+// ruling is the rows that hold on model: a row naming it, else the blank row of that metric and
+// window; one at 0 holds its place and limits nothing.
 func ruling(rows []domain.Limit, model string) []domain.Limit {
 	blank, named := map[string]domain.Limit{}, map[string]domain.Limit{}
 	for _, row := range rows {
@@ -197,12 +198,14 @@ func ruling(rows []domain.Limit, model string) []domain.Limit {
 	}
 	held := []domain.Limit{}
 	for slot, row := range blank {
-		if _, replaced := named[slot]; !replaced {
+		if _, replaced := named[slot]; !replaced && row.Value != 0 {
 			held = append(held, row)
 		}
 	}
 	for _, row := range named {
-		held = append(held, row)
+		if row.Value != 0 {
+			held = append(held, row)
+		}
 	}
 	return held
 }
@@ -271,7 +274,7 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 	return modelVerdict{admitted: true}
 }
 
-// randomRows is up to four rows, no two on one model, metric and window.
+// randomRows is up to four rows, no two on one model, metric and window, one in six at 0: no limit.
 func randomRows(rng *rand.Rand, models []string) []domain.Limit {
 	var rows []domain.Limit
 	taken := map[string]bool{}
@@ -284,6 +287,9 @@ func randomRows(rng *rand.Rand, models []string) []domain.Limit {
 		row.Value = int64(1 + rng.Intn(5))
 		if row.Metric == domain.LimitTokens {
 			row.Value = []int64{120, 240, 300, 600}[rng.Intn(4)]
+		}
+		if rng.Intn(6) == 0 {
+			row.Value = 0
 		}
 		if slot := row.Model + row.Metric + row.Window; !taken[slot] {
 			taken[slot] = true
@@ -309,15 +315,20 @@ func runLimitSequence(t *testing.T, repos repository.Store, seed int64, steps in
 	answer := jsonEngine(`{` + usageObject + `}`)
 
 	teamRows := map[string][]domain.Limit{"T-1": randomRows(rng, models), "T-2": randomRows(rng, models)}
+	perKey := map[string][]domain.Limit{"T-1": randomRows(rng, models), "T-2": randomRows(rng, models)}
 	var teams, pushed []map[string]any
 	for name, rows := range teamRows {
-		teams = append(teams, pushedTeam(name, map[string]any{"limits": wireLimits(rows)}))
+		teams = append(teams, pushedTeam(name, map[string]any{"limits": wireLimits(rows), "key_limits": wireLimits(perKey[name])}))
 	}
 	var keys []sequenceKey
 	for i, team := range []string{"T-1", "T-1", "T-2"} {
 		key := sequenceKey{fmt.Sprintf("secret-%d", i), fmt.Sprintf("K-%d", i), team, randomRows(rng, models)}
-		keys = append(keys, key)
 		pushed = append(pushed, pushedKey(key.secret, key.prefix, key.team, map[string]any{"key_limits": wireLimits(key.rows)}))
+		// A key with no rows of its own runs under its team's per-key rows.
+		if len(key.rows) == 0 {
+			key.rows = perKey[team]
+		}
+		keys = append(keys, key)
 	}
 	s.seed(map[string]http.HandlerFunc{"m1": answer, "m2": answer, "m3": answer}, nil, teams, pushed)
 

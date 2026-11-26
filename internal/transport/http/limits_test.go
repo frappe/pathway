@@ -166,7 +166,7 @@ func TestAKeysPushCarriesLimits(t *testing.T) {
 	if own := store.Keys["aa"].KeyLimits; len(own) != 1 || own[0].Value != 5 {
 		t.Fatalf("key_limits = %+v", own)
 	}
-	if code, body := push("requests:1w:200", ""); code != http.StatusBadRequest || body != "bad body: key K-1: limit \"requests:1w:200\": unknown metric or window, or a value not above zero\n" {
+	if code, body := push("requests:1w:200", ""); code != http.StatusBadRequest || body != "bad body: key K-1: limit \"requests:1w:200\": unknown metric or window, or a value below zero\n" {
 		t.Fatalf("unreadable limit = %d: %q", code, body)
 	}
 	if code, body := push("", "requests:1m:5:"); code != http.StatusBadRequest || body != "bad body: key K-1: limit \"requests:1m:5:\": want metric:window:value[:model]\n" {

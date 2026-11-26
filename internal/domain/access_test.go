@@ -152,7 +152,8 @@ func TestUnderTakesTheTeamsVerdicts(t *testing.T) {
 	}
 	team := TeamRecord{
 		Limited: false, LogPayloads: true, CapMessage: "trial over",
-		Limits: []Limit{{Metric: "requests", Window: "1m", Value: 5}},
+		Limits:    []Limit{{Metric: "requests", Window: "1m", Value: 5}},
+		KeyLimits: []Limit{{Metric: "requests", Window: "1m", Value: 3}},
 	}
 
 	got := stale.Under(team)
@@ -168,5 +169,15 @@ func TestUnderTakesTheTeamsVerdicts(t *testing.T) {
 	own := KeyRecord{Status: "active", Limits: []Limit{{Metric: "requests", Window: "1m", Value: 2}}}
 	if got := own.Under(team); got.Limits[0].Value != 2 {
 		t.Errorf("limits = %+v, want the key's own to win", got.Limits)
+	}
+
+	// The tier's per-key rows count under the key, on its own counter; a key's own rows stand in.
+	holders := Holders(got, "m1")
+	if len(holders) != 2 || holders[1].Counter() != "key::m1" || holders[1].Limits[0].Value != 3 {
+		t.Errorf("holders = %+v, want the team's per-key rows under the key", holders)
+	}
+	pinned := KeyRecord{Status: "active", KeyLimits: []Limit{{Metric: "requests", Window: "1m", Value: 1}}}
+	if got := pinned.Under(team); got.KeyLimits[0].Value != 1 {
+		t.Errorf("key limits = %+v, want the key's own to win", got.KeyLimits)
 	}
 }

@@ -51,13 +51,16 @@ of `<metric>:<window>:<value>[:<model>]`, e.g.
 - `limits` on the team's record — its tier's rows, counted under `team:<team>`, so however many
   keys the team holds they draw on one window per model. A key record still carrying `limits`, as
   a control plane from before team records pushed them, runs under those instead.
-- `key_limits` on the key's record — this key's own, counted under `key:<prefix>`. Whichever of
-  the two is lower refuses first; nothing checks one against the other.
+- `key_limits` on the team's record — its per-key rows, counted under `key:<prefix>`: the same
+  limit for every key of the team, each on its own counter. A key record still carrying
+  `key_limits`, as a control plane that kept rows on the key pushed them, runs under those
+  instead. Whichever of the two lists is lower refuses first; nothing checks one against the other.
 
 A row naming a model holds on that model alone; a row naming none is the default on every model.
 For the model asked for, each list resolves on its own (`domain.LimitsFor`): the rows naming it,
-and on every metric and window none of those covers, the blank rows. No row reaching the model =
-no gate from that list. No entry at all = uncapped. Checked in `modelaccess`, after the credit
+and on every metric and window none of those covers, the blank rows. A row at 0 is no limit: it
+covers its metric and window like any other and counts nothing, so `requests:1m:0:<model>` lifts
+the blank row on that model alone. No row reaching the model = no gate from that list. No entry at all = uncapped. Checked in `modelaccess`, after the credit
 gates and the grant: a key with no balance or no grant does not use up a slot, and the limits
 are per model, so they cannot run before the body names one. A fallback picked below is admitted
 on its own model's limits (`nextFallback`): one at its ceiling is passed over like one not granted,

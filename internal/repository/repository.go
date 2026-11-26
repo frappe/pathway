@@ -215,7 +215,7 @@ type KeyUpsert struct {
 	// BudgetWindow is what Spent counts against the cap: domain.WindowMonth (blank) or WindowTotal.
 	BudgetWindow string
 	Limits       string // the team's as an older control plane pushed them here; blank = the team record's
-	KeyLimits    string // the key's own, same shape, counted under the key
+	KeyLimits    string // rows of the key's own as an older control plane pushed them; blank = the team record's
 	CapMessage   string // the 402 text as an older control plane pushed it here; the team record's otherwise
 }
 
@@ -229,6 +229,7 @@ type TeamUpsert struct {
 	Limited     bool
 	LogPayloads bool
 	Limits      string // comma list of metric:window:value[:model] — the team's, counted under the team
+	KeyLimits   string // same shape, counted under each of the team's keys that has none of its own
 	CapMessage  string // the 402 text once one of its keys' caps is spent; blank = the default
 }
 

@@ -31,7 +31,7 @@ would stay missing until its section changed; only gateway-owned keys expire
 key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
                            geography  budget  budget_window  spent:<YYYY-MM>  spent:total  limits
                            key_limits  cap_message
-team:<Grove Team>          limited  log_payloads  limits  cap_message
+team:<Grove Team>          limited  log_payloads  limits  key_limits  cap_message
 model_group:<Model Group>  models
 usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
@@ -49,7 +49,9 @@ name containing a comma would split — Grove refuses one. `team` is the Grove T
 to: the cache-salt namespace, the payload log's join field, and the record whose `limited`,
 `log_payloads`, `cap_message` and `limits` are applied onto the key at resolve. `limits` there is
 the team's rate limits (its tier's rows, `metric:window:value[:model]`), counted under the team;
-`key_limits` on the key is the key's own, counted under the key. The same four fields on the key
+`key_limits` on the team is its per-key rows, counted under each of its keys on its own;
+`key_limits` on the key is what a control plane that kept rows on the key wrote, and wins while
+the key still carries any. The same four fields on the key
 record are what a control plane from before teams wrote: `limited`, `log_payloads` and
 `cap_message` are read only while the store holds no team record, `limits` only while the key
 still carries any. `budget_window` stays the key's: it names which of the key's own `spent:`

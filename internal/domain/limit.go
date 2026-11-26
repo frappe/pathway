@@ -21,7 +21,8 @@ var limitWindows = map[string]int64{"1m": 60, "1h": 3600, "1d": 86400, "1M": 0}
 
 // Limit caps one metric over one window, pushed as "<metric>:<window>:<value>" or, for one model
 // alone, "<metric>:<window>:<value>:<model>". A blank Model is the holder's default on every
-// model; a row naming one stands in for it there (LimitsFor). A window resets on the UTC clock —
+// model; a row naming one stands in for it there (LimitsFor). A Value of 0 is no limit: the row
+// still stands in, and counts nothing. A window resets on the UTC clock —
 // top of the minute, the hour, midnight, the 1st — not from the holder's first request.
 // ponytail: a fixed window lets twice the ceiling through across its boundary. The last bucket is
 // kept two windows (Bucket): weigh it into the check if bursts hurt.
@@ -47,8 +48,8 @@ func ParseLimits(list string) ([]Limit, error) {
 		}
 		value, err := strconv.ParseInt(parts[2], 10, 64)
 		_, known := limitWindows[parts[1]]
-		if err != nil || value <= 0 || !known || (parts[0] != LimitRequests && parts[0] != LimitTokens) {
-			return nil, fmt.Errorf("limit %q: unknown metric or window, or a value not above zero", entry)
+		if err != nil || value < 0 || !known || (parts[0] != LimitRequests && parts[0] != LimitTokens) {
+			return nil, fmt.Errorf("limit %q: unknown metric or window, or a value below zero", entry)
 		}
 		limit := Limit{Metric: parts[0], Window: parts[1], Value: value}
 		if len(parts) == 4 {
@@ -60,18 +61,21 @@ func ParseLimits(list string) ([]Limit, error) {
 }
 
 // LimitsFor is what counts on model out of a holder's rows: the rows naming it, and on every metric
-// and window none of those covers, the rows naming no model. No row for the model = no limit on it.
+// and window none of those covers, the rows naming no model. A row at 0 covers its metric and
+// window and counts nothing. No row for the model = no limit on it.
 func LimitsFor(limits []Limit, model string) []Limit {
 	var on []Limit
 	named := map[[2]string]bool{}
 	for _, limit := range limits {
 		if limit.Model == model {
-			on = append(on, limit)
 			named[[2]string{limit.Metric, limit.Window}] = true
+			if limit.Value > 0 {
+				on = append(on, limit)
+			}
 		}
 	}
 	for _, limit := range limits {
-		if limit.Model == "" && !named[[2]string{limit.Metric, limit.Window}] {
+		if limit.Model == "" && limit.Value > 0 && !named[[2]string{limit.Metric, limit.Window}] {
 			on = append(on, limit)
 		}
 	}

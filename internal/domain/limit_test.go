@@ -20,7 +20,7 @@ func TestParseLimits(t *testing.T) {
 		t.Errorf("blank = %+v, %v; want none", limits, err)
 	}
 	for _, bad := range []string{
-		"requests:1m", "requests:1m:0", "requests:1m:x", "requests:5m:10",
+		"requests:1m", "requests:1m:-1", "requests:1m:x", "requests:5m:10",
 		"input_tokens:1m:10", "requests:1m:10:",
 	} {
 		if _, err := ParseLimits(bad); err == nil {
@@ -47,6 +47,24 @@ func TestLimitsForPrefersTheRowNamingTheModel(t *testing.T) {
 	}
 	if none := LimitsFor(rows[2:3], "other"); none != nil {
 		t.Errorf("a model no row names = %+v, want none", none)
+	}
+}
+
+// A row at 0 is no limit: naming a model it stands in for the blank row there and counts nothing,
+// and a blank one lifts its metric and window wherever no row names the model.
+func TestARowAtZeroLiftsItsLimit(t *testing.T) {
+	rows, err := ParseLimits("requests:1m:60,total_tokens:1m:0,requests:1m:0:luna,total_tokens:1m:500:sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if luna := LimitsFor(rows, "luna"); luna != nil {
+		t.Errorf("luna = %+v, want no limit at all", luna)
+	}
+	if sol := LimitsFor(rows, "sol"); len(sol) != 2 || sol[0].Value != 500 || sol[1].Value != 60 {
+		t.Errorf("sol = %+v, want its own token row and the blank request row", sol)
+	}
+	if other := LimitsFor(rows, "other"); len(other) != 1 || other[0].Value != 60 {
+		t.Errorf("other = %+v, want the blank request row alone", other)
 	}
 }
 
