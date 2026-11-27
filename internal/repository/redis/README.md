@@ -49,7 +49,8 @@ name containing a comma would split — Grove refuses one. `team` is the Grove T
 to: the cache-salt namespace, the payload log's join field, and the record whose `limited`,
 `log_payloads`, `cap_message` and `limits` are applied onto the key at resolve. `limits` there is
 the team's rate limits (its tier's rows, `metric:window:value[:model]`), counted under the team;
-`key_limits` on the team is its per-key rows, counted under each of its keys on its own;
+`key_limits` on the team is its per-key rows, counted under each of its keys on its own, every
+model together (no row names a model);
 `key_limits` on the key is what a control plane that kept rows on the key wrote, and wins while
 the key still carries any. The same four fields on the key
 record are what a control plane from before teams wrote: `limited`, `log_payloads` and

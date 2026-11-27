@@ -60,6 +60,18 @@ func ParseLimits(list string) ([]Limit, error) {
 	return limits, nil
 }
 
+// ParseKeyLimits reads a key's limits: ParseLimits, and a row naming a model is an error, since a
+// key's limits count every model together and it would be enforced nowhere.
+func ParseKeyLimits(list string) ([]Limit, error) {
+	limits, err := ParseLimits(list)
+	for _, limit := range limits {
+		if limit.Model != "" {
+			return nil, fmt.Errorf("key limit %s:%s names a model (%s); a key's limits name none", limit.Metric, limit.Window, limit.Model)
+		}
+	}
+	return limits, err
+}
+
 // LimitsFor is what counts on model out of a holder's rows: the rows naming it, and on every metric
 // and window none of those covers, the rows naming no model. A row at 0 covers its metric and
 // window and counts nothing. No row for the model = no limit on it.
@@ -107,14 +119,15 @@ func (l Limit) Bucket(now time.Time) (label string, resetIn, ttl int) {
 }
 
 // Whose limits a request is counted against. The team's rows count on lim:team:<team>:<model>:…,
-// so every key of the team draws on one window; the key's own on lim:key:<prefix>:<model>:…, a
-// second gate beneath the team's. Whichever is lower refuses first.
+// so every key of the team draws on one window per model; the key's on lim:key:<prefix>:…, every
+// model together. Whichever is lower refuses first.
 const (
 	HolderTeam = "team"
 	HolderKey  = "key"
 )
 
-// Holder is one set of limits a request is counted against, resolved for the model asked for.
+// Holder is one set of limits a request is counted against. Model is the one asked for, or blank
+// for a key: its limits name no model.
 type Holder struct {
 	Kind   string // HolderTeam | HolderKey
 	ID     string // the Grove Team, or the key prefix
@@ -122,22 +135,32 @@ type Holder struct {
 	Limits []Limit
 }
 
-// Counter is the holder's part of its counter keys: "<kind>:<id>:<model>".
-func (h Holder) Counter() string { return h.Kind + ":" + h.ID + ":" + h.Model }
+// Counter is the holder's part of its counter keys: "team:<team>:<model>", or "key:<prefix>".
+func (h Holder) Counter() string {
+	if h.Model == "" {
+		return h.Kind + ":" + h.ID
+	}
+	return h.Kind + ":" + h.ID + ":" + h.Model
+}
 
-// Holders is what counts for key on model: the team's rows and the key's own, each resolved for
-// the model, and only those that name something. None = nothing to count, no store call.
+// Holders is what counts for key on model: the team's rows resolved for the model, and the key's,
+// the rows naming no model, which count every model together. Only those that name something.
+// None = nothing to count, no store call.
 func Holders(key KeyRecord, model string) []Holder {
-	var holders []Holder
-	for _, h := range []Holder{
-		{Kind: HolderTeam, ID: key.Team, Model: model, Limits: LimitsFor(key.Limits, model)},
-		{Kind: HolderKey, ID: key.KeyPrefix, Model: model, Limits: LimitsFor(key.KeyLimits, model)},
-	} {
-		if len(h.Limits) > 0 {
-			holders = append(holders, h)
-		}
+	holders := FallbackHolders(key, model)
+	if own := LimitsFor(key.KeyLimits, ""); len(own) > 0 {
+		holders = append(holders, Holder{Kind: HolderKey, ID: key.KeyPrefix, Limits: own})
 	}
 	return holders
+}
+
+// FallbackHolders is what a fallback to model counts on top of the request's own admission: the
+// team's rows for that model. The key's limits were counted when the request was admitted.
+func FallbackHolders(key KeyRecord, model string) []Holder {
+	if on := LimitsFor(key.Limits, model); len(on) > 0 {
+		return []Holder{{Kind: HolderTeam, ID: key.Team, Model: model, Limits: on}}
+	}
+	return nil
 }
 
 // Over is a limit found at its ceiling, and whose it is.
@@ -160,10 +183,14 @@ func LimitDenial(exceeded []Over, now time.Time) Denial {
 	if last.Limit.Metric == LimitTokens {
 		unit = "tokens"
 	}
+	on := ""
+	if last.Holder.Model != "" {
+		on = " on " + last.Holder.Model
+	}
 	return Denial{
 		Status: 429,
-		Reason: fmt.Sprintf("rate limit exceeded: %d %s per %s on %s (%s)",
-			last.Limit.Value, unit, last.Limit.Window, last.Holder.Model, last.Holder.Kind),
+		Reason: fmt.Sprintf("rate limit exceeded: %d %s per %s%s (%s)",
+			last.Limit.Value, unit, last.Limit.Window, on, last.Holder.Kind),
 		RetryAfter: wait,
 	}
 }

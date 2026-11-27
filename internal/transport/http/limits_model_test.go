@@ -167,7 +167,7 @@ func wireLimits(rows []domain.Limit) string {
 }
 
 // limitModel is the limit rules written out a second time, on purpose not through domain: one
-// count per holder, model, metric and window. A request is refused while any row that rules it is
+// count per team, model, metric and window, and one per key, metric and window whatever the model. A request is refused while any row that rules it is
 // at its ceiling, and then counts nothing; an admitted one counts on every row that rules it.
 type limitModel struct{ counts map[string]int64 }
 
@@ -237,12 +237,19 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 	for _, row := range ruling(teamRows, model) {
 		rows = append(rows, ruledRow{"team", team, row})
 	}
-	for _, row := range ruling(keyRows, model) {
+	for _, row := range ruling(keyRows, "") {
 		rows = append(rows, ruledRow{"key", key, row})
+	}
+	// A key's rows name no model and count every model together.
+	on := func(r ruledRow) string {
+		if r.kind == "key" {
+			return ""
+		}
+		return model
 	}
 	counter := func(r ruledRow) string {
 		start, _ := windowOf(r.row.Window, now)
-		return strings.Join([]string{r.kind, r.id, model, r.row.Metric, r.row.Window, start}, "|")
+		return strings.Join([]string{r.kind, r.id, on(r), r.row.Metric, r.row.Window, start}, "|")
 	}
 	verdict := modelVerdict{messages: map[string]bool{}}
 	for _, r := range rows {
@@ -258,7 +265,11 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 			if r.row.Metric == domain.LimitTokens {
 				unit = "tokens"
 			}
-			verdict.messages[fmt.Sprintf("rate limit exceeded: %d %s per %s on %s (%s)", r.row.Value, unit, r.row.Window, model, r.kind)] = true
+			where := ""
+			if on(r) != "" {
+				where = " on " + on(r)
+			}
+			verdict.messages[fmt.Sprintf("rate limit exceeded: %d %s per %s%s (%s)", r.row.Value, unit, r.row.Window, where, r.kind)] = true
 		}
 	}
 	if len(verdict.messages) > 0 {
@@ -315,14 +326,14 @@ func runLimitSequence(t *testing.T, repos repository.Store, seed int64, steps in
 	answer := jsonEngine(`{` + usageObject + `}`)
 
 	teamRows := map[string][]domain.Limit{"T-1": randomRows(rng, models), "T-2": randomRows(rng, models)}
-	perKey := map[string][]domain.Limit{"T-1": randomRows(rng, models), "T-2": randomRows(rng, models)}
+	perKey := map[string][]domain.Limit{"T-1": randomRows(rng, nil), "T-2": randomRows(rng, nil)}
 	var teams, pushed []map[string]any
 	for name, rows := range teamRows {
 		teams = append(teams, pushedTeam(name, map[string]any{"limits": wireLimits(rows), "key_limits": wireLimits(perKey[name])}))
 	}
 	var keys []sequenceKey
 	for i, team := range []string{"T-1", "T-1", "T-2"} {
-		key := sequenceKey{fmt.Sprintf("secret-%d", i), fmt.Sprintf("K-%d", i), team, randomRows(rng, models)}
+		key := sequenceKey{fmt.Sprintf("secret-%d", i), fmt.Sprintf("K-%d", i), team, randomRows(rng, nil)}
 		pushed = append(pushed, pushedKey(key.secret, key.prefix, key.team, map[string]any{"key_limits": wireLimits(key.rows)}))
 		// A key with no rows of its own runs under its team's per-key rows.
 		if len(key.rows) == 0 {

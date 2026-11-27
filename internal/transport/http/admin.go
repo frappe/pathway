@@ -50,10 +50,11 @@ type adminKey struct {
 // upsert refuses a limit this binary cannot read, the way decodeBody refuses a field it does not
 // know: stored, it would be a limit the control plane believes in and nothing enforces.
 func (k adminKey) upsert() (repository.KeyUpsert, error) {
-	for _, list := range []string{k.Limits, k.KeyLimits} {
-		if _, err := domain.ParseLimits(list); err != nil {
-			return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
-		}
+	if _, err := domain.ParseLimits(k.Limits); err != nil {
+		return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
+	}
+	if _, err := domain.ParseKeyLimits(k.KeyLimits); err != nil {
+		return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
 	}
 	if !domain.IsBudgetWindow(k.BudgetWindow) {
 		return repository.KeyUpsert{}, fmt.Errorf("key %s: budget_window %q is not month or total", k.Prefix, k.BudgetWindow)
@@ -93,7 +94,8 @@ type adminTeam struct {
 	// Limits is the team's rate limits, its tier's rows: a comma list of
 	// metric:window:value[:model], counted per model for the team as a whole.
 	Limits string `json:"limits"`
-	// KeyLimits is the tier's per-key rows, same shape: counted under each of the team's keys.
+	// KeyLimits is the per-key rows, metric:window:value with no model: counted under each of the
+	// team's keys, every model together.
 	KeyLimits string `json:"key_limits"`
 	// CapMessage is what the 402 says once one of its keys' caps is spent; absent: the default text.
 	CapMessage string `json:"cap_message"`
@@ -101,10 +103,11 @@ type adminTeam struct {
 
 // upsert refuses a limit this binary cannot read, as adminKey.upsert does.
 func (t adminTeam) upsert() (repository.TeamUpsert, error) {
-	for _, list := range []string{t.Limits, t.KeyLimits} {
-		if _, err := domain.ParseLimits(list); err != nil {
-			return repository.TeamUpsert{}, fmt.Errorf("team %s: %w", t.Team, err)
-		}
+	if _, err := domain.ParseLimits(t.Limits); err != nil {
+		return repository.TeamUpsert{}, fmt.Errorf("team %s: %w", t.Team, err)
+	}
+	if _, err := domain.ParseKeyLimits(t.KeyLimits); err != nil {
+		return repository.TeamUpsert{}, fmt.Errorf("team %s: %w", t.Team, err)
 	}
 	return repository.TeamUpsert{
 		Team: t.Team, Limited: t.Limited, LogPayloads: t.LogPayloads, Limits: t.Limits,

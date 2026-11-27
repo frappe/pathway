@@ -189,26 +189,44 @@ func TestAKeysOwnLimitSitsUnderTheTeams(t *testing.T) {
 		f.withKey(func(k *domain.KeyRecord) { k.KeyLimits, _ = domain.ParseLimits(list) })
 	}
 
-	own("requests:1m:1:other-model")
-	for i := 0; i < 2; i++ {
-		if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
-			t.Fatalf("request %d under a row for another model = %d: %s", i+1, resp.Code, resp.Body)
-		}
-	}
 	own("requests:1m:1")
 	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
 		t.Fatalf("first under the key's own row = %d: %s", resp.Code, resp.Body)
 	}
 	resp := f.post("/openai/v1/chat/completions", limitedBody)
-	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != "rate limit exceeded: 1 requests per 1m on qwen3-4b (key)" {
+	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != "rate limit exceeded: 1 requests per 1m (key)" {
 		t.Fatalf("second = %d, %q; want 429 from the key's own row", resp.Code, message)
 	}
 	counts := map[string]int64{}
 	for counter, count := range f.store.Limits {
 		counts[counter[:strings.Index(counter, ":")]] = count
 	}
-	if counts["team"] != 3 || counts["key"] != 1 {
-		t.Errorf("counters = %v, want team 3 and key 1", f.store.Limits)
+	if counts["team"] != 1 || counts["key"] != 1 {
+		t.Errorf("counters = %v, want team 1 and key 1", f.store.Limits)
+	}
+}
+
+// A key's limit counts every model together, so a request that falls back counts on it once: the
+// fallback is not refused by the count its own request made.
+func TestAKeysLimitCountsARequestOnceAcrossAFallback(t *testing.T) {
+	f, backup := fallbackFixture(t, failing(http.StatusBadGateway))
+	own, err := domain.ParseKeyLimits("requests:1m:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.withKey(func(k *domain.KeyRecord) { k.KeyLimits = own })
+
+	if resp := f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK || len(backup.bodies) != 1 {
+		t.Fatalf("first = %d, backup dials = %d; want the fallback's answer", resp.Code, len(backup.bodies))
+	}
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
+	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != "rate limit exceeded: 1 requests per 1m (key)" {
+		t.Fatalf("second = %d, %q; want 429 from the key's limit", resp.Code, message)
+	}
+	for counter, count := range f.store.Limits {
+		if !strings.HasPrefix(counter, "key:") || strings.Contains(counter, "backup") || count != 1 {
+			t.Errorf("counter %q = %d, want the key's one counter at 1", counter, count)
+		}
 	}
 }
 

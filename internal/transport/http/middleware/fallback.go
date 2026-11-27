@@ -91,9 +91,9 @@ func nextFallback(deps Deps, r *http.Request, state *State) (routing.Decision, s
 		state.Fallbacks = state.Fallbacks[1:]
 		err := deps.Admission.Authorize(state.Identity, model)
 		if err == nil {
-			// Its own limits, not the first model's: a fallback at its ceiling is skipped like one
-			// not granted.
-			err = deps.Admission.Admit(r.Context(), state.Identity, model)
+			// The team's limits on this model, not the first one's: a fallback at its ceiling is
+			// skipped like one not granted.
+			err = deps.Admission.AdmitFallback(r.Context(), state.Identity, model)
 		}
 		if err == nil {
 			var decision routing.Decision

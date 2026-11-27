@@ -73,18 +73,28 @@ func TestARowAtZeroLiftsItsLimit(t *testing.T) {
 func TestHoldersSkipsWhatNamesNothing(t *testing.T) {
 	key := KeyRecord{
 		Team: "T-1", KeyPrefix: "abc",
-		Limits:    []Limit{{LimitRequests, "1m", 60, ""}},
-		KeyLimits: []Limit{{LimitRequests, "1m", 5, "luna"}},
+		Limits:    []Limit{{LimitRequests, "1m", 60, "luna"}},
+		KeyLimits: []Limit{{LimitRequests, "1m", 5, ""}, {LimitRequests, "1h", 9, "luna"}},
 	}
 	luna := Holders(key, "luna")
-	if len(luna) != 2 || luna[0].Counter() != "team:T-1:luna" || luna[1].Counter() != "key:abc:luna" || luna[1].Limits[0].Value != 5 {
+	if len(luna) != 2 || luna[0].Counter() != "team:T-1:luna" || luna[1].Counter() != "key:abc" {
 		t.Errorf("luna = %+v", luna)
 	}
-	if other := Holders(key, "other"); len(other) != 1 || other[0].Kind != HolderTeam {
-		t.Errorf("other = %+v, want the team alone", other)
+	if own := luna[1].Limits; len(own) != 1 || own[0].Value != 5 {
+		t.Errorf("the key's = %+v, want the row naming no model alone", own)
+	}
+	// The key's limits count every model together; a fallback counts the team's on its model alone.
+	if other := Holders(key, "other"); len(other) != 1 || other[0].Counter() != "key:abc" {
+		t.Errorf("other = %+v, want the key alone", other)
+	}
+	if fallback := FallbackHolders(key, "luna"); len(fallback) != 1 || fallback[0].Kind != HolderTeam {
+		t.Errorf("fallback = %+v, want the team alone", fallback)
 	}
 	if none := Holders(KeyRecord{Team: "T-1"}, "luna"); none != nil {
 		t.Errorf("no rows = %+v, want none", none)
+	}
+	if _, err := ParseKeyLimits("requests:1m:5,requests:1h:9:luna"); err == nil {
+		t.Error("a key limit naming a model read; want an error")
 	}
 }
 

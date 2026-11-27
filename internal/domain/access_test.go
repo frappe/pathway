@@ -171,9 +171,9 @@ func TestUnderTakesTheTeamsVerdicts(t *testing.T) {
 		t.Errorf("limits = %+v, want the key's own to win", got.Limits)
 	}
 
-	// The tier's per-key rows count under the key, on its own counter; a key's own rows stand in.
+	// The team's per-key rows count under the key, every model together; a key's own stand in.
 	holders := Holders(got, "m1")
-	if len(holders) != 2 || holders[1].Counter() != "key::m1" || holders[1].Limits[0].Value != 3 {
+	if len(holders) != 2 || holders[1].Counter() != "key:" || holders[1].Limits[0].Value != 3 {
 		t.Errorf("holders = %+v, want the team's per-key rows under the key", holders)
 	}
 	pinned := KeyRecord{Status: "active", KeyLimits: []Limit{{Metric: "requests", Window: "1m", Value: 1}}}
