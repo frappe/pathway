@@ -305,3 +305,87 @@ func TestAFallbackCountsOnItsOwnModel(t *testing.T) {
 		t.Errorf("second = %d, backup dials = %d; want the primary's 502 and no dial past backup's limit", resp.Code, len(backup.bodies))
 	}
 }
+
+// limitCounts is every limit counter's count under "<kind>:<model>", a key's under "key:".
+func limitCounts(f *fixture) map[string]int64 {
+	counts := map[string]int64{}
+	for counter, count := range f.store.Limits {
+		parts := strings.Split(counter, ":")
+		if parts[0] == domain.HolderKey {
+			parts[2] = ""
+		}
+		counts[parts[0]+":"+parts[2]] += count
+	}
+	return counts
+}
+
+// overLimitFixture is a healthy primary and backup under these rows, on a clock that stands still.
+func overLimitFixture(t *testing.T, team, own string) (*fixture, *backupEngine) {
+	t.Helper()
+	f, backup := fallbackFixture(t, jsonEngine(`{`+usageObject+`}`))
+	teamRows, err := domain.ParseLimits(team)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownRows, err := domain.ParseKeyLimits(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.withKey(func(k *domain.KeyRecord) { k.Limits, k.KeyLimits = teamRows, ownRows })
+	now := func() time.Time { return time.Date(2026, 11, 28, 12, 0, 30, 0, time.UTC) }
+	f.handler = buildHandler(t, f.store, config.Config{}, 0, func(s *Services) {
+		s.Admission.Now, s.Metering.Now = now, now
+	})
+	return f, backup
+}
+
+// A model over its team's limit hands the request to the fallback the caller named, counted on
+// the fallback's row and not the first model's. With the fallback over too, or none named, the
+// refusal is the first model's.
+func TestAModelOverItsLimitMovesToAFallback(t *testing.T) {
+	f, backup := overLimitFixture(t, "requests:1m:1:qwen3-4b,requests:1m:1:backup", "")
+	const refused = "rate limit exceeded: 1 requests per 1m on qwen3-4b (team)"
+
+	if resp := f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK || len(backup.bodies) != 0 {
+		t.Fatalf("first = %d, backup dials = %d; want the model asked for", resp.Code, len(backup.bodies))
+	}
+	resp := f.post("/openai/v1/chat/completions", limitedBody)
+	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != refused {
+		t.Fatalf("over the limit with no fallback named = %d, %q; want the 429", resp.Code, message)
+	}
+	resp = f.post("/openai/v1/chat/completions", fallbackBody)
+	if resp.Code != http.StatusOK || resp.Header().Get("X-Grove-Fallback") != "backup" || len(backup.bodies) != 1 {
+		t.Fatalf("over the limit = %d, X-Grove-Fallback %q, backup dials = %d; want the fallback's answer",
+			resp.Code, resp.Header().Get("X-Grove-Fallback"), len(backup.bodies))
+	}
+	if counts := limitCounts(f); counts["team:qwen3-4b"] != 1 || counts["team:backup"] != 1 {
+		t.Errorf("counters = %v, want the moved request on backup alone", f.store.Limits)
+	}
+
+	resp = f.post("/openai/v1/chat/completions", fallbackBody)
+	message, _ := refusal(t, resp.Body.Bytes())
+	if resp.Code != http.StatusTooManyRequests || message != refused || resp.Header().Get("Retry-After") != "30" || len(backup.bodies) != 1 {
+		t.Errorf("both over = %d, %q, Retry-After %q, backup dials = %d; want the first model's 429 and no dial",
+			resp.Code, message, resp.Header().Get("Retry-After"), len(backup.bodies))
+	}
+}
+
+// A key's own limit counts every model together: a request a fallback took off a model over its
+// limit counts on it once, and a key at it is not let through to the fallback.
+func TestAKeysOwnLimitHoldsAcrossAMoveToAFallback(t *testing.T) {
+	f, backup := overLimitFixture(t, "requests:1m:1:qwen3-4b", "requests:1m:2")
+
+	for i, dials := range []int{0, 1} {
+		if resp := f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK || len(backup.bodies) != dials {
+			t.Fatalf("request %d = %d, backup dials = %d; want %d", i+1, resp.Code, len(backup.bodies), dials)
+		}
+	}
+	if counts := limitCounts(f); counts["key:"] != 2 {
+		t.Fatalf("counters = %v, want each request once on the key's row", f.store.Limits)
+	}
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
+	if counts := limitCounts(f); resp.Code != http.StatusTooManyRequests || len(backup.bodies) != 1 || counts["key:"] != 2 {
+		t.Errorf("third = %d, backup dials = %d, counters = %v; want 429, no dial and nothing counted",
+			resp.Code, len(backup.bodies), f.store.Limits)
+	}
+}

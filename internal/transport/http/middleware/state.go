@@ -43,6 +43,9 @@ type State struct {
 	// the one of them serving this request; blank while the model asked for is.
 	Fallbacks []string
 	Fallback  string
+	// OverLimit is the rate limit the model asked for is over, held while the caller's fallbacks
+	// are asked. While it is set nothing has been counted for the request, the key's own rows included.
+	OverLimit error
 
 	Decision routing.Decision
 	// Attempts is how many times an upstream was dialled for this request; 0 when none was.
