@@ -81,13 +81,20 @@ key at its ceiling is refused by each fallback in turn and gets its 429 all the 
 | Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |
 | Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the holder's first request |
 | Counter | `lim:<team\|key>:<id>:<model>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
-| Refusal | 429 `rate limit exceeded: 200 requests per 1m on openai/gpt-6-luna (team)` (`rate_limit_error`), `Retry-After` = seconds to the window's end, and `X-Should-Retry: false` beside it when that is over a minute away. Over several limits at once, the one that resets last is named, with whose it is |
+| Refusal | 429 `rate limit exceeded: 200 requests per 1m on openai/gpt-6-luna (team)` (`rate_limit_error`), `Retry-After` = seconds to the window's end — the next window's, when what this one ran over has spent that too — and `X-Should-Retry: false` beside it when that is over two minutes away. Over several limits at once, the one that resets last is named, with whose it is |
 
 **Requests are exact, tokens are check-then-debit.** One Lua script reads every counter of both
 holders and, only when all have room, counts the request — so a refusal counts nothing, on either,
 and two requests cannot both take the last slot. Tokens are unknown until the answer: `meter` adds them to the window the answer
 ended in. The request that crosses a token limit completes; the overshoot is the requests in flight
 times their size. A request with no token usage (audio seconds) moves only the request limits.
+
+**An overshoot is paid back in the next window.** The tokens a debit takes past the ceiling are
+added to the next window's counter as well, in the same script, so that window starts with them
+already used: 150 used on a ceiling of 100 leaves the next window 50, and 230 leaves it none.
+The ceiling is the one in force at the debit, so a limit lowered later owes nothing for what was
+used under the old one. It reaches one window on and no further: a window refused throughout
+debits nothing, and the one after starts clean.
 
 What counts: every request `quota` admits, whatever happens below it (a 403 on the model, a full
 engine). `fallback` and `retry` sit below, so a fallback model or a vendor key rotation is still

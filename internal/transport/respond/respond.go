@@ -80,8 +80,9 @@ func Denial(w http.ResponseWriter, err error) {
 	Error(w, http.StatusInternalServerError, "gateway error")
 }
 
-// retryWithin is the longest wait, in seconds, a client's own retry is left to sit out.
-const retryWithin = 60
+// retryWithin is the longest wait, in seconds, a client's own retry is left to sit out: a minute's
+// limit that ran over far enough to spend the minute after as well.
+const retryWithin = 120
 
 // retryAfter tells the client when a refusal that knows its own end will lift, and past
 // retryWithin not to retry by itself (x-should-retry, which the OpenAI and Anthropic SDKs obey):

@@ -247,16 +247,26 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 		}
 		return model
 	}
-	counter := func(r ruledRow) string {
-		start, _ := windowOf(r.row.Window, now)
+	counter := func(r ruledRow, at time.Time) string {
+		start, _ := windowOf(r.row.Window, at)
 		return strings.Join([]string{r.kind, r.id, on(r), r.row.Metric, r.row.Window, start}, "|")
+	}
+	// next is the start of the window after now's.
+	next := func(r ruledRow) time.Time {
+		_, wait := windowOf(r.row.Window, now)
+		return now.Add(time.Duration(wait) * time.Second)
 	}
 	verdict := modelVerdict{messages: map[string]bool{}}
 	for _, r := range rows {
-		if m.counts[counter(r)] < r.row.Value {
+		if m.counts[counter(r, now)] < r.row.Value {
 			continue
 		}
 		_, wait := windowOf(r.row.Window, now)
+		// A window spent by what the one before ran over is waited out too.
+		if m.counts[counter(r, next(r))] >= r.row.Value {
+			_, whole := windowOf(r.row.Window, next(r))
+			wait += whole
+		}
 		if wait > verdict.retryAfter {
 			verdict.retryAfter, verdict.messages = wait, map[string]bool{}
 		}
@@ -276,10 +286,14 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 		return verdict
 	}
 	for _, r := range rows {
-		if r.row.Metric == domain.LimitTokens {
-			m.counts[counter(r)] += tokens
-		} else {
-			m.counts[counter(r)]++
+		if r.row.Metric != domain.LimitTokens {
+			m.counts[counter(r, now)]++
+			continue
+		}
+		m.counts[counter(r, now)] += tokens
+		// What takes a token row past its ceiling is owed in the next window as well.
+		if over := min(tokens, m.counts[counter(r, now)]-r.row.Value); over > 0 {
+			m.counts[counter(r, next(r))] += over
 		}
 	}
 	return modelVerdict{admitted: true}
@@ -366,8 +380,8 @@ func runLimitSequence(t *testing.T, repos repository.Store, seed int64, steps in
 			t.Fatalf("%s: got %d %q Retry-After %q, want 429 %v Retry-After %d",
 				where, got.Code, message, got.Header().Get("Retry-After"), want.messages, want.retryAfter)
 		}
-		// A wait past a minute is not one for a client's own retry to sit out.
-		if told := got.Header().Get("X-Should-Retry") == "false"; told != (want.retryAfter > 60) {
+		// A wait past two minutes is not one for a client's own retry to sit out.
+		if told := got.Header().Get("X-Should-Retry") == "false"; told != (want.retryAfter > 120) {
 			t.Fatalf("%s: X-Should-Retry %q on a wait of %ds", where, got.Header().Get("X-Should-Retry"), want.retryAfter)
 		}
 	}
