@@ -10,7 +10,7 @@ are the interface — changing one means changing `agent_sync.py` and `usage_pul
 | `model_group:<Model Group>` | hash | state push, `groups` section |
 | `deploy:<model>` | JSON array of routes | state push, `routes` section |
 | `grove:state_hash` | hash | state push — per-section/bucket fingerprints of what this box holds |
-| `lim:<key prefix>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see [Rate limiting](../../service/admission/README.md#rate-limiting) |
+| `lim:<team\|key>:<id>:<model>:<metric>:<window>:<bucket>` | counter, kept two windows | the gateway — see [Rate limiting](../../service/admission/README.md#rate-limiting) |
 | `usage:<key prefix>:<YYYY-MM-DD>` | hash, one per key per UTC day it was served | the gateway; set aside by `GET /grove-admin/usage`, or by the push that moves the key to another team |
 | `drained:<drain id>:<key prefix>:<YYYY-MM-DD>` | hash, kept `usage_retention` once acked; `team` only on one a push set aside: the team charged for it | `GET /grove-admin/usage` renames a live counter here; so does a key push that changes the key's team, which closes its books under a box-made drain id |
 | `drain:unacked` | set of `<drain id>:<key prefix>:<YYYY-MM-DD>` | every counter set aside and not yet acked |
@@ -30,8 +30,8 @@ would stay missing until its section changed; only gateway-owned keys expire
 ```
 key:<sha256(secret)>       status  team  prefix  group (comma list)  allow  deny  limited  log_payloads
                            geography  budget  budget_window  spent:<YYYY-MM>  spent:total  limits
-                           cap_message
-team:<Grove Team>          limited  log_payloads  limits
+                           key_limits  cap_message
+team:<Grove Team>          limited  log_payloads  limits  key_limits  cap_message
 model_group:<Model Group>  models
 usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  total_tokens  cached_tokens
                            cache_write_tokens  cache_write_1h_tokens  audio_tokens  completion_audio_tokens
@@ -47,9 +47,17 @@ usage:<key prefix>:<day>   request_count  prompt_tokens  completion_tokens  tota
 to everything, which is the fail-closed default. `group` holds every group the key is in, so a
 name containing a comma would split — Grove refuses one. `team` is the Grove Team the key bills
 to: the cache-salt namespace, the payload log's join field, and the record whose `limited`,
-`log_payloads` and default `limits` are applied onto the key at resolve. The same three
-fields on the key record are what a control plane from before teams wrote, read only while the
-store holds no team record.
+`log_payloads`, `cap_message` and `limits` are applied onto the key at resolve. `limits` there is
+the team's rate limits (its tier's rows, `metric:window:value[:model]`), counted under the team;
+`key_limits` on the team is its per-key rows, counted under each of its keys on its own, every
+model together (no row names a model);
+`key_limits` on the key is what a control plane that kept rows on the key wrote, and wins while
+the key still carries any. The same four fields on the key
+record are what a control plane from before teams wrote: `limited`, `log_payloads` and
+`cap_message` are read only while the store holds no team record, `limits` only while the key
+still carries any. `budget_window` stays the key's: it names which of the key's own `spent:`
+fields its cap reads, and the accrual, the adjustment and the spend read all take it off the
+record that holds the counter.
 
 `budget` / `spent:<YYYY-MM>` are the credit gate. `budget` is the key's cap, nano-USD, 0
 until Grove sets one; Grove keeps Σ caps within the team's tier limit. `spent:<YYYY-MM>` is this
@@ -64,7 +72,7 @@ spooled line replayed after a push lands where the key now counts; a push naming
 binary cannot gate is refused whole (400). This
 box's balance for the key is `budget − spent`; Grove keeps the team's own from the pulled usage and
 audits the two every pull. `spent >= budget` → 402 `credit balance
-exhausted`, or the key's `cap_message` when the push carried one (`billing_error` on the Anthropic
+exhausted`, or its team's `cap_message` when the push carried one (`billing_error` on the Anthropic
 surface either way), at `quota` before the body is read, and
 `/v1/models` refuses through the same `Evaluate`. `limited` is the control plane's verdict on the
 team and refuses alike. A key pinned by `geography` lives on one store, so its gate is exact —

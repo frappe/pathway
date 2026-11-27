@@ -91,6 +91,11 @@ func nextFallback(deps Deps, r *http.Request, state *State) (routing.Decision, s
 		state.Fallbacks = state.Fallbacks[1:]
 		err := deps.Admission.Authorize(state.Identity, model)
 		if err == nil {
+			// The team's limits on this model, not the first one's: a fallback at its ceiling is
+			// skipped like one not granted.
+			err = deps.Admission.AdmitFallback(r.Context(), state.Identity, model)
+		}
+		if err == nil {
 			var decision routing.Decision
 			// No session: the caller's pin is to an engine of the model they asked for.
 			request := pickRequest(r, state, model, "")

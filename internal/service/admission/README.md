@@ -38,26 +38,47 @@ Two, both read off the key record before the body is, both answering 402
 `key credits exhausted`. The control plane's: its verdict on the team, flipped as `limited` and
 pushed onto every key of the team. This box's own: `spent >= budget`, the key's monthly
 cap against this month's counter on the record (see [The records themselves](../../repository/redis/README.md#the-records-themselves)). The cap's 402
-says the key's `cap_message` when the control plane pushed one (a trial team's "upgrade to go on");
+says its team's `cap_message` when the control plane pushed one (a trial team's "upgrade to go on");
 the team's verdict keeps the default text. Without a message a client cannot tell which one
 refused it.
 
 ## Rate limiting
 
-Per key, pushed on its record as `limits`: a comma list of `<metric>:<window>:<value>`,
-e.g. `requests:1m:200,total_tokens:1h:50000`. No entry = uncapped. Checked in `quota`, after the
-credit gates, so a key with no balance does not use up a request.
+Per team and model, or per key with every model together. Two lists, each a comma list
+of `<metric>:<window>:<value>[:<model>]`, e.g.
+`requests:1m:200,total_tokens:1h:50000,requests:1m:10:openai/gpt-6-luna`:
+
+- `limits` on the team's record — its tier's rows, counted under `team:<team>`, so however many
+  keys the team holds they draw on one window per model. A key record still carrying `limits`, as
+  a control plane from before team records pushed them, runs under those instead.
+- `key_limits` on the team's record — its per-key rows, counted under `key:<prefix>`: the same
+  limit for every key of the team, each on its own counter, **every model together**. They name
+  no model (a push carrying one that does is refused), so `requests:1m:20` is 20 a minute for the
+  key whatever it calls. A key record still carrying `key_limits`, as a control plane that kept
+  rows on the key pushed them, runs under those instead. Whichever of the two lists is lower
+  refuses first; nothing checks one against the other.
+
+In the team's list, a row naming a model holds on that model alone; a row naming none is the
+default on every model. For the model asked for, the list resolves (`domain.LimitsFor`): the rows naming it,
+and on every metric and window none of those covers, the blank rows. A row at 0 is no limit: it
+covers its metric and window like any other and counts nothing, so `requests:1m:0:<model>` lifts
+the blank row on that model alone. No row reaching the model = no gate from that list. No entry at all = uncapped. Checked in `modelaccess`, after the credit
+gates and the grant: a key with no balance or no grant does not use up a slot, and the limits
+are per model, so they cannot run before the body names one. A fallback picked below is admitted
+on the team's limits for its own model (`nextFallback`, `AdmitFallback`): one at its ceiling is
+passed over like one not granted, and the answer's tokens are debited from the model that gave
+it. The key's limits are counted once, when the request is admitted, not again per fallback.
 
 | | |
 |---|---|
 | Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |
-| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the key's first request |
-| Counter | `lim:<key prefix>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
-| Refusal | 429 `rate limit exceeded: 200 requests per 1m` (`rate_limit_error`), `Retry-After` = seconds to the window's end. Over several limits at once, the one that resets last is named |
+| Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the holder's first request |
+| Counter | `lim:<team\|key>:<id>:<model>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
+| Refusal | 429 `rate limit exceeded: 200 requests per 1m on openai/gpt-6-luna (team)` (`rate_limit_error`), `Retry-After` = seconds to the window's end, and `X-Should-Retry: false` beside it when that is over a minute away. Over several limits at once, the one that resets last is named, with whose it is |
 
-**Requests are exact, tokens are check-then-debit.** One Lua script reads every counter and, only
-when all have room, counts the request — so a refusal counts nothing and two requests cannot both
-take the last slot. Tokens are unknown until the answer: `meter` adds them to the window the answer
+**Requests are exact, tokens are check-then-debit.** One Lua script reads every counter of both
+holders and, only when all have room, counts the request — so a refusal counts nothing, on either,
+and two requests cannot both take the last slot. Tokens are unknown until the answer: `meter` adds them to the window the answer
 ended in. The request that crosses a token limit completes; the overshoot is the requests in flight
 times their size. A request with no token usage (audio seconds) moves only the request limits.
 

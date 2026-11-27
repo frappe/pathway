@@ -233,12 +233,12 @@ func TestATeamsSectionLandsAndReadsBack(t *testing.T) {
 
 	w := adminCall(t, handler, http.MethodPost, "/grove-admin/state", fmt.Sprintf(`{
 		"teams": {"buckets": {"%s": {"hash": "th", "records": [
-			{"team": "T-1", "limited": true, "log_payloads": false, "limits": "requests:1m:5"}]}}}}`, bucket))
+			{"team": "T-1", "limited": true, "log_payloads": false, "limits": "requests:1m:5,requests:1m:2:qwen3-4b", "key_limits": "requests:1m:3", "cap_message": "trial over"}]}}}}`, bucket))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"teams":1`) {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
 	}
 	team, ok := store.Teams["T-1"]
-	if !ok || !team.Limited || team.LogPayloads || len(team.Limits) != 1 {
+	if !ok || !team.Limited || team.LogPayloads || len(team.Limits) != 2 || team.Limits[1].Model != "qwen3-4b" || len(team.KeyLimits) != 1 || team.CapMessage != "trial over" {
 		t.Errorf("team = %+v, %v", team, ok)
 	}
 	hashes, _ := store.Repositories().State.Hashes(context.Background())

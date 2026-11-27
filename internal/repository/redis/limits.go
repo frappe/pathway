@@ -9,12 +9,12 @@ import (
 	"github.com/frappe/pathway/internal/domain"
 )
 
-// lim:<key prefix>:<metric>:<window>:<bucket> — one counter per limit per window. Every gateway on this
-// store counts into the same ones, so a limit is exact across them.
+// lim:<kind>:<id>:<model>:<metric>:<window>:<bucket> — one counter per holder, model and limit
+// window. Every gateway on this store counts into the same ones, so a limit is exact across them.
 type limits struct{ rdb *redis.Client }
 
-func limitKey(key string, limit domain.Limit, label string) string {
-	return "lim:" + key + ":" + limit.Metric + ":" + limit.Window + ":" + label
+func limitKey(holder domain.Holder, limit domain.Limit, label string) string {
+	return "lim:" + holder.Counter() + ":" + limit.Metric + ":" + limit.Window + ":" + label
 }
 
 // admitScript checks every counter and, only when all have room, counts the request on those that
@@ -41,32 +41,38 @@ for i, key in ipairs(KEYS) do
 end
 return over`)
 
-func (l limits) Admit(ctx context.Context, key string, lims []domain.Limit, now time.Time) ([]domain.Limit, error) {
-	keys := make([]string, 0, len(lims))
-	args := make([]any, 0, 3*len(lims))
-	for _, limit := range lims {
-		label, _, ttl := limit.Bucket(now)
-		keys = append(keys, limitKey(key, limit, label))
-		args = append(args, limit.Value, flag(limit.Metric == domain.LimitRequests), ttl)
+func (l limits) Admit(ctx context.Context, holders []domain.Holder, now time.Time) ([]domain.Over, error) {
+	var keys []string
+	var args []any
+	var counted []domain.Over
+	for _, holder := range holders {
+		for _, limit := range holder.Limits {
+			label, _, ttl := limit.Bucket(now)
+			keys = append(keys, limitKey(holder, limit, label))
+			args = append(args, limit.Value, flag(limit.Metric == domain.LimitRequests), ttl)
+			counted = append(counted, domain.Over{Holder: holder, Limit: limit})
+		}
 	}
 	over, err := admitScript.Run(ctx, l.rdb, keys, args...).Int64Slice()
 	if err != nil {
 		return nil, err
 	}
-	exceeded := make([]domain.Limit, 0, len(over))
+	exceeded := make([]domain.Over, 0, len(over))
 	for _, index := range over {
-		exceeded = append(exceeded, lims[index-1])
+		exceeded = append(exceeded, counted[index-1])
 	}
 	return exceeded, nil
 }
 
-func (l limits) Debit(ctx context.Context, key string, lims []domain.Limit, tokens int64, now time.Time) error {
+func (l limits) Debit(ctx context.Context, holders []domain.Holder, tokens int64, now time.Time) error {
 	_, err := l.rdb.Pipelined(ctx, func(p redis.Pipeliner) error {
-		for _, limit := range lims {
-			label, _, ttl := limit.Bucket(now)
-			counter := limitKey(key, limit, label)
-			p.IncrBy(ctx, counter, tokens)
-			p.Expire(ctx, counter, time.Duration(ttl)*time.Second)
+		for _, holder := range holders {
+			for _, limit := range domain.LimitsOn(holder.Limits, domain.LimitTokens) {
+				label, _, ttl := limit.Bucket(now)
+				counter := limitKey(holder, limit, label)
+				p.IncrBy(ctx, counter, tokens)
+				p.Expire(ctx, counter, time.Duration(ttl)*time.Second)
+			}
 		}
 		return nil
 	})

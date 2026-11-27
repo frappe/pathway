@@ -117,6 +117,10 @@ func keyRecord(h map[string]string, now time.Time) (domain.KeyRecord, error) {
 	if err != nil {
 		return domain.KeyRecord{}, err
 	}
+	keyLimits, err := domain.ParseLimits(h["key_limits"])
+	if err != nil {
+		return domain.KeyRecord{}, err
+	}
 	window := strings.TrimSpace(h["budget_window"])
 	return domain.KeyRecord{
 		Status:       h["status"],
@@ -132,6 +136,7 @@ func keyRecord(h map[string]string, now time.Time) (domain.KeyRecord, error) {
 		Spent:        int64Field(h, spentFieldFor(window, now)),
 		BudgetWindow: window,
 		Limits:       limits,
+		KeyLimits:    keyLimits,
 		CapMessage:   h["cap_message"],
 	}, nil
 }
@@ -143,10 +148,16 @@ func teamRecord(h map[string]string) (domain.TeamRecord, error) {
 	if err != nil {
 		return domain.TeamRecord{}, err
 	}
+	keyLimits, err := domain.ParseLimits(h["key_limits"])
+	if err != nil {
+		return domain.TeamRecord{}, err
+	}
 	return domain.TeamRecord{
 		Limited:     strings.TrimSpace(h["limited"]) == "1",
 		LogPayloads: strings.TrimSpace(h["log_payloads"]) == "1",
 		Limits:      limits,
+		KeyLimits:   keyLimits,
+		CapMessage:  h["cap_message"],
 	}, nil
 }
 
@@ -155,7 +166,9 @@ func writeTeam(ctx context.Context, p redis.Pipeliner, rec repository.TeamUpsert
 	p.HSet(ctx, "team:"+rec.Team, map[string]any{
 		"limited":      flag(rec.Limited),
 		"log_payloads": flag(rec.LogPayloads),
-		"limits":       rec.Limits, // always written: blank is what clears a removed limit
+		"limits":       rec.Limits,     // always written: blank is what clears a removed limit
+		"key_limits":   rec.KeyLimits,  // always written: blank is what clears the per-key rows
+		"cap_message":  rec.CapMessage, // always written: blank is what clears a dropped message
 	})
 }
 
@@ -175,6 +188,7 @@ func keyFields(rec repository.KeyUpsert) map[string]any {
 		"budget":        strconv.FormatInt(rec.Budget, 10),
 		"budget_window": rec.BudgetWindow, // always written: blank (the month) is what clears a dropped total
 		"limits":        rec.Limits,       // always written: blank is what clears a removed limit
+		"key_limits":    rec.KeyLimits,    // always written: blank is what clears the key's own
 		"cap_message":   rec.CapMessage,   // always written: blank is what clears a dropped message
 	}
 }

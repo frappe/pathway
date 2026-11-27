@@ -37,9 +37,13 @@ type adminKey struct {
 	// current UTC month, a new month starts at 0) or "total" (everything since the key was pushed,
 	// so a spent key stays spent). Anything else is refused the way a bad limit is.
 	BudgetWindow string `json:"budget_window"`
-	// Limits is the key's rate limits, a comma list of metric:window:value; "" = none.
-	Limits string `json:"limits"`
-	// CapMessage is what the 402 says once the key's cap is spent; absent: the default text.
+	// Limits is the team's rate limits as a control plane from before team records pushed them on
+	// each key, a comma list of metric:window:value[:model]; "" = the team record's hold. KeyLimits
+	// is the key's own, same shape, counted under the key beneath the team's.
+	Limits    string `json:"limits"`
+	KeyLimits string `json:"key_limits"`
+	// CapMessage is what the 402 says once the key's cap is spent, as a control plane from before
+	// team records pushed it on each key; the team record's holds once there is one.
 	CapMessage string `json:"cap_message"`
 }
 
@@ -49,6 +53,9 @@ func (k adminKey) upsert() (repository.KeyUpsert, error) {
 	if _, err := domain.ParseLimits(k.Limits); err != nil {
 		return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
 	}
+	if _, err := domain.ParseKeyLimits(k.KeyLimits); err != nil {
+		return repository.KeyUpsert{}, fmt.Errorf("key %s: %w", k.Prefix, err)
+	}
 	if !domain.IsBudgetWindow(k.BudgetWindow) {
 		return repository.KeyUpsert{}, fmt.Errorf("key %s: budget_window %q is not month or total", k.Prefix, k.BudgetWindow)
 	}
@@ -56,7 +63,7 @@ func (k adminKey) upsert() (repository.KeyUpsert, error) {
 		MeterID: k.KeyHash, Prefix: k.Prefix, Team: k.Team, Status: k.Status, Groups: k.Group,
 		Allow: k.Allow, Deny: k.Deny, Limited: k.Limited, LogPayloads: k.LogPayloads,
 		Geography: k.Geography, Budget: k.Budget, BudgetWindow: k.BudgetWindow, Limits: k.Limits,
-		CapMessage: k.CapMessage,
+		KeyLimits: k.KeyLimits, CapMessage: k.CapMessage,
 	}, nil
 }
 
@@ -84,8 +91,14 @@ type adminTeam struct {
 	Limited bool   `json:"limited"`
 	// LogPayloads opts the team's keys' prompts and outputs into the payload log. Absent: off.
 	LogPayloads bool `json:"log_payloads"`
-	// Limits is what a key with none of its own runs under, a comma list of metric:window:value.
+	// Limits is the team's rate limits, its tier's rows: a comma list of
+	// metric:window:value[:model], counted per model for the team as a whole.
 	Limits string `json:"limits"`
+	// KeyLimits is the per-key rows, metric:window:value with no model: counted under each of the
+	// team's keys, every model together.
+	KeyLimits string `json:"key_limits"`
+	// CapMessage is what the 402 says once one of its keys' caps is spent; absent: the default text.
+	CapMessage string `json:"cap_message"`
 }
 
 // upsert refuses a limit this binary cannot read, as adminKey.upsert does.
@@ -93,8 +106,12 @@ func (t adminTeam) upsert() (repository.TeamUpsert, error) {
 	if _, err := domain.ParseLimits(t.Limits); err != nil {
 		return repository.TeamUpsert{}, fmt.Errorf("team %s: %w", t.Team, err)
 	}
+	if _, err := domain.ParseKeyLimits(t.KeyLimits); err != nil {
+		return repository.TeamUpsert{}, fmt.Errorf("team %s: %w", t.Team, err)
+	}
 	return repository.TeamUpsert{
 		Team: t.Team, Limited: t.Limited, LogPayloads: t.LogPayloads, Limits: t.Limits,
+		KeyLimits: t.KeyLimits, CapMessage: t.CapMessage,
 	}, nil
 }
 
