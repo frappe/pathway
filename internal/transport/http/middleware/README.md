@@ -9,9 +9,9 @@ the order is `GatewayChain` in `middleware.go`.
 | `accesslog` | mints the request id, times the request, writes the one durable line per request |
 | `drain` | while shutting down: 503 + `Retry-After` + "gateway is restarting" |
 | `auth` | bearer → key → groups, once, into the request state |
-| `quota` | the geography pin → 403; the credit flag the control plane pushed, or the key's cap spent → 402; then the key's rate limits → 429 + `Retry-After` |
+| `quota` | the geography pin → 403; the credit flag the control plane pushed, or the key's cap spent → 402 |
 | `body` | bounded read + JSON decode, or a streaming form parse; `model` and the session hint come out here. Not a JSON object, or no `model` in it (or in the form, or an upgrade's query) → 400; over `max_body_bytes` → 413; not all here within 60s → 408 |
-| `modelaccess` | `CanUse` → 403 |
+| `modelaccess` | `CanUse` → 403; then the rate limits on the model → 429 + `Retry-After`, held for `route` to ask the body's `fallbacks` first when it names any |
 | `payloadlog` | the prompt as the client sent it and the output as it received it, one line per request to `GROVE_PAYLOAD_LOG`. Runs only when that file is set **and** the key's `log_payloads` is on. See [The payload log](#the-payload-log) |
 | `route` | surface / sticky / region / capacity / least-in-flight, waiting up to `capacity_wait` for room; claims an in-flight slot, except on a vendor row |
 | `meter` | **deferred** release + usage record — runs on disconnect, panic and dead upstream alike |

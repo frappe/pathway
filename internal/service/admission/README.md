@@ -69,6 +69,13 @@ on the team's limits for its own model (`nextFallback`, `AdmitFallback`): one at
 passed over like one not granted, and the answer's tokens are debited from the model that gave
 it. The key's limits are counted once, when the request is admitted, not again per fallback.
 
+A model over its limit is not refused while the body names fallbacks: `modelaccess` holds the 429
+and `route` asks each fallback in turn, as it does for a model with nowhere to go. The refusal
+counted nothing, so the first fallback with room is admitted on its team's rows and the key's own;
+the request counts there, and not on the model first asked for. With every fallback over a limit
+too, the client gets the first model's 429. A key's own limit counts every model together, so a
+key at its ceiling is refused by each fallback in turn and gets its 429 all the same.
+
 | | |
 |---|---|
 | Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |

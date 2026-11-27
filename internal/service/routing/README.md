@@ -94,6 +94,8 @@ A fallback is tried, in list order, when:
 
 - `route` finds nowhere for the model to go — no healthy server (503) or every one full (429) —
   before anything is dialled; or
+- the model is over one of the caller's rate limits (see
+  [Rate limiting](../admission/README.md#rate-limiting)), again before anything is dialled; or
 - the upstream's answer says the model cannot serve here (`domain.MovesModel`: a 5xx, a timeout, a
   retired model, or a key failure `retry` could not rotate away after walking every key the model
   has); or
