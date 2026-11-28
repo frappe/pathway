@@ -73,20 +73,18 @@ func (l limits) Admit(ctx context.Context, holders []domain.Holder, now time.Tim
 	return exceeded, nil
 }
 
-// debitScript adds the tokens to each counter, and to the next window's the part of them that is
-// past the ceiling. One script: the part is read off the count this debit made.
+// debitScript adds the tokens to each counter, and starts the next window's at its ceiling once
+// this one has reached twice that. One script: the count is the one this debit made.
 //
 // KEYS[2i-1] a counter, KEYS[2i] the next window's; ARGV[1] the tokens, ARGV[2i] the ceiling,
 // ARGV[2i+1] the TTL of both.
 var debitScript = redis.NewScript(`
-local tokens = tonumber(ARGV[1])
 for i = 1, #KEYS / 2 do
-  local used = redis.call('INCRBY', KEYS[2 * i - 1], tokens)
+  local used = redis.call('INCRBY', KEYS[2 * i - 1], ARGV[1])
   redis.call('EXPIRE', KEYS[2 * i - 1], ARGV[2 * i + 1])
-  local over = math.min(tokens, used - tonumber(ARGV[2 * i]))
-  if over > 0 then
-    redis.call('INCRBY', KEYS[2 * i], over)
-    redis.call('EXPIRE', KEYS[2 * i], ARGV[2 * i + 1])
+  local ceiling = tonumber(ARGV[2 * i])
+  if used >= 2 * ceiling and tonumber(redis.call('GET', KEYS[2 * i]) or '0') < ceiling then
+    redis.call('SET', KEYS[2 * i], ARGV[2 * i], 'EX', ARGV[2 * i + 1])
   end
 end
 return 0`)

@@ -262,7 +262,7 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 			continue
 		}
 		_, wait := windowOf(r.row.Window, now)
-		// A window spent by what the one before ran over is waited out too.
+		// A window spent by the one before reaching twice its ceiling is waited out too.
 		if m.counts[counter(r, next(r))] >= r.row.Value {
 			_, whole := windowOf(r.row.Window, next(r))
 			wait += whole
@@ -291,9 +291,9 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 			continue
 		}
 		m.counts[counter(r, now)] += tokens
-		// What takes a token row past its ceiling is owed in the next window as well.
-		if over := min(tokens, m.counts[counter(r, now)]-r.row.Value); over > 0 {
-			m.counts[counter(r, next(r))] += over
+		// A token row taken to twice its ceiling spends the next window as well.
+		if m.counts[counter(r, now)] >= 2*r.row.Value {
+			m.counts[counter(r, next(r))] = max(m.counts[counter(r, next(r))], r.row.Value)
 		}
 	}
 	return modelVerdict{admitted: true}
@@ -311,7 +311,8 @@ func randomRows(rng *rand.Rand, models []string) []domain.Limit {
 		}
 		row.Value = int64(1 + rng.Intn(5))
 		if row.Metric == domain.LimitTokens {
-			row.Value = []int64{120, 240, 300, 600}[rng.Intn(4)]
+			// 60: one answer of 120 is twice the ceiling.
+			row.Value = []int64{60, 120, 240, 300, 600}[rng.Intn(5)]
 		}
 		if rng.Intn(6) == 0 {
 			row.Value = 0

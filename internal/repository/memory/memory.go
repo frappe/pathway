@@ -518,8 +518,9 @@ func (l limits) Debit(_ context.Context, holders []domain.Holder, tokens int64, 
 		for _, limit := range domain.LimitsOn(holder.Limits, domain.LimitTokens) {
 			counter := limitKey(holder, limit, now)
 			l.s.Limits[counter] += tokens
-			if over := min(tokens, l.s.Limits[counter]-limit.Value); over > 0 {
-				l.s.Limits[limitKey(holder, limit, limit.Next(now))] += over
+			if l.s.Limits[counter] >= 2*limit.Value {
+				next := limitKey(holder, limit, limit.Next(now))
+				l.s.Limits[next] = max(l.s.Limits[next], limit.Value)
 			}
 		}
 	}

@@ -10,8 +10,9 @@ import (
 // What a Limit counts. A request is counted as it is admitted; tokens only once the answer says how
 // many there were.
 // ponytail: nothing is reserved at admit, so requests in flight together pass a token limit by what
-// they go on to use. That much is taken out of the next window (Limits.Debit), one window on and no
-// further. Reserve an estimate of the prompt in Admit and settle it in Debit if the burst itself hurts.
+// they go on to use. One taken to twice its ceiling spends the next window as well (Limits.Debit);
+// short of that nothing is owed. Reserve an estimate of the prompt in Admit and settle it in Debit
+// if the burst itself hurts.
 const (
 	LimitRequests = "requests"
 	LimitTokens   = "total_tokens"
@@ -171,7 +172,7 @@ func FallbackHolders(key KeyRecord, model string) []Holder {
 }
 
 // Over is a limit found at its ceiling, and whose it is. Carried: the window after is spent as
-// well, by what this one ran over.
+// well, this one having reached twice its ceiling.
 type Over struct {
 	Holder  Holder
 	Limit   Limit

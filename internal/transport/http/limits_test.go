@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -102,23 +101,35 @@ func TestATokenLimitRefusesOnceADebitCrossesIt(t *testing.T) {
 	if message, _ := refusal(t, resp.Body.Bytes()); message != "rate limit exceeded: 200 tokens per 1h on qwen3-4b (team)" {
 		t.Errorf("message = %q", message)
 	}
-	// The 40 past the ceiling are owed in the next hour as well.
-	hour := clock.Unix() / 3600
-	want := map[string]int64{strconv.FormatInt(hour, 10): 240, strconv.FormatInt(hour+1, 10): 40}
+	// 240 is short of twice the ceiling, so the next hour is owed nothing.
 	for key, count := range f.store.Limits {
-		if count != want[key[strings.LastIndex(key, ":")+1:]] {
-			t.Errorf("%s = %d, want %v by the hour", key, count, want)
+		if count != 240 {
+			t.Errorf("%s = %d, want 240", key, count)
 		}
 	}
-	if len(f.store.Limits) != len(want) {
-		t.Errorf("counters = %v, want this hour's and the next", f.store.Limits)
+	if len(f.store.Limits) != 1 {
+		t.Errorf("counters = %v, want this hour's alone", f.store.Limits)
 	}
 }
 
-// What a token limit is overshot by is taken out of the next window: at twice the ceiling that
-// whole window is refused, the wait named runs to its end, and the window after starts clean.
-func TestATokenOvershootIsTakenOutOfTheNextWindow(t *testing.T) {
+// A token limit taken to twice its ceiling spends the next window as well: that whole window is
+// refused, the wait named runs to its end, and the window after starts clean. Short of twice, the
+// next window is whole.
+func TestATokenLimitAtTwiceItsCeilingSpendsTheNextWindow(t *testing.T) {
 	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
+	under := limitedFixture(t, "total_tokens:1m:100", &clock)
+	if resp := under.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("first under a ceiling of 100 = %d: %s", resp.Code, resp.Body)
+	}
+	if resp := under.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "30" {
+		t.Fatalf("after 120 tokens on a ceiling of 100 = %d, Retry-After %q; want 429 to the end of this minute", resp.Code, resp.Header().Get("Retry-After"))
+	}
+	clock = clock.Add(time.Minute)
+	if resp := under.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("the minute after 120 on a ceiling of 100 = %d, want a whole window: %s", resp.Code, resp.Body)
+	}
+
+	clock = time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	f := limitedFixture(t, "total_tokens:1m:60", &clock)
 
 	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
