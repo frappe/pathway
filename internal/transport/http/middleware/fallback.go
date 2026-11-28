@@ -92,8 +92,14 @@ func nextFallback(deps Deps, r *http.Request, state *State) (routing.Decision, s
 		err := deps.Admission.Authorize(state.Identity, model)
 		if err == nil {
 			// The team's limits on this model, not the first one's: a fallback at its ceiling is
-			// skipped like one not granted.
-			err = deps.Admission.AdmitFallback(r.Context(), state.Identity, model)
+			// skipped like one not granted. The key's own count once, with the first model admitted.
+			admit := deps.Admission.AdmitFallback
+			if state.OverLimit != nil {
+				admit = deps.Admission.Admit
+			}
+			if err = admit(r.Context(), state.Identity, model); err == nil {
+				state.OverLimit = nil
+			}
 		}
 		if err == nil {
 			var decision routing.Decision

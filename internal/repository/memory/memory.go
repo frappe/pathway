@@ -492,7 +492,8 @@ func (l limits) Admit(_ context.Context, holders []domain.Holder, now time.Time)
 	for _, holder := range holders {
 		for _, limit := range holder.Limits {
 			if l.s.Limits[limitKey(holder, limit, now)] >= limit.Value {
-				exceeded = append(exceeded, domain.Over{Holder: holder, Limit: limit})
+				carried := l.s.Limits[limitKey(holder, limit, limit.Next(now))] >= limit.Value
+				exceeded = append(exceeded, domain.Over{Holder: holder, Limit: limit, Carried: carried})
 			}
 		}
 	}
@@ -515,7 +516,12 @@ func (l limits) Debit(_ context.Context, holders []domain.Holder, tokens int64, 
 	}
 	for _, holder := range holders {
 		for _, limit := range domain.LimitsOn(holder.Limits, domain.LimitTokens) {
-			l.s.Limits[limitKey(holder, limit, now)] += tokens
+			counter := limitKey(holder, limit, now)
+			l.s.Limits[counter] += tokens
+			if l.s.Limits[counter] >= 2*limit.Value {
+				next := limitKey(holder, limit, limit.Next(now))
+				l.s.Limits[next] = max(l.s.Limits[next], limit.Value)
+			}
 		}
 	}
 	return nil

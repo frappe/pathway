@@ -98,7 +98,8 @@ type Limits interface {
 	// the request limits — one atomic step, so two requests cannot both take the last slot. → the
 	// limits already spent, each with its holder; none when admitted.
 	Admit(ctx context.Context, holders []domain.Holder, now time.Time) ([]domain.Over, error)
-	// Debit adds tokens to the current window of each holder's token limits.
+	// Debit adds tokens to the current window of each holder's token limits. A window taken to
+	// twice its ceiling spends the next one too: that one starts at its ceiling.
 	Debit(ctx context.Context, holders []domain.Holder, tokens int64, now time.Time) error
 }
 

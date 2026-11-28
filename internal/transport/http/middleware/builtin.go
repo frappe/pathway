@@ -343,7 +343,8 @@ func serveNamed(next http.Handler, w http.ResponseWriter, r *http.Request, state
 
 // modelaccess is the grant check — the same decision /v1/models filters its list with — and then
 // the rate limits, which are per model and so could not run before the body: a request refused
-// the model does not use up a slot. A fallback is counted on its own model (nextFallback).
+// the model does not use up a slot. A fallback is counted on its own model (nextFallback), so a
+// model over its limit is not refused here while the caller named others: route asks those first.
 func newModelAccess(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -353,8 +354,14 @@ func newModelAccess(deps Deps) (Middleware, error) {
 				return
 			}
 			if err := deps.Admission.Admit(r.Context(), state.Identity, state.Model); err != nil {
-				deny(w, r, err)
-				return
+				// ponytail: a key's own limit holds on every model, yet each fallback is still asked
+				// and refused by it (MaxFallbacks store calls). Tell the two apart here if that costs.
+				var denial domain.Denial
+				if len(state.Fallbacks) == 0 || !errors.As(err, &denial) || denial.Status != http.StatusTooManyRequests {
+					deny(w, r, err)
+					return
+				}
+				state.OverLimit = err
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -367,7 +374,11 @@ func newRoute(deps Deps) (Middleware, error) {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			state, started := From(r), time.Now()
-			decision, err := deps.Routing.Pick(r.Context(), pickRequest(r, state, state.Model, state.Session))
+			// A model over its limit is not picked: its refusal goes the way a refused pick does.
+			decision, err := routing.Decision{}, state.OverLimit
+			if err == nil {
+				decision, err = deps.Routing.Pick(r.Context(), pickRequest(r, state, state.Model, state.Session))
+			}
 			// A model with nowhere to go hands the request to the caller's fallbacks before any
 			// dial; a pick refused for the request's own fault (the wrong surface) does not, nor
 			// one whose client has left.

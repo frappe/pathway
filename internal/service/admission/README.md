@@ -69,18 +69,34 @@ on the team's limits for its own model (`nextFallback`, `AdmitFallback`): one at
 passed over like one not granted, and the answer's tokens are debited from the model that gave
 it. The key's limits are counted once, when the request is admitted, not again per fallback.
 
+A model over its limit is not refused while the body names fallbacks: `modelaccess` holds the 429
+and `route` asks each fallback in turn, as it does for a model with nowhere to go. The refusal
+counted nothing, so the first fallback with room is admitted on its team's rows and the key's own;
+the request counts there, and not on the model first asked for. With every fallback over a limit
+too, the client gets the first model's 429. A key's own limit counts every model together, so a
+key at its ceiling is refused by each fallback in turn and gets its 429 all the same.
+
 | | |
 |---|---|
 | Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |
 | Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the holder's first request |
 | Counter | `lim:<team\|key>:<id>:<model>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
-| Refusal | 429 `rate limit exceeded: 200 requests per 1m on openai/gpt-6-luna (team)` (`rate_limit_error`), `Retry-After` = seconds to the window's end, and `X-Should-Retry: false` beside it when that is over a minute away. Over several limits at once, the one that resets last is named, with whose it is |
+| Refusal | 429 `rate limit exceeded: 200 requests per 1m on openai/gpt-6-luna (team)` (`rate_limit_error`), `Retry-After` = seconds to the window's end — the next window's, when this one reached twice its ceiling and so spent that too — and `X-Should-Retry: false` beside it when that is over a minute away. Over several limits at once, the one that resets last is named, with whose it is |
 
 **Requests are exact, tokens are check-then-debit.** One Lua script reads every counter of both
 holders and, only when all have room, counts the request — so a refusal counts nothing, on either,
 and two requests cannot both take the last slot. Tokens are unknown until the answer: `meter` adds them to the window the answer
 ended in. The request that crosses a token limit completes; the overshoot is the requests in flight
 times their size. A request with no token usage (audio seconds) moves only the request limits.
+
+**Twice the ceiling spends the next window too.** An overshoot short of twice the ceiling is let
+go: the next window is whole. A debit that takes a token counter to twice its ceiling or past it
+starts the next window's counter at the ceiling, in the same script, so that whole window is
+refused: 150 used on a ceiling of 100 owes nothing, 230 costs the next window. The ceiling is the
+one in force at the debit, so a limit lowered later owes nothing for what was used under the old
+one. The window refused this way starts at its ceiling, so tokens that still land in it (requests
+admitted before, answering late) count on top, and reaching twice the ceiling again spends the one
+after. Otherwise it debits nothing, and the window after it starts clean.
 
 What counts: every request `quota` admits, whatever happens below it (a 403 on the model, a full
 engine). `fallback` and `retry` sit below, so a fallback model or a vendor key rotation is still

@@ -30,6 +30,7 @@ func Run(t *testing.T, open func(t *testing.T) repository.Store) {
 		{"ASuccessClearsTheFailures", aSuccessClearsTheFailures},
 		{"ProviderKeysTakeClears", providerKeysTakeClears},
 		{"AdmitTakesTheLastSlotOnce", admitTakesTheLastSlotOnce},
+		{"TwiceATokenCeilingSpendsTheNextWindow", twiceATokenCeilingSpendsTheNextWindow},
 		{"ADrainIsResentUntilAcked", aDrainIsResentUntilAcked},
 		{"AKeyThatChangesHandsClosesItsBooks", aKeyThatChangesHandsClosesItsBooks},
 		{"SpentIsEachKeysOwnCounter", spentIsEachKeysOwnCounter},
@@ -177,6 +178,34 @@ func admitTakesTheLastSlotOnce(t *testing.T, store repository.Store) {
 	}
 	if spent, _ := store.Limits.Admit(ctx, both[:1], now); len(spent) != 0 {
 		t.Fatalf("the team alone = %v, want room: a refusal counted nothing", spent)
+	}
+}
+
+func twiceATokenCeilingSpendsTheNextWindow(t *testing.T, store repository.Store) {
+	limit := domain.Limit{Metric: domain.LimitTokens, Window: "1h", Value: 100}
+	team := []domain.Holder{{Kind: domain.HolderTeam, ID: "t3", Model: "m", Limits: []domain.Limit{limit}}}
+	now := time.Now()
+	// 70 under the ceiling, then 180 that take it to 250: past twice the ceiling.
+	must(t, store.Limits.Debit(ctx, team, 70, now))
+	must(t, store.Limits.Debit(ctx, team, 180, now))
+	if spent, err := store.Limits.Admit(ctx, team, now); err != nil || len(spent) != 1 || !spent[0].Carried {
+		t.Fatalf("Admit this hour = %+v, %v; want the limit spent, and the next hour with it", spent, err)
+	}
+	next := limit.Next(now)
+	if spent, err := store.Limits.Admit(ctx, team, next); err != nil || len(spent) != 1 || spent[0].Carried {
+		t.Fatalf("Admit the next hour = %+v, %v; want it spent, and the one after not", spent, err)
+	}
+	if spent, err := store.Limits.Admit(ctx, team, limit.Next(next)); err != nil || len(spent) != 0 {
+		t.Fatalf("Admit two hours on = %+v, %v; want a clean window", spent, err)
+	}
+	// Short of twice the ceiling, the next hour is whole.
+	other := []domain.Holder{{Kind: domain.HolderTeam, ID: "t3", Model: "other", Limits: []domain.Limit{limit}}}
+	must(t, store.Limits.Debit(ctx, other, 199, now))
+	if spent, _ := store.Limits.Admit(ctx, other, now); len(spent) != 1 || spent[0].Carried {
+		t.Fatalf("Admit after 199 of 100 = %+v, want this hour spent and the next not", spent)
+	}
+	if spent, _ := store.Limits.Admit(ctx, other, next); len(spent) != 0 {
+		t.Fatalf("the hour after 199 of 100 = %+v, want room", spent)
 	}
 }
 

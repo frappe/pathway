@@ -10,7 +10,9 @@ import (
 // What a Limit counts. A request is counted as it is admitted; tokens only once the answer says how
 // many there were.
 // ponytail: nothing is reserved at admit, so requests in flight together pass a token limit by what
-// they go on to use. Reserve an estimate of the prompt in Admit and settle it in Debit if that hurts.
+// they go on to use. One taken to twice its ceiling spends the next window as well (Limits.Debit);
+// short of that nothing is owed. Reserve an estimate of the prompt in Admit and settle it in Debit
+// if the burst itself hurts.
 const (
 	LimitRequests = "requests"
 	LimitTokens   = "total_tokens"
@@ -118,6 +120,12 @@ func (l Limit) Bucket(now time.Time) (label string, resetIn, ttl int) {
 	return strconv.FormatInt(bucket, 10), int((bucket+1)*seconds - now.Unix()), int(2 * seconds)
 }
 
+// Next is the start of the window after the one now falls in.
+func (l Limit) Next(now time.Time) time.Time {
+	_, resetIn, _ := l.Bucket(now)
+	return time.Unix(now.Unix()+int64(resetIn), 0)
+}
+
 // Whose limits a request is counted against. The team's rows count on lim:team:<team>:<model>:…,
 // so every key of the team draws on one window per model; the key's on lim:key:<prefix>:…, every
 // model together. Whichever is lower refuses first.
@@ -163,10 +171,12 @@ func FallbackHolders(key KeyRecord, model string) []Holder {
 	return nil
 }
 
-// Over is a limit found at its ceiling, and whose it is.
+// Over is a limit found at its ceiling, and whose it is. Carried: the window after is spent as
+// well, this one having reached twice its ceiling.
 type Over struct {
-	Holder Holder
-	Limit  Limit
+	Holder  Holder
+	Limit   Limit
+	Carried bool
 }
 
 // LimitDenial is the 429 for a request over these limits. It names the one that resets last, so a
@@ -175,7 +185,12 @@ func LimitDenial(exceeded []Over, now time.Time) Denial {
 	var last Over
 	wait := 0
 	for _, over := range exceeded {
-		if _, resetIn, _ := over.Limit.Bucket(now); resetIn > wait {
+		_, resetIn, _ := over.Limit.Bucket(now)
+		if over.Carried {
+			_, next, _ := over.Limit.Bucket(over.Limit.Next(now))
+			resetIn += next
+		}
+		if resetIn > wait {
 			last, wait = over, resetIn
 		}
 	}

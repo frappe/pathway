@@ -247,16 +247,26 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 		}
 		return model
 	}
-	counter := func(r ruledRow) string {
-		start, _ := windowOf(r.row.Window, now)
+	counter := func(r ruledRow, at time.Time) string {
+		start, _ := windowOf(r.row.Window, at)
 		return strings.Join([]string{r.kind, r.id, on(r), r.row.Metric, r.row.Window, start}, "|")
+	}
+	// next is the start of the window after now's.
+	next := func(r ruledRow) time.Time {
+		_, wait := windowOf(r.row.Window, now)
+		return now.Add(time.Duration(wait) * time.Second)
 	}
 	verdict := modelVerdict{messages: map[string]bool{}}
 	for _, r := range rows {
-		if m.counts[counter(r)] < r.row.Value {
+		if m.counts[counter(r, now)] < r.row.Value {
 			continue
 		}
 		_, wait := windowOf(r.row.Window, now)
+		// A window spent by the one before reaching twice its ceiling is waited out too.
+		if m.counts[counter(r, next(r))] >= r.row.Value {
+			_, whole := windowOf(r.row.Window, next(r))
+			wait += whole
+		}
 		if wait > verdict.retryAfter {
 			verdict.retryAfter, verdict.messages = wait, map[string]bool{}
 		}
@@ -276,10 +286,14 @@ func (m *limitModel) ask(team string, teamRows []domain.Limit, key string, keyRo
 		return verdict
 	}
 	for _, r := range rows {
-		if r.row.Metric == domain.LimitTokens {
-			m.counts[counter(r)] += tokens
-		} else {
-			m.counts[counter(r)]++
+		if r.row.Metric != domain.LimitTokens {
+			m.counts[counter(r, now)]++
+			continue
+		}
+		m.counts[counter(r, now)] += tokens
+		// A token row taken to twice its ceiling spends the next window as well.
+		if m.counts[counter(r, now)] >= 2*r.row.Value {
+			m.counts[counter(r, next(r))] = max(m.counts[counter(r, next(r))], r.row.Value)
 		}
 	}
 	return modelVerdict{admitted: true}
@@ -297,7 +311,8 @@ func randomRows(rng *rand.Rand, models []string) []domain.Limit {
 		}
 		row.Value = int64(1 + rng.Intn(5))
 		if row.Metric == domain.LimitTokens {
-			row.Value = []int64{120, 240, 300, 600}[rng.Intn(4)]
+			// 60: one answer of 120 is twice the ceiling.
+			row.Value = []int64{60, 120, 240, 300, 600}[rng.Intn(5)]
 		}
 		if rng.Intn(6) == 0 {
 			row.Value = 0

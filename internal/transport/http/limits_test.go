@@ -101,10 +101,53 @@ func TestATokenLimitRefusesOnceADebitCrossesIt(t *testing.T) {
 	if message, _ := refusal(t, resp.Body.Bytes()); message != "rate limit exceeded: 200 tokens per 1h on qwen3-4b (team)" {
 		t.Errorf("message = %q", message)
 	}
+	// 240 is short of twice the ceiling, so the next hour is owed nothing.
 	for key, count := range f.store.Limits {
 		if count != 240 {
 			t.Errorf("%s = %d, want 240", key, count)
 		}
+	}
+	if len(f.store.Limits) != 1 {
+		t.Errorf("counters = %v, want this hour's alone", f.store.Limits)
+	}
+}
+
+// A token limit taken to twice its ceiling spends the next window as well: that whole window is
+// refused, the wait named runs to its end, and the window after starts clean. Short of twice, the
+// next window is whole.
+func TestATokenLimitAtTwiceItsCeilingSpendsTheNextWindow(t *testing.T) {
+	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
+	under := limitedFixture(t, "total_tokens:1m:100", &clock)
+	if resp := under.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("first under a ceiling of 100 = %d: %s", resp.Code, resp.Body)
+	}
+	if resp := under.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "30" {
+		t.Fatalf("after 120 tokens on a ceiling of 100 = %d, Retry-After %q; want 429 to the end of this minute", resp.Code, resp.Header().Get("Retry-After"))
+	}
+	clock = clock.Add(time.Minute)
+	if resp := under.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("the minute after 120 on a ceiling of 100 = %d, want a whole window: %s", resp.Code, resp.Body)
+	}
+
+	clock = time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
+	f := limitedFixture(t, "total_tokens:1m:60", &clock)
+
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("first = %d: %s", resp.Code, resp.Body)
+	}
+	resp := f.post("/openai/v1/chat/completions", limitedBody)
+	if resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "90" || resp.Header().Get("X-Should-Retry") != "false" {
+		t.Fatalf("after 120 tokens on a ceiling of 60 = %d, Retry-After %q, X-Should-Retry %q; want 429 to the end of the next minute, and no retry",
+			resp.Code, resp.Header().Get("Retry-After"), resp.Header().Get("X-Should-Retry"))
+	}
+	clock = clock.Add(time.Minute)
+	resp = f.post("/openai/v1/chat/completions", limitedBody)
+	if resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "30" {
+		t.Fatalf("the minute after = %d, Retry-After %q; want 429, 30", resp.Code, resp.Header().Get("Retry-After"))
+	}
+	clock = clock.Add(time.Minute)
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("two minutes on = %d, want a clean window: %s", resp.Code, resp.Body)
 	}
 }
 
@@ -303,5 +346,129 @@ func TestAFallbackCountsOnItsOwnModel(t *testing.T) {
 	resp := f.post("/openai/v1/chat/completions", fallbackBody)
 	if resp.Code != http.StatusBadGateway || len(backup.bodies) != 1 {
 		t.Errorf("second = %d, backup dials = %d; want the primary's 502 and no dial past backup's limit", resp.Code, len(backup.bodies))
+	}
+}
+
+// limitCounts is every limit counter's count under "<kind>:<model>", a key's under "key:".
+func limitCounts(f *fixture) map[string]int64 {
+	counts := map[string]int64{}
+	for counter, count := range f.store.Limits {
+		parts := strings.Split(counter, ":")
+		if parts[0] == domain.HolderKey {
+			parts[2] = ""
+		}
+		counts[parts[0]+":"+parts[2]] += count
+	}
+	return counts
+}
+
+// overLimitFixture is a healthy primary and backup under these rows, on a clock that stands still.
+func overLimitFixture(t *testing.T, team, own string) (*fixture, *backupEngine) {
+	t.Helper()
+	f, backup := fallbackFixture(t, jsonEngine(`{`+usageObject+`}`))
+	teamRows, err := domain.ParseLimits(team)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownRows, err := domain.ParseKeyLimits(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.withKey(func(k *domain.KeyRecord) { k.Limits, k.KeyLimits = teamRows, ownRows })
+	now := func() time.Time { return time.Date(2026, 11, 28, 12, 0, 30, 0, time.UTC) }
+	f.handler = buildHandler(t, f.store, config.Config{}, 0, func(s *Services) {
+		s.Admission.Now, s.Metering.Now = now, now
+	})
+	return f, backup
+}
+
+// A model over its team's limit hands the request to the fallback the caller named, counted on
+// the fallback's row and not the first model's. With the fallback over too, or none named, the
+// refusal is the first model's.
+func TestAModelOverItsLimitMovesToAFallback(t *testing.T) {
+	f, backup := overLimitFixture(t, "requests:1m:1:qwen3-4b,requests:1m:1:backup", "")
+	const refused = "rate limit exceeded: 1 requests per 1m on qwen3-4b (team)"
+
+	if resp := f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK || len(backup.bodies) != 0 {
+		t.Fatalf("first = %d, backup dials = %d; want the model asked for", resp.Code, len(backup.bodies))
+	}
+	resp := f.post("/openai/v1/chat/completions", limitedBody)
+	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != refused {
+		t.Fatalf("over the limit with no fallback named = %d, %q; want the 429", resp.Code, message)
+	}
+	resp = f.post("/openai/v1/chat/completions", fallbackBody)
+	if resp.Code != http.StatusOK || resp.Header().Get("X-Grove-Fallback") != "backup" || len(backup.bodies) != 1 {
+		t.Fatalf("over the limit = %d, X-Grove-Fallback %q, backup dials = %d; want the fallback's answer",
+			resp.Code, resp.Header().Get("X-Grove-Fallback"), len(backup.bodies))
+	}
+	if counts := limitCounts(f); counts["team:qwen3-4b"] != 1 || counts["team:backup"] != 1 {
+		t.Errorf("counters = %v, want the moved request on backup alone", f.store.Limits)
+	}
+
+	resp = f.post("/openai/v1/chat/completions", fallbackBody)
+	message, _ := refusal(t, resp.Body.Bytes())
+	if resp.Code != http.StatusTooManyRequests || message != refused || resp.Header().Get("Retry-After") != "30" || len(backup.bodies) != 1 {
+		t.Errorf("both over = %d, %q, Retry-After %q, backup dials = %d; want the first model's 429 and no dial",
+			resp.Code, message, resp.Header().Get("Retry-After"), len(backup.bodies))
+	}
+}
+
+// A key's own limit counts every model together: a request a fallback took off a model over its
+// limit counts on it once, and a key at it is not let through to the fallback.
+func TestAKeysOwnLimitHoldsAcrossAMoveToAFallback(t *testing.T) {
+	f, backup := overLimitFixture(t, "requests:1m:1:qwen3-4b", "requests:1m:2")
+
+	for i, dials := range []int{0, 1} {
+		if resp := f.post("/openai/v1/chat/completions", fallbackBody); resp.Code != http.StatusOK || len(backup.bodies) != dials {
+			t.Fatalf("request %d = %d, backup dials = %d; want %d", i+1, resp.Code, len(backup.bodies), dials)
+		}
+	}
+	if counts := limitCounts(f); counts["key:"] != 2 {
+		t.Fatalf("counters = %v, want each request once on the key's row", f.store.Limits)
+	}
+	resp := f.post("/openai/v1/chat/completions", fallbackBody)
+	if counts := limitCounts(f); resp.Code != http.StatusTooManyRequests || len(backup.bodies) != 1 || counts["key:"] != 2 {
+		t.Errorf("third = %d, backup dials = %d, counters = %v; want 429, no dial and nothing counted",
+			resp.Code, len(backup.bodies), f.store.Limits)
+	}
+}
+
+// A key's own token row counts every model together, so one taken to twice its ceiling spends
+// that key's next window on every model, and no other key's.
+func TestAKeysTokenLimitAtTwiceItsCeilingSpendsItsNextWindow(t *testing.T) {
+	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
+	f := limitedFixture(t, "", &clock)
+	addModel(t, f, "other", jsonEngine(`{`+usageObject+`}`))
+	own, err := domain.ParseKeyLimits("total_tokens:1m:60")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.withKey(func(k *domain.KeyRecord) { k.KeyLimits = own })
+	twin := f.store.Keys[domain.SHA256Hex(secret)]
+	twin.KeyPrefix = "def456"
+	f.store.Keys[domain.SHA256Hex("twin-secret")] = twin
+	const otherBody, refused = `{"model":"other","messages":[]}`, "rate limit exceeded: 60 tokens per 1m (key)"
+
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("first = %d: %s", resp.Code, resp.Body)
+	}
+	resp := f.post("/openai/v1/chat/completions", otherBody)
+	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != refused || resp.Header().Get("Retry-After") != "90" {
+		t.Fatalf("another model after 120 tokens on the key's ceiling of 60 = %d, %q, Retry-After %q; want the key's 429 to the end of the next minute",
+			resp.Code, message, resp.Header().Get("Retry-After"))
+	}
+
+	clock = clock.Add(time.Minute)
+	resp = f.post("/openai/v1/chat/completions", otherBody)
+	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != refused || resp.Header().Get("Retry-After") != "30" {
+		t.Fatalf("the minute after, on another model = %d, %q, Retry-After %q; want the key's 429, 30", resp.Code, message, resp.Header().Get("Retry-After"))
+	}
+	if resp := f.post("/openai/v1/chat/completions", limitedBody, "Authorization", "Bearer twin-secret"); resp.Code != http.StatusOK {
+		t.Fatalf("another key of the team that minute = %d, want its own window: %s", resp.Code, resp.Body)
+	}
+
+	clock = clock.Add(time.Minute)
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("two minutes on = %d, want a clean window: %s", resp.Code, resp.Body)
 	}
 }

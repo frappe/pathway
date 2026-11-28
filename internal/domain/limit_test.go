@@ -138,10 +138,30 @@ func TestAMonthResetsOnTheFirst(t *testing.T) {
 func TestLimitDenialNamesTheLimitThatResetsLast(t *testing.T) {
 	at := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	denial := LimitDenial([]Over{
-		{Holder{Kind: HolderTeam, ID: "T-1", Model: "luna"}, Limit{LimitRequests, "1m", 200, ""}},
-		{Holder{Kind: HolderKey, ID: "abc", Model: "luna"}, Limit{LimitTokens, "1h", 50000, ""}},
+		{Holder: Holder{Kind: HolderTeam, ID: "T-1", Model: "luna"}, Limit: Limit{LimitRequests, "1m", 200, ""}},
+		{Holder: Holder{Kind: HolderKey, ID: "abc", Model: "luna"}, Limit: Limit{LimitTokens, "1h", 50000, ""}},
 	}, at)
 	if denial.Status != 429 || denial.Reason != "rate limit exceeded: 50000 tokens per 1h on luna (key)" || denial.RetryAfter != 3570 {
 		t.Errorf("denial = %+v", denial)
+	}
+}
+
+// A limit that ran over far enough to spend the window after is waited out to that window's end:
+// the rest of this one, and the whole of the next.
+func TestLimitDenialWaitsOutAWindowSpentByTheOneBefore(t *testing.T) {
+	team := Holder{Kind: HolderTeam, ID: "T-1", Model: "luna"}
+	cases := []struct {
+		window string
+		at     time.Time
+		wait   int
+	}{
+		{"1m", time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC), 30 + 60},
+		{"1M", time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC), (1 + 28) * 86400},
+	}
+	for _, tc := range cases {
+		over := Over{Holder: team, Limit: Limit{LimitTokens, tc.window, 300, ""}, Carried: true}
+		if denial := LimitDenial([]Over{over}, tc.at); denial.RetryAfter != tc.wait {
+			t.Errorf("%s: Retry-After = %d, want %d", tc.window, denial.RetryAfter, tc.wait)
+		}
 	}
 }
