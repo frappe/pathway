@@ -81,7 +81,7 @@ key at its ceiling is refused by each fallback in turn and gets its 429 all the 
 | Metrics | `requests` — counted as the request is admitted. `total_tokens` — prompt + completion as the answer reports them, cache reads included |
 | Windows | `1m` `1h` `1d` `1M`. They reset on the UTC clock (top of the minute, the hour, midnight, the 1st), not from the holder's first request |
 | Counter | `lim:<team\|key>:<id>:<model>:<metric>:<window>:<bucket>`, kept two windows. Bucket = `floor(unix / seconds)`, or `2026-10` for the month |
-| Refusal | 429 `rate limit exceeded: 200 requests per 1m on openai/gpt-6-luna (team)` (`rate_limit_error`), `Retry-After` = seconds to the window's end — the next window's, when this one reached twice its ceiling and so spent that too — and `X-Should-Retry: false` beside it when that is over two minutes away. Over several limits at once, the one that resets last is named, with whose it is |
+| Refusal | 429 `rate limit exceeded: 200 requests per 1m on openai/gpt-6-luna (team)` (`rate_limit_error`), `Retry-After` = seconds to the window's end — the next window's, when this one reached twice its ceiling and so spent that too — and `X-Should-Retry: false` beside it when that is over a minute away. Over several limits at once, the one that resets last is named, with whose it is |
 
 **Requests are exact, tokens are check-then-debit.** One Lua script reads every counter of both
 holders and, only when all have room, counts the request — so a refusal counts nothing, on either,

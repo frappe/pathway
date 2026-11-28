@@ -381,8 +381,8 @@ func runLimitSequence(t *testing.T, repos repository.Store, seed int64, steps in
 			t.Fatalf("%s: got %d %q Retry-After %q, want 429 %v Retry-After %d",
 				where, got.Code, message, got.Header().Get("Retry-After"), want.messages, want.retryAfter)
 		}
-		// A wait past two minutes is not one for a client's own retry to sit out.
-		if told := got.Header().Get("X-Should-Retry") == "false"; told != (want.retryAfter > 120) {
+		// A wait past a minute is not one for a client's own retry to sit out.
+		if told := got.Header().Get("X-Should-Retry") == "false"; told != (want.retryAfter > 60) {
 			t.Fatalf("%s: X-Should-Retry %q on a wait of %ds", where, got.Header().Get("X-Should-Retry"), want.retryAfter)
 		}
 	}

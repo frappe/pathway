@@ -136,8 +136,8 @@ func TestATokenLimitAtTwiceItsCeilingSpendsTheNextWindow(t *testing.T) {
 		t.Fatalf("first = %d: %s", resp.Code, resp.Body)
 	}
 	resp := f.post("/openai/v1/chat/completions", limitedBody)
-	if resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "90" || resp.Header().Get("X-Should-Retry") != "" {
-		t.Fatalf("after 120 tokens on a ceiling of 60 = %d, Retry-After %q, X-Should-Retry %q; want 429 to the end of the next minute, left to retry",
+	if resp.Code != http.StatusTooManyRequests || resp.Header().Get("Retry-After") != "90" || resp.Header().Get("X-Should-Retry") != "false" {
+		t.Fatalf("after 120 tokens on a ceiling of 60 = %d, Retry-After %q, X-Should-Retry %q; want 429 to the end of the next minute, and no retry",
 			resp.Code, resp.Header().Get("Retry-After"), resp.Header().Get("X-Should-Retry"))
 	}
 	clock = clock.Add(time.Minute)
