@@ -432,3 +432,43 @@ func TestAKeysOwnLimitHoldsAcrossAMoveToAFallback(t *testing.T) {
 			resp.Code, len(backup.bodies), f.store.Limits)
 	}
 }
+
+// A key's own token row counts every model together, so one taken to twice its ceiling spends
+// that key's next window on every model, and no other key's.
+func TestAKeysTokenLimitAtTwiceItsCeilingSpendsItsNextWindow(t *testing.T) {
+	clock := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
+	f := limitedFixture(t, "", &clock)
+	addModel(t, f, "other", jsonEngine(`{`+usageObject+`}`))
+	own, err := domain.ParseKeyLimits("total_tokens:1m:60")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.withKey(func(k *domain.KeyRecord) { k.KeyLimits = own })
+	twin := f.store.Keys[domain.SHA256Hex(secret)]
+	twin.KeyPrefix = "def456"
+	f.store.Keys[domain.SHA256Hex("twin-secret")] = twin
+	const otherBody, refused = `{"model":"other","messages":[]}`, "rate limit exceeded: 60 tokens per 1m (key)"
+
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("first = %d: %s", resp.Code, resp.Body)
+	}
+	resp := f.post("/openai/v1/chat/completions", otherBody)
+	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != refused || resp.Header().Get("Retry-After") != "90" {
+		t.Fatalf("another model after 120 tokens on the key's ceiling of 60 = %d, %q, Retry-After %q; want the key's 429 to the end of the next minute",
+			resp.Code, message, resp.Header().Get("Retry-After"))
+	}
+
+	clock = clock.Add(time.Minute)
+	resp = f.post("/openai/v1/chat/completions", otherBody)
+	if message, _ := refusal(t, resp.Body.Bytes()); resp.Code != http.StatusTooManyRequests || message != refused || resp.Header().Get("Retry-After") != "30" {
+		t.Fatalf("the minute after, on another model = %d, %q, Retry-After %q; want the key's 429, 30", resp.Code, message, resp.Header().Get("Retry-After"))
+	}
+	if resp := f.post("/openai/v1/chat/completions", limitedBody, "Authorization", "Bearer twin-secret"); resp.Code != http.StatusOK {
+		t.Fatalf("another key of the team that minute = %d, want its own window: %s", resp.Code, resp.Body)
+	}
+
+	clock = clock.Add(time.Minute)
+	if resp := f.post("/openai/v1/chat/completions", limitedBody); resp.Code != http.StatusOK {
+		t.Fatalf("two minutes on = %d, want a clean window: %s", resp.Code, resp.Body)
+	}
+}
